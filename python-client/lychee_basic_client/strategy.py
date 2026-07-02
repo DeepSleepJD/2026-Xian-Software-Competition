@@ -7,11 +7,16 @@ from .graph import Graph
 # main-car states where we are busy and should just let the engine run
 BUSY_STATES = {"PROCESSING", "VERIFYING", "FORCED_PASSING", "RESTING", "CONTESTING"}
 
-# Task base to chase: 90 fills the delivery/time bonus, 110 also grabs the top
-# milestone. Tasks sit right on our route and cost only a few frames each.
-TASK_BASE_TARGET = 110
+# Task base to chase: 90 fills the delivery/time bonus, 110 the top milestone;
+# a bit past that (task score caps at 180) still turns cheap on-route tasks into
+# points, and we have a lot of idle slack before the gate opens at rush.
+TASK_BASE_TARGET = 150
 # T06 (争马换乘) burns a horse on claim; skip unless we hold one.
 HORSE_KEYS = ("FAST_HORSE", "SHORT_HORSE")
+# Ice box raises delivery freshness (freshness score = floor(fresh/100*180)).
+# Grab a few on-route and spend them right before delivery to lock in freshness.
+ICE_BOX = "ICE_BOX"
+ICE_BOX_CAP = 3
 
 
 class Strategy:
@@ -97,6 +102,10 @@ class Strategy:
         # OBJECT_BUSY, so just keep retrying until it frees (no penalty).
         if node == self.gate_node:
             if me.get("verified"):
+                # spend ice boxes here (freshness is locked in at delivery, and
+                # S15 only allows wait/deliver/return) then step into the terminal
+                if me.get("resources", {}).get(ICE_BOX, 0) > 0 and me.get("freshness", 100) < 100:
+                    return [M.use_resource(ICE_BOX)]
                 return [M.move(self.terminal_node)]
             if phase == "RUSH":
                 return [M.verify_gate()]
@@ -118,8 +127,20 @@ class Strategy:
             self._task_attempts[tid] = self._task_attempts.get(tid, 0) + 1
             return [M.claim_task(tid)]
 
+        # opportunistic: stock ice boxes if this node has any (no detour)
+        if self._should_claim_ice(node, nodes_by_id, me):
+            return [M.claim_resource(node, ICE_BOX)]
+
         # otherwise advance along the shortest route toward the gate
         return self._advance(node, nodes_by_id)
+
+    def _should_claim_ice(
+        self, node: str, nodes_by_id: dict[str, Any], me: dict[str, Any]
+    ) -> bool:
+        if me.get("resources", {}).get(ICE_BOX, 0) >= ICE_BOX_CAP:
+            return False
+        stock = nodes_by_id.get(node, {}).get("resourceStock", {}) or {}
+        return stock.get(ICE_BOX, 0) > 0
 
     def _account_tasks(self, tasks: list[dict[str, Any]]) -> None:
         """Tally task-base from tasks the engine reports as completed by us."""
