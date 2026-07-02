@@ -10,3 +10,6 @@ client/logs/
 # 调测包二进制（server/demo exe + 500MB 回放 UI，由官方 ZIP 分发，不入库；
 # 同目录的任务书/协议/地图等文档正常纳入版本管理）
 refs/debug-kit-v1/arena/
+
+# 提交包产物（tools/package.py 随时可重建）
+dist/
