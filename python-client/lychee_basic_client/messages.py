@@ -101,3 +101,8 @@ def forced_pass(target_node_id: str) -> dict[str, Any]:
 
 def window_card(contest_id: str, card: str) -> dict[str, Any]:
     return {"action": "WINDOW_CARD", "contestId": contest_id, "card": card}
+
+
+def rush_protect() -> dict[str, Any]:
+    """护果令: 30 frames of x0.2 freshness loss (rush tactic, once per match)."""
+    return {"action": "RUSH_PROTECT"}

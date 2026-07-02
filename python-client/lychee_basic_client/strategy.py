@@ -122,6 +122,13 @@ class Strategy:
                     return [M.use_resource(ICE_BOX)]
                 return [self._mv(self.terminal_node)]
             if phase == "RUSH":
+                # spend our one rush tactic on 护果令 (RUSH_PROTECT) here, before
+                # verifying: it cuts freshness loss to x0.2 for 30 frames, which
+                # covers verify + the hop to S15 + delivery (and the 4th weather
+                # window at 440-480, often 酷暑 x1.5). It costs no fruit and speed
+                # tactics are useless to us (delivery is gated by the rush frame).
+                if me.get("rushTacticUsedCount", 0) == 0 and me.get("freshness", 100) < 100:
+                    return [M.rush_protect()]
                 return [M.verify_gate()]
             return []  # wait for the rush phase to open the gate
 
