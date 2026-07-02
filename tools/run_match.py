@@ -110,10 +110,18 @@ def main() -> int:
     parser.add_argument("--round-ms", type=int, default=50, help="每帧动作等待毫秒数（正式为500）")
     parser.add_argument("--wait-sec", type=int, default=300, help="等待对局结束的超时秒数")
     parser.add_argument("--no-ui", action="store_true", help="出分后不拉起回放UI")
+    parser.add_argument("--ui-only", action="store_true", help="不跑对局，只同步上一局回放并拉起回放UI")
     parser.add_argument("--client-cmd", help="玩家1001命令模板，占位符 {player_id} {host} {port} {name}")
     parser.add_argument("--demo-cmd", help="玩家2002命令模板，同上")
     parser.add_argument("--match-id", default="local-debug-l1")
     args = parser.parse_args()
+
+    if args.ui_only:
+        synced = sync_replay_to_ui()
+        print(f"回放已同步到 UI: {synced}" if synced else "[WARN] server/replay.txt 不存在，UI 里是上次已同步的回放")
+        print("拉起回放 UI（http://127.0.0.1:9091/litchi_delivery_replay/）...")
+        launch_ui(clean_env())
+        return 0
 
     if not SERVER_EXE.exists():
         print(f"[ERROR] 找不到裁判服务端: {SERVER_EXE}")
