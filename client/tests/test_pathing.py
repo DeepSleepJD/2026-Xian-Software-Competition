@@ -62,6 +62,27 @@ class ShortestPathTests(unittest.TestCase):
         self.assertLess(frames, 500)
         self.assertGreater(frames, 200)
 
+    def test_choke_nodes_from_start_to_terminal(self) -> None:
+        chokepoints = pathing.choke_nodes(self.state, "S01", "S15")
+        self.assertIn("S10", chokepoints)
+        self.assertIn("S14", chokepoints)
+        self.assertNotIn("S04", chokepoints)
+
+    def test_enemy_guard_adds_path_penalty(self) -> None:
+        base_path = ["S09", "S10", "S11", "S12", "S13", "S14", "S15"]
+        base = pathing.path_frames(self.state, base_path)
+
+        guarded = make_state()
+        guarded.update_inquire({
+            "round": 320,
+            "players": [{"playerId": 1001, "teamId": "RED", "state": "IDLE",
+                         "currentNodeId": "S09", "goodFruit": 90, "badFruit": 2}],
+            "nodes": [{"nodeId": "S10", "guard": {"active": True, "ownerTeamId": "BLUE",
+                                                   "defense": 6, "initialDefense": 6,
+                                                   "ageRound": 0}}],
+        })
+        self.assertEqual(base + 1, pathing.path_frames(guarded, base_path))
+
 
 if __name__ == "__main__":
     unittest.main()

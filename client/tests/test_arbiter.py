@@ -36,16 +36,16 @@ class ArbiterTests(unittest.TestCase):
         self.assertEqual(1, len(actions))
         self.assertEqual("SQUAD_SCOUT", actions[0]["action"])
 
-    def test_window_card_one_per_contest(self) -> None:
+    def test_window_card_capped_at_one_per_frame(self) -> None:
         card = lambda cid, c: {"action": "WINDOW_CARD", "contestId": cid, "card": c}
         intents = [
             Intent(kind="a", priority=3, actions=[card("C1", "ATTACK")]),
             Intent(kind="b", priority=2, actions=[card("C1", "DEFEND")]),  # 同窗口，丢弃
-            Intent(kind="c", priority=1, actions=[card("C2", "ABSTAIN")]),  # 不同窗口，放行
+            Intent(kind="c", priority=1, actions=[card("C2", "ABSTAIN")]),  # 同帧窗口额度已占，丢弃
         ]
         actions = merge_intents(intents)
-        self.assertEqual(2, len(actions))
-        self.assertEqual({"C1", "C2"}, {a["contestId"] for a in actions})
+        self.assertEqual(1, len(actions))
+        self.assertEqual("C1", actions[0]["contestId"])
         self.assertEqual("ATTACK", actions[0]["card"])
 
     def test_empty_intents_yield_heartbeat(self) -> None:

@@ -485,15 +485,18 @@ class Event:
     event_id: str = ""
     type: str = ""
     round: int = 0
+    error_code: str = ""
     payload: dict = field(default_factory=dict)
 
     @staticmethod
     def from_dict(d: dict) -> "Event":
+        payload = dict(d.get("payload") or {})
         return Event(
             event_id=d.get("eventId", ""),
             type=d.get("type", ""),
             round=d.get("round", 0),
-            payload=dict(d.get("payload") or {}),
+            error_code=d.get("errorCode") or payload.get("errorCode") or "",
+            payload=payload,
         )
 
 
@@ -641,10 +644,58 @@ class GameState:
     def my_events(self) -> list[Event]:
         return [e for e in self.events if e.payload.get("playerId") == self.player_id]
 
+    def my_state(self) -> str:
+        return self.me.state
+
+    @property
+    def my_guard_points(self) -> int:
+        return self.me.guard_action_point
+
+    @property
+    def my_good(self) -> int:
+        return self.me.good_fruit
+
+    @property
+    def my_bad(self) -> int:
+        return self.me.bad_fruit
+
+    def enemy_guard_at(self, node_id: str) -> Guard | None:
+        ns = self.node_states.get(node_id)
+        if ns is None or ns.guard is None:
+            return None
+        guard = ns.guard
+        my_team = self.my_team_id or self.me.team_id
+        if guard.active and guard.defense > 0 and guard.owner_team_id and guard.owner_team_id != my_team:
+            return guard
+        return None
+
+    def blocked_by_guard(self) -> str | None:
+        """Return the likely target node when our last MOVE was blocked by a guard."""
+        saw_block = False
+        for e in self.my_events():
+            if e.type == "ACTION_REJECTED" and e.error_code == "MOVE_BLOCKED_BY_GUARD":
+                saw_block = True
+                target = e.payload.get("targetNodeId") or e.payload.get("toNodeId")
+                if target:
+                    return target
+        for r in self.my_action_results():
+            if r.action == "MOVE" and not r.accepted and r.error_code == "MOVE_BLOCKED_BY_GUARD":
+                saw_block = True
+        if not saw_block:
+            return None
+        if self.me.next_node_id:
+            return self.me.next_node_id
+        guarded = [node_id for node_id, _ in self.neighbors(self.me.current_node_id)
+                   if self.enemy_guard_at(node_id) is not None]
+        return guarded[0] if len(guarded) == 1 else None
+
     def my_contests(self) -> list[Contest]:
         """本方在场且未结算、未被抑制的窗口。"""
         return [c for c in self.contests
                 if c.involves(self.player_id) and not c.resolved and c.status != "SUPPRESSED"]
+
+    def my_open_contests(self) -> list[Contest]:
+        return self.my_contests()
 
     def neighbors(self, node_id: str) -> list[tuple[str, Edge]]:
         """相邻可达 (节点, 边) 列表，尊重单向边。"""

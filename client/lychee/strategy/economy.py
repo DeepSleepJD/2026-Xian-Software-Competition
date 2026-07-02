@@ -37,6 +37,8 @@ ICE_BOX_VALUE = 18.0          # +10 鲜度 ≈ +18 分（策略文档定量）
 DETOUR_COST_PER_FRAME = 0.12  # 绕路 1 帧的点数成本：移动鲜度损耗 ~0.055/帧 ×
                               # 鲜度边际价值 ~1.8 分 + 风险余量（时间本身不值钱，洞察#3）
 TARGET_STICKINESS = 2.0       # 换目标需净值优势超过此值（防止停靠间目标抖动）
+TARGET_SWITCH_RATIO = 0.20    # 已承诺目标存在时，新目标需额外领先 20%
+BACKTRACK_MARGIN = 2.0        # 刚到站即原路折返需额外覆盖一条边成本
 ICE_BOX_MAX_HOLD = 2          # 库存到量后不再追领（本图第 3 个在 S06 支线，
                               # 实账往返~118帧鲜度+用时亏损 > 冰鉴收益，正确放弃）
 RESOURCE_CLAIM_FRAMES = 2     # 实测资源领取读条帧数（估值用，非规则常量）
@@ -138,6 +140,8 @@ class EconomyStrategy(Strategy):
         self._pending_claim = ""                # 上一帧提议的领取目标 key
         self._move_rejects = 0
         self._cur_target_key = ""
+        self._last_stationary_node = ""
+        self._previous_stationary_node = ""
 
     def propose(self, state: GameState) -> list[Intent]:
         me = state.me
@@ -155,6 +159,10 @@ class EconomyStrategy(Strategy):
         cur = me.current_node_id
         if not cur:
             return []
+        if cur != self._last_stationary_node:
+            if self._last_stationary_node:
+                self._previous_stationary_node = self._last_stationary_node
+            self._last_stationary_node = cur
 
         intents: list[Intent] = []
         eco = self._propose_economy(state, cur)
@@ -271,7 +279,7 @@ class EconomyStrategy(Strategy):
             cost = max(0, to + cand.proc_frames + back - base_frames)
             return cand.marginal_value(raw) - cost * DETOUR_COST_PER_FRAME
 
-        best: tuple[float, int, _Target, str] | None = None
+        scored: list[tuple[float, int, _Target, str]] = []
         for cand, spot, to_frames, done_round in feasible:
             back = from_spot[spot].get(anchor, (0.0, _INF))[1]
             if done_round + back > deadline:
@@ -296,13 +304,18 @@ class EconomyStrategy(Strategy):
                 follow = max(follow, c2.marginal_value(raw + cand.raw_score)
                              - cost2 * DETOUR_COST_PER_FRAME)
             plan = net + follow
-            if cand.key == self._cur_target_key:
-                plan += TARGET_STICKINESS
-            # 同分取更近的（先落袋近处，降低被对手截胡的风险）
-            if best is None or plan > best[0] or (plan == best[0] and to_frames < best[1]):
-                best = (plan, to_frames, cand, spot)
-        if best is None:
+            if self._is_immediate_backtrack(state, cur, spot):
+                plan -= self._backtrack_penalty(state, cur)
+            scored.append((plan, to_frames, cand, spot))
+        if not scored:
             return None, ""
+        # 同分取更近的（先落袋近处，降低被对手截胡的风险）
+        best = max(scored, key=lambda item: (item[0], -item[1]))
+        current = next((item for item in scored if item[2].key == self._cur_target_key), None)
+        if current is not None and best[2].key != current[2].key:
+            threshold = max(TARGET_STICKINESS, abs(current[0]) * TARGET_SWITCH_RATIO)
+            if best[0] < current[0] + threshold:
+                best = current
         return best[2], best[3]
 
     def _can_linger(self, state: GameState, cur: str) -> bool:
@@ -317,6 +330,19 @@ class EconomyStrategy(Strategy):
             return False
         return state.round + pathing.path_frames(state, p) <= \
             state.duration_round - ENDGAME_MARGIN
+
+    def _is_immediate_backtrack(self, state: GameState, cur: str, spot: str) -> bool:
+        if not self._previous_stationary_node or spot == cur:
+            return False
+        path = pathing.shortest_path(state, cur, spot)
+        return bool(path and len(path) >= 2 and path[1] == self._previous_stationary_node)
+
+    def _backtrack_penalty(self, state: GameState, cur: str) -> float:
+        for node_id, edge in state.neighbors(cur):
+            if node_id == self._previous_stationary_node:
+                frames = pathing.edge_frames(edge.distance, edge.route_type)
+                return frames * DETOUR_COST_PER_FRAME + BACKTRACK_MARGIN
+        return BACKTRACK_MARGIN
 
     def _candidates(self, state: GameState, cur: str) -> list[_Target]:
         me = state.me

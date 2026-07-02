@@ -31,10 +31,73 @@ def edge_frames(distance: int, route_type: str, move_per_frame: int = BASE_MOVE_
     return ceil(need / max(move_per_frame, 1))
 
 
+def _reachable_without(state: GameState, src: str, dst: str, blocked: str) -> bool:
+    if src == dst:
+        return True
+    seen = {blocked}
+    stack = [src]
+    while stack:
+        node = stack.pop()
+        if node in seen:
+            continue
+        if node == dst:
+            return True
+        seen.add(node)
+        for nxt, _ in state.neighbors(node):
+            if nxt not in seen:
+                stack.append(nxt)
+    return False
+
+
+def choke_nodes(state: GameState, src: str, dst: str) -> set[str]:
+    """Nodes that every route from src to dst must pass through, excluding endpoints."""
+    if src not in state.nodes or dst not in state.nodes:
+        return set()
+    if not _reachable_without(state, src, dst, ""):
+        return set()
+    out: set[str] = set()
+    for node_id in state.nodes:
+        if node_id in (src, dst):
+            continue
+        if not _reachable_without(state, src, dst, node_id):
+            out.add(node_id)
+    return out
+
+
+def _guard_weathering_frames(state: GameState, node_id: str, defense: int, age: int, initial: int) -> int:
+    node = state.nodes.get(node_id)
+    first = 45 if node and node.node_type == "KEY_PASS" and initial >= 4 else 30
+    interval = 30
+    age = max(0, age)
+    if age < first:
+        next_loss = first - age
+    else:
+        elapsed = (age - first) % interval
+        next_loss = interval - elapsed if elapsed else interval
+    return next_loss + max(0, defense - 1) * interval
+
+
+def _guard_penalty_frames(state: GameState, to_node: str) -> int:
+    guard = state.enemy_guard_at(to_node)
+    if guard is None:
+        return 0
+    attack = min(2, state.my_bad) * 3 + min(2, state.my_good) * 2
+    if attack >= guard.defense:
+        return 1
+    if attack > 0:
+        return 6
+    return _guard_weathering_frames(
+        state, to_node, int(guard.defense), int(guard.age_round), int(guard.initial_defense))
+
+
 def _step_cost(state: GameState, edge, to_node: str) -> tuple[float, int]:
     """走一条边并（如需）完成目标站固定处理的 (鲜度损耗, 帧数)。"""
     frames = edge_frames(edge.distance, edge.route_type)
     fresh = frames * ROUTE_FRESHNESS.get(edge.route_type, _UNKNOWN_FRESHNESS)
+    guard_frames = _guard_penalty_frames(state, to_node)
+    if guard_frames:
+        frames += guard_frames
+        fresh += guard_frames * STATIONARY_FRESHNESS
     proc = state.process_nodes.get(to_node)
     if proc:
         frames += proc.process_round

@@ -175,5 +175,62 @@ class InquireParsingTests(unittest.TestCase):
         self.assertFalse(g.active)  # 无归属/无防守 → 推导为不活跃
 
 
+COMBAT_START = {
+    "matchId": "combat-state-test",
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                {"playerId": 2002, "teamId": "BLUE", "name": "op"}],
+    "nodes": [{"nodeId": "S09"}, {"nodeId": "S10"}, {"nodeId": "S15", "terminal": True}],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "S09", "toNodeId": "S10", "routeType": "ROAD", "distance": 1},
+        {"edgeId": "E2", "fromNodeId": "S10", "toNodeId": "S15", "routeType": "ROAD", "distance": 1},
+    ],
+    "map": {"gameplay": {"roles": {"terminalNodeIds": ["S15"]}}},
+}
+
+
+class CombatHelperTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(COMBAT_START)
+
+    def test_enemy_guard_and_blocked_target_helpers(self) -> None:
+        self.state.update_inquire({
+            "round": 352,
+            "players": [{"playerId": MY_ID, "teamId": "RED", "state": "IDLE",
+                         "currentNodeId": "S09", "goodFruit": 98, "badFruit": 2,
+                         "guardActionPoint": 4},
+                        {"playerId": 2002, "teamId": "BLUE", "state": "IDLE",
+                         "currentNodeId": "S10"}],
+            "nodes": [{"nodeId": "S10", "guard": {"active": True, "ownerTeamId": "BLUE",
+                                                   "defense": 6, "initialDefense": 6}}],
+            "events": [{"eventId": "E", "type": "ACTION_REJECTED", "round": 351,
+                        "payload": {"playerId": MY_ID, "errorCode": "MOVE_BLOCKED_BY_GUARD"}}],
+            "actionResults": [{"round": 351, "playerId": MY_ID, "action": "MOVE",
+                               "accepted": False, "errorCode": "MOVE_BLOCKED_BY_GUARD"}],
+        })
+        guard = self.state.enemy_guard_at("S10")
+        self.assertIsNotNone(guard)
+        self.assertEqual(6, guard.defense)
+        self.assertEqual("S10", self.state.blocked_by_guard())
+        self.assertEqual("IDLE", self.state.my_state())
+        self.assertEqual(4, self.state.my_guard_points)
+        self.assertEqual(98, self.state.my_good)
+        self.assertEqual(2, self.state.my_bad)
+
+    def test_my_open_contests_filters_resolved_and_suppressed(self) -> None:
+        self.state.update_inquire({
+            "round": 10,
+            "players": [{"playerId": MY_ID, "teamId": "RED", "state": "CONTESTING"}],
+            "contests": [
+                {"contestId": "C1", "redPlayerId": MY_ID, "bluePlayerId": 2002},
+                {"contestId": "C2", "redPlayerId": MY_ID, "bluePlayerId": 2002,
+                 "resolved": True},
+                {"contestId": "C3", "redPlayerId": MY_ID, "bluePlayerId": 2002,
+                 "status": "SUPPRESSED"},
+            ],
+        })
+        self.assertEqual(["C1"], [c.contest_id for c in self.state.my_open_contests()])
+
+
 if __name__ == "__main__":
     unittest.main()
