@@ -71,8 +71,12 @@ class Graph:
         loss += self.process_rounds.get(dst, 0) * IDLE_FRESHNESS_LOSS
         return loss
 
-    def _dijkstra(self, src: str) -> tuple[dict[str, float], dict[str, str]]:
-        """Min freshness-cost from src to every node (incl. mandatory process waits)."""
+    def _dijkstra(
+        self, src: str, avoid: Optional[set] = None
+    ) -> tuple[dict[str, float], dict[str, str]]:
+        """Min freshness-cost from src to every node (incl. mandatory process waits).
+        Nodes in `avoid` (other than src) are treated as impassable."""
+        avoid = avoid or set()
         dist: dict[str, float] = {src: 0.0}
         prev: dict[str, str] = {}
         pq: list[tuple[float, str]] = [(0.0, src)]
@@ -81,6 +85,8 @@ class Graph:
             if d > dist.get(u, math.inf):
                 continue
             for v, rt, dd in self.adj.get(u, []):
+                if v in avoid:
+                    continue
                 nd = d + self._edge_cost(v, rt, dd)
                 if nd < dist.get(v, math.inf):
                     dist[v] = nd
@@ -88,11 +94,13 @@ class Graph:
                     heapq.heappush(pq, (nd, v))
         return dist, prev
 
-    def shortest_path(self, src: str, dst: str) -> Optional[list[str]]:
+    def shortest_path(
+        self, src: str, dst: str, avoid: Optional[set] = None
+    ) -> Optional[list[str]]:
         """Least-freshness-loss path as a node list, or None if unreachable."""
         if src == dst:
             return [src]
-        dist, prev = self._dijkstra(src)
+        dist, prev = self._dijkstra(src, avoid)
         if dst not in dist:
             return None
         path = [dst]
@@ -108,8 +116,8 @@ class Graph:
         dist, _ = self._dijkstra(src)
         return dist.get(dst, math.inf)
 
-    def next_hop(self, src: str, dst: str) -> Optional[str]:
-        path = self.shortest_path(src, dst)
+    def next_hop(self, src: str, dst: str, avoid: Optional[set] = None) -> Optional[str]:
+        path = self.shortest_path(src, dst, avoid)
         if path and len(path) >= 2:
             return path[1]
         return None

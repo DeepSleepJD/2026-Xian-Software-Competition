@@ -127,7 +127,10 @@ class Strategy:
             self._saw_processing_at = None
             self._guard_blocked.discard(node)  # we're moving, no longer blocked here
             target = me.get("nextNodeId") or self.graph.next_hop(node, self.gate_node)
-            return [self._mv(target)] if target else []
+            # if the far end is an enemy guard, FORCED_PASS it (opens a PASS window
+            # our card policy plays) instead of re-issuing MOVE that just gets
+            # rejected forever -- the bug that let a gate/choke guard 0-score us.
+            return [self._step_to(target, nodes_by_id)] if target else []
 
         # busy finishing something server-side: don't interrupt
         if state in BUSY_STATES:
@@ -327,26 +330,28 @@ class Strategy:
     def _advance(
         self, node: str, nodes_by_id: dict[str, Any], dest: Optional[str] = None
     ) -> list[dict[str, Any]]:
-        """Step toward dest (default: the gate); force through a road obstacle /
-        enemy guard on the next hop."""
-        nxt = self.graph.next_hop(node, dest or self.gate_node)
+        """Step toward dest (default: the gate). Prefer a route that detours around
+        known enemy-guard nodes; if the guard sits on the only way through (an
+        end-game funnel), force through it instead."""
+        goal = dest or self.gate_node
+        nxt = self.graph.next_hop(node, goal, avoid=self._guard_blocked)
+        if nxt is None:
+            # every route to the goal passes a guarded node -> go straight and
+            # force through it
+            nxt = self.graph.next_hop(node, goal)
         if not nxt:
             return []
-        tgt = nodes_by_id.get(nxt, {})
-        if tgt.get("hasObstacle"):
-            # FORCED_PASS a pure road obstacle: it creates NO contest window
-            # (task book 5.4.1), so it can't be dragged into a draw-retry loop
-            # the way CLEAR can when the opponent contests the same obstacle.
-            # It only costs an 8-frame time tax (refunded if the obstacle is
-            # cleared mid-pass) and keeps our good fruit. The rare
-            # FORCED_PASS_REPEAT on two obstacles in a row is a harmless
-            # business reject (no penalty) that self-resolves.
-            return [M.forced_pass(nxt)]
-        if nxt in self._guard_blocked:
-            # an enemy guard is blocking the only way forward: FORCED_PASS opens
-            # a PASS window which our card policy then plays to get through.
-            return [M.forced_pass(nxt)]
-        return [self._mv(nxt)]
+        return [self._step_to(nxt, nodes_by_id)]
+
+    def _step_to(self, target: str, nodes_by_id: dict[str, Any]) -> dict[str, Any]:
+        """One hop toward target: FORCED_PASS a road obstacle or an enemy guard
+        (no contest window for a pure obstacle; a PASS window for a guard, which
+        our card policy then plays), else a normal MOVE."""
+        if nodes_by_id.get(target, {}).get("hasObstacle"):
+            return M.forced_pass(target)
+        if target in self._guard_blocked:
+            return M.forced_pass(target)
+        return self._mv(target)
 
     def _mv(self, target: str) -> dict[str, Any]:
         """Emit a MOVE, remembering the target so we can detect if it's blocked."""
