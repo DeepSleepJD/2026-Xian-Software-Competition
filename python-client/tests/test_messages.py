@@ -1,6 +1,6 @@
 import unittest
 
-from lychee_basic_client.messages import heartbeat_action, move_action
+from lychee_basic_client.messages import action_message, heartbeat_action, move
 
 
 class MessageTests(unittest.TestCase):
@@ -18,7 +18,7 @@ class MessageTests(unittest.TestCase):
             heartbeat_action("match-1", 7, 1006),
         )
 
-    def test_move_action_uses_target_node_id(self) -> None:
+    def test_action_message_wraps_move_builder(self) -> None:
         self.assertEqual(
             {
                 "msg_name": "action",
@@ -34,7 +34,7 @@ class MessageTests(unittest.TestCase):
                     ],
                 },
             },
-            move_action("match-1", 7, 1006, "S10"),
+            action_message("match-1", 7, 1006, [move("S10")]),
         )
 
 

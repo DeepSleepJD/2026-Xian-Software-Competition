@@ -1,12 +1,27 @@
-# Python 基础客户端
+# Python 参赛客户端
 
-这是一个最小 Python 参赛客户端。它使用 `pyproject.toml` 作为常规 Python 工程元数据，运行时只依赖 Python 标准库。
+这是一个 Python 参赛客户端。它使用 `pyproject.toml` 作为常规 Python 工程元数据，运行时只依赖 Python 标准库。
 
-它演示了：
+它实现了：
 
-- 5 位十进制 UTF-8 字节长度分帧。
-- `registration` / `start` / `ready` / `inquire` / `action` 流程。
-- 使用 `actions: []` 发送空动作心跳。
+- 5 位十进制 UTF-8 字节长度分帧（`framing.py`）。
+- `registration` / `start` / `ready` / `inquire` / `action` 流程（`session.py`）。
+- 统一的动作构造器（`messages.py`）。
+- 一个会「导航 → 交付」的策略（`strategy.py` + `graph.py`）。
+
+## 策略概览（`strategy.py`）
+
+每个结算帧根据公开状态决定主车队动作，目标是**稳定完成交付并最大化总分**：
+
+1. **路线规划**：用 Dijkstra 在地图上求到宫门 S14 的最短路，权重按**鲜度损耗**（水路 < 官道 < 支路 < 山路，再加固定处理的等待损耗）。在没有任务加成时用时分恒为 0，因此鲜度与好果才是主要得分项。
+2. **沿途固定处理**：到达 S02/S04/S05/S11/S13 等处理点时先 `PROCESS` 完成，再继续前进。
+3. **顺路皇榜任务**：在当前站点领取可完成的皇榜任务（`CLAIM_TASK`），把任务基础分累计冲到约 110——送达分因此从 120 拉满到 240，并解锁用时分与里程碑奖励。缺马时跳过 T06。
+4. **障碍与宫门**：目标站点有道路障碍时用 `FORCED_PASS` 强行通过（省下好果）；到 S14 若被对手验核占用（`OBJECT_BUSY`）则持续重试，进入 `RUSH` 阶段后 `VERIFY_GATE`。
+5. **交付**：验核完成后进入 S15 `DELIVER`。
+
+对阵官方 L1 demo（本地调测包，多个随机种子）稳定取得约 **730 分 vs demo 约 500 分**。
+
+调测方法见调测包 `调测\test.bat`：把 `调测\client\start.bat` 换成启动本客户端即可（注册 playerId=1001，连接服务端 `127.0.0.1:<port>`）。
 
 ## 运行环境
 

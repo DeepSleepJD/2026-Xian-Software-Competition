@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+build/
+dist/
+
+# Contest debug kit (large binaries: server/demo exe, WebGL UI, replays) — not source
+调测包及赛题相关文档_V1/
