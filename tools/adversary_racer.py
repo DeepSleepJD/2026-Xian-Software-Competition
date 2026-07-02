@@ -44,8 +44,13 @@ PRIORITY_DELIVERY = 100
 _INF = 10 ** 9
 
 
+PREFER_ROUTE = ""   # 非空时偏好该路线类型(ROAD/WATER/MOUNTAIN)，其他路线加惩罚
+_PREFER_PENALTY = 100000
+
+
 def fast_path(state: GameState, src: str, dst: str) -> list[str] | None:
-    """帧数最短路（只按到站帧数，含天气/障碍通行税；不看鲜度）。"""
+    """帧数最短路（只按到站帧数，含天气/障碍通行税；不看鲜度）。
+    PREFER_ROUTE 非空时对非偏好路线边加大惩罚，用于强制陪练走某条主线（复现争夺）。"""
     if src == dst:
         return [src]
     dist: dict[str, int] = {src: 0}
@@ -67,6 +72,8 @@ def fast_path(state: GameState, src: str, dst: str) -> list[str] | None:
             if nxt in seen:
                 continue
             step = pathing.edge_frames_for_state(state, edge)
+            if PREFER_ROUTE and edge.route_type != PREFER_ROUTE and edge.route_type != "BRANCH":
+                step += _PREFER_PENALTY
             proc = state.process_nodes.get(nxt)
             if proc:
                 step += proc.process_round
@@ -250,7 +257,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("port", type=int)
     parser.add_argument("--stagger", type=int, default=1,
                         help="起手错拍帧数，破可争夺站点镜像死锁（默认 1）")
+    parser.add_argument("--prefer-route", default="",
+                        help="偏好路线类型 ROAD/WATER/MOUNTAIN（复现同路争夺）")
     args = parser.parse_args(argv)
+
+    global PREFER_ROUTE
+    PREFER_ROUTE = args.prefer_route.upper()
 
     conn = Connection.open(args.host, args.port)
     try:
