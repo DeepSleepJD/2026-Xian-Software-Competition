@@ -30,18 +30,21 @@ class MovementStrategy:
 
     def choose_action(self, data: dict[str, Any]) -> list[dict[str, Any]]:
         self._update_map(data)
-        self._remember_rejected_payload(data)
 
         player = self._find_player(data.get("players", []))
         if not player:
             return []
+
+        current_node_id = player.get("currentNodeId")
+        if isinstance(current_node_id, str):
+            self._remember_current_node(current_node_id)
+        self._remember_process_events(data)
 
         window_action = self._window_card_action(data, player)
         if window_action:
             return [window_action]
 
         state = player.get("state")
-        current_node_id = player.get("currentNodeId")
         waiting_action = self._waiting_resume_action(player)
         if waiting_action:
             return [waiting_action]
@@ -49,7 +52,6 @@ class MovementStrategy:
         if not self._can_plan_from_node(player) or not isinstance(current_node_id, str):
             return []
 
-        self._remember_current_node(current_node_id)
         if self._can_deliver(player, current_node_id):
             return [{"action": "DELIVER"}]
 
@@ -316,15 +318,25 @@ class MovementStrategy:
                 best_cost = cost
         return best_action
 
-    def _remember_rejected_payload(self, data: dict[str, Any]) -> None:
+    def _remember_process_events(self, data: dict[str, Any]) -> None:
         for event in data.get("events", []) or []:
-            if not isinstance(event, dict) or event.get("type") != "ACTION_REJECTED":
+            if not isinstance(event, dict):
                 continue
+            event_type = event.get("type")
             payload = event.get("payload")
-            if isinstance(payload, dict) and payload.get("playerId") == self._player_id:
+            if not isinstance(payload, dict):
+                payload = event
+            if payload.get("playerId") != self._player_id:
+                continue
+            target_node_id = payload.get("targetNodeId")
+            if not isinstance(target_node_id, str):
+                continue
+            if event_type == "PROCESS_COMPLETE":
+                self._processed_nodes.add(target_node_id)
+            elif event_type == "ACTION_REJECTED":
                 self._last_rejected_payload = payload
-                if payload.get("errorCode") == "PROCESS_REQUIRED":
-                    self._processed_nodes.discard(str(payload.get("targetNodeId", "")))
+                if payload.get("errorCode") in {"PROCESS_REQUIRED", "OBJECT_BUSY"}:
+                    self._processed_nodes.discard(target_node_id)
 
     def _remember_current_node(self, current_node_id: str) -> None:
         if current_node_id != self._last_current_node_id:
@@ -338,7 +350,6 @@ class MovementStrategy:
         node = self._nodes_by_id.get(current_node_id)
         if not node or not node.get("processType") or node.get("processType") == "VERIFY":
             return False
-        self._processed_nodes.add(current_node_id)
         return True
 
     def _can_deliver(self, player: dict[str, Any], current_node_id: str) -> bool:

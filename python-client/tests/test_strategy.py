@@ -617,6 +617,90 @@ class MovementStrategyTests(unittest.TestCase):
 
         self.assertEqual([{"action": "PROCESS", "targetNodeId": "S02"}], action)
 
+    def test_process_node_retries_after_object_busy_rejection(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"gateNodeId": "S14", "terminalNodeIds": ["S15"]}}},
+                "nodes": [
+                    {"nodeId": "S13", "processType": "PALACE_TRANSFER", "hasObstacle": False},
+                    {"nodeId": "S14", "processType": "VERIFY", "hasObstacle": False},
+                    {"nodeId": "S15", "terminal": True, "hasObstacle": False},
+                ],
+                "edges": [
+                    {"edgeId": "E09", "fromNodeId": "S13", "toNodeId": "S14"},
+                    {"edgeId": "E10", "fromNodeId": "S14", "toNodeId": "S15"},
+                ],
+            }
+        )
+
+        first = strategy.choose_action(
+            {"players": [{"playerId": 1001, "state": "IDLE", "currentNodeId": "S13", "verified": False}]}
+        )
+        second = strategy.choose_action(
+            {
+                "events": [
+                    {
+                        "type": "ACTION_REJECTED",
+                        "payload": {
+                            "playerId": 1001,
+                            "targetNodeId": "S13",
+                            "errorCode": "OBJECT_BUSY",
+                        },
+                    }
+                ],
+                "players": [
+                    {
+                        "playerId": 1001,
+                        "state": "WAITING",
+                        "currentNodeId": "S13",
+                        "nextNodeId": None,
+                        "routeEdgeId": None,
+                        "edgeTotalMs": 0,
+                        "verified": False,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual([{"action": "PROCESS", "targetNodeId": "S13"}], first)
+        self.assertEqual([{"action": "PROCESS", "targetNodeId": "S13"}], second)
+
+    def test_process_node_moves_only_after_own_process_complete(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"terminalNodeIds": ["S03"]}}},
+                "nodes": [
+                    {"nodeId": "S02", "processType": "TRANSFER", "hasObstacle": False},
+                    {"nodeId": "S03", "terminal": True, "hasObstacle": False},
+                ],
+                "edges": [
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03"},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "events": [
+                    {
+                        "type": "PROCESS_COMPLETE",
+                        "payload": {
+                            "playerId": 1001,
+                            "targetNodeId": "S02",
+                            "processType": "TRANSFER",
+                        },
+                    }
+                ],
+                "players": [
+                    {"playerId": 1001, "state": "IDLE", "currentNodeId": "S02", "verified": True}
+                ],
+            }
+        )
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], action)
+
     def test_revisiting_process_node_requires_processing_again(self) -> None:
         strategy = MovementStrategy(player_id=1001)
         strategy.update_start(

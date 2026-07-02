@@ -5,9 +5,11 @@ from typing import Any, Optional
 
 from .battle_logger import BattleLogger
 from .config import Config
-from .framing import read_frame, write_frame
+from .framing import FrameDecodeError, read_frame, write_frame
 from .messages import action_message, heartbeat_action, ready_message, registration_message
 from .strategy import MovementStrategy
+
+MAX_CONSECUTIVE_MALFORMED_FRAMES = 3
 
 
 class ClientSession:
@@ -20,6 +22,7 @@ class ClientSession:
 
     def run(self) -> int:
         self._send_registration()
+        malformed_frames = 0
 
         while True:
             try:
@@ -27,6 +30,17 @@ class ClientSession:
             except EOFError:
                 print("connection closed")
                 return 0
+            except FrameDecodeError as exc:
+                malformed_frames += 1
+                print(
+                    f"malformed frame skipped ({malformed_frames}/{MAX_CONSECUTIVE_MALFORMED_FRAMES}): "
+                    f"{exc}; diagnostic={exc.diagnostic_path}",
+                    file=sys.stderr,
+                )
+                if malformed_frames >= MAX_CONSECUTIVE_MALFORMED_FRAMES:
+                    return 1
+                continue
+            malformed_frames = 0
 
             result = self._handle_message(message)
             if result is not None:
