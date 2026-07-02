@@ -52,12 +52,14 @@ class ClientSession:
             self._handle_inquire(data)
         elif msg_name == "over":
             print("over received")
+            self._battle_logger.log_message("over", data)
             if self._recorder is not None:
                 self._recorder.record_over(data)
             self._close_recorder()
             return 0
         elif msg_name == "error":
             print(f"error received: {json.dumps(message, ensure_ascii=False)}", file=sys.stderr)
+            self._battle_logger.log_message("error", data)
             return 1
         else:
             print(f"ignored msg_name={msg_name}")
@@ -66,6 +68,7 @@ class ClientSession:
     def _handle_start(self, data: dict[str, Any]) -> None:
         self._match_id = data["matchId"]
         round_no = data["round"]
+        self._battle_logger.log_message("start", data)
         self._strategy.ingest_start(data)
         print(f"start match={self._match_id} round={round_no}")
         write_frame(self._sock, M.ready_message(self._match_id, round_no, self._config.player_id))

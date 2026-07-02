@@ -18,12 +18,29 @@ class BattleLogger:
     def log_path(self) -> Path:
         return self._log_path
 
+    def log_message(self, message_type: str, payload: dict[str, Any]) -> None:
+        """Record a full non-inquire message verbatim (start / over / error) so the
+        log is self-contained: start carries the whole map, over the authoritative
+        final scores (which the per-round preview never credits for the last
+        deliverer). Keeps the log complete for offline analysis."""
+        if not self._enabled:
+            return
+        self._append_entry(
+            {
+                "loggedAt": datetime.now(timezone.utc).isoformat(),
+                "type": message_type,
+                "playerId": self._player_id,
+                "payload": self._strip_local_debug(payload),
+            }
+        )
+
     def log_round(self, inquire_data: dict[str, Any], action_payload: dict[str, Any]) -> None:
         if not self._enabled:
             return
 
         entry = {
             "loggedAt": datetime.now(timezone.utc).isoformat(),
+            "type": "round",
             "matchId": inquire_data.get("matchId"),
             "round": inquire_data.get("round"),
             "tick": inquire_data.get("tick"),

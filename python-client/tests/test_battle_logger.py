@@ -63,6 +63,20 @@ class BattleLoggerTests(unittest.TestCase):
             self.assertEqual([{"contestId": "C_001"}], entry["summary"]["contests"])
             self.assertNotIn("debug", entry["inquire"])
 
+    def test_log_message_records_start_and_over_without_debug(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "battle_rounds.jsonl"
+            logger = BattleLogger(player_id=1001, log_path=log_path)
+
+            logger.log_message("start", {"matchId": "m", "map": {"nodes": []}, "debug": {"x": 1}})
+            logger.log_message("over", {"matchId": "m", "winnerPlayerId": 1001, "players": []})
+
+            entries = [json.loads(l) for l in log_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(["start", "over"], [e["type"] for e in entries])
+            self.assertIn("map", entries[0]["payload"])
+            self.assertNotIn("debug", entries[0]["payload"])
+            self.assertEqual(1001, entries[1]["payload"]["winnerPlayerId"])
+
 
 if __name__ == "__main__":
     unittest.main()
