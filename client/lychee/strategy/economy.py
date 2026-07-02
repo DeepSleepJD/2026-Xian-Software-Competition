@@ -30,6 +30,7 @@ from . import Intent, Strategy
 
 PRIORITY_ICE_USE = 120
 PRIORITY_HORSE_USE = 119
+PRIORITY_INTEL_USE = 118
 PRIORITY_ECONOMY = 110
 TASK_SCORE_GOAL = 130         # 拿满即闭嘴：里程碑 60/90/110 → +15/+35/+50（无 130 档），
                               # 皇榜分封顶 180 = raw 130 + 50，超过 130 边际为零
@@ -53,6 +54,10 @@ HORSE_MOVE_PER_FRAME = {"FAST_HORSE": 1200, "SHORT_HORSE": 1150}
 HORSE_DURATION = {"FAST_HORSE": 20, "SHORT_HORSE": 14}
 HORSE_USE_MIN_SAVED_FRAMES = 2
 HORSE_RESOURCES = ("FAST_HORSE", "SHORT_HORSE")
+ACTIVE_USE_RESOURCE_TYPES = frozenset({"ICE_BOX", "FAST_HORSE", "SHORT_HORSE", "INTEL"})
+DOCUMENT_RESOURCES = frozenset({"PASS_TOKEN", "OFFICIAL_PERMIT"})
+INTEL_PROCESS_TYPES = frozenset({"VERIFY"})
+INTEL_MIN_PROCESS_FRAMES = 5
 RESOURCE_CLAIM_CAPS = {
     "ICE_BOX": ICE_BOX_MAX_HOLD,
     "FAST_HORSE": 1,
@@ -66,9 +71,9 @@ RESOURCE_BASE_VALUES = {
     "ICE_BOX": ICE_BOX_VALUE,
     "FAST_HORSE": 8.0,
     "SHORT_HORSE": 6.0,
-    "PASS_TOKEN": 2.5,
-    "OFFICIAL_PERMIT": 2.5,
-    "INTEL": 3.0,
+    "PASS_TOKEN": 1.0,
+    "OFFICIAL_PERMIT": 1.0,
+    "INTEL": 0.5,
     "BOAT_RIGHT": 1.0,
 }
 
@@ -77,6 +82,17 @@ def _task_points(raw: int) -> int:
     """皇榜任务分结算值：raw + 里程碑奖励，封顶 180（任务书 7.2）。"""
     bonus = 50 if raw >= 110 else 35 if raw >= 90 else 15 if raw >= 60 else 0
     return min(180, raw + bonus)
+
+
+def _use_resource_action(resource_type: str, **fields: object) -> dict:
+    """Build a USE_RESOURCE action through the document-safety whitelist."""
+    if resource_type not in ACTIVE_USE_RESOURCE_TYPES:
+        raise AssertionError(f"USE_RESOURCE forbidden for {resource_type}")
+    action = {"action": "USE_RESOURCE", "resourceType": resource_type}
+    action.update(fields)
+    return action
+
+
 CLAIM_REJECT_LIMIT = 2        # 领取连续被拒此数后拉黑目标
 MOVE_REJECT_LIMIT = 4         # 赶路连续被拒此数后拉黑目标
 BACKOFF_ROUNDS = 50
@@ -194,6 +210,10 @@ class EconomyStrategy(Strategy):
             self._last_stationary_node = cur
 
         intents: list[Intent] = []
+        intel = self._propose_intel_use(state, cur)
+        if intel is not None:
+            intents.append(intel)
+
         eco = self._propose_economy(state, cur)
         if eco is not None:
             intents.append(eco)
@@ -207,7 +227,9 @@ class EconomyStrategy(Strategy):
         ice = self._propose_ice_use(state, cur, planned_next)
         if ice is not None:
             intents.append(ice)
-        horse = self._propose_horse_use(state, cur, planned_next)
+            horse = None
+        else:
+            horse = self._propose_horse_use(state, cur, planned_next)
         if horse is not None:
             intents.append(horse)
         return intents
@@ -240,6 +262,8 @@ class EconomyStrategy(Strategy):
             elif r.action == "USE_RESOURCE" and not r.accepted:
                 resource = self._pending_use_resource or "ICE_BOX"
                 self._backoff[f"USE:{resource}"] = state.round + 20
+                self._pending_use_resource = ""
+            elif r.action == "USE_RESOURCE" and r.accepted:
                 self._pending_use_resource = ""
 
     # -- 任务/资源贪心 --
@@ -381,6 +405,7 @@ class EconomyStrategy(Strategy):
     def _candidates(self, state: GameState, cur: str) -> list[_Target]:
         me = state.me
         out: list[_Target] = []
+        hard_required_resources = self._required_resources_on_delivery_path(state, cur)
         for t in state.tasks if me.task_score < TASK_SCORE_GOAL else []:
             if not t.active or t.completed or t.failed or not t.node_id:
                 continue
@@ -413,8 +438,11 @@ class EconomyStrategy(Strategy):
                 cap = RESOURCE_CLAIM_CAPS.get(resource_type)
                 if cap is not None and me.resources.get(resource_type, 0) >= cap:
                     continue
-                value = RESOURCE_BASE_VALUES.get(resource_type)
+                value = self._resource_value(resource_type, hard_required_resources)
                 if value is None:
+                    continue
+                if not self._resource_has_claim_consumer(state, resource_type,
+                                                         hard_required_resources):
                     continue
                 out.append(_Target(
                     key=f"RES:{node_id}:{resource_type}", value=value,
@@ -424,6 +452,27 @@ class EconomyStrategy(Strategy):
                             "resourceType": resource_type},
                     expire_round=0, note=f"资源{resource_type}@{node_id}"))
         return out
+
+    def _resource_value(self, resource_type: str, hard_required_resources: set[str]) -> float | None:
+        value = RESOURCE_BASE_VALUES.get(resource_type)
+        if value is None:
+            return None
+        if resource_type in hard_required_resources:
+            return max(value, ICE_BOX_VALUE)
+        return value
+
+    def _resource_has_claim_consumer(
+            self, state: GameState, resource_type: str,
+            hard_required_resources: set[str]) -> bool:
+        if resource_type in hard_required_resources:
+            return True
+        if resource_type in DOCUMENT_RESOURCES:
+            return bool(state.my_open_contests())
+        if resource_type == "INTEL":
+            # CLAIM_RESOURCE itself costs a read bar; INTEL is only worth consuming
+            # when already held or hard-required by the map.
+            return False
+        return True
 
     # -- 冰鉴使用 --
 
@@ -436,7 +485,7 @@ class EconomyStrategy(Strategy):
         f = me.freshness
         threshold = min(floor(f / 10) * 10, 90)   # 下一个会被跌破的十位阈值
         margin = HOT_ICE_USE_MARGIN if self._hot_weather_near(state) else ICE_USE_MARGIN
-        trigger = f <= threshold + margin
+        trigger = threshold < 90 and f <= threshold + margin
         if not trigger and planned_next:
             # 出发上长边前预判：途中跨阈值则提前用（跌破一次 = 1 好果转坏）
             for nxt, edge in state.neighbors(cur):
@@ -444,14 +493,39 @@ class EconomyStrategy(Strategy):
                     frames = pathing.edge_frames_for_state(state, edge)
                     loss = frames * pathing.ROUTE_FRESHNESS.get(
                         edge.route_type, pathing._UNKNOWN_FRESHNESS)
-                    trigger = f - loss < threshold
+                    trigger = threshold < 90 and f - loss < threshold
                     break
         if not trigger:
             return None
         self._pending_use_resource = "ICE_BOX"
         return Intent(kind="economy", priority=PRIORITY_ICE_USE,
-                      actions=[{"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}],
+                      actions=[_use_resource_action("ICE_BOX")],
                       note=f"冰鉴保鲜@{f:.1f}")
+
+    def _propose_intel_use(self, state: GameState, cur: str) -> Intent | None:
+        me = state.me
+        if me.resources.get("INTEL", 0) < 1:
+            return None
+        if state.round < self._backoff.get("USE:INTEL", 0):
+            return None
+        proc = state.process_nodes.get(cur)
+        if proc is None:
+            return None
+        if proc.process_type not in INTEL_PROCESS_TYPES:
+            return None
+        if proc.process_round < INTEL_MIN_PROCESS_FRAMES:
+            return None
+        ns = state.node_states.get(cur)
+        if ns is not None:
+            for marker in ns.scouted:
+                marker_team = marker.get("teamId")
+                marker_player = marker.get("playerId", 0)
+                if marker_team == me.team_id or marker_player == state.player_id:
+                    return None
+        self._pending_use_resource = "INTEL"
+        return Intent(kind="economy.intel", priority=PRIORITY_INTEL_USE,
+                      actions=[_use_resource_action("INTEL", targetNodeId=cur)],
+                      note=f"情报标记@{cur}")
 
     def _propose_horse_use(self, state: GameState, cur: str, planned_next: str) -> Intent | None:
         if not planned_next:
@@ -468,11 +542,25 @@ class EconomyStrategy(Strategy):
                 continue
             self._pending_use_resource = resource_type
             return Intent(kind="economy.horse", priority=PRIORITY_HORSE_USE,
-                          actions=[{"action": "USE_RESOURCE", "resourceType": resource_type}],
+                          actions=[_use_resource_action(resource_type)],
                           note=f"启用{resource_type}")
         return None
 
     # -- 辅助 --
+
+    def _required_resources_on_delivery_path(self, state: GameState, cur: str) -> set[str]:
+        terminal = self._nearest_terminal(state, cur)
+        if not terminal:
+            return set()
+        path = pathing.shortest_path(state, cur, terminal)
+        if not path:
+            return set()
+        out: set[str] = set()
+        for node_id in path:
+            proc = state.process_nodes.get(node_id)
+            if proc:
+                out.update(proc.required_resource_types)
+        return out
 
     @staticmethod
     def _nearest_terminal(state: GameState, cur: str) -> str:

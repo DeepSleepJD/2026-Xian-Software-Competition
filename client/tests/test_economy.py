@@ -11,6 +11,7 @@ import unittest
 from lychee.state import GameState
 from lychee.strategy.economy import (
     EconomyStrategy, PRIORITY_ECONOMY, PRIORITY_ICE_USE, TASK_SCORE_GOAL,
+    _use_resource_action,
 )
 
 MY_ID = 1001
@@ -60,7 +61,8 @@ def inquire(round_no: int, *, node: str = "A", state: str = "IDLE", phase: str =
             action_results: list | None = None, tasks: list | None = None,
             nodes: list | None = None, resources: dict | None = None,
             task_score: int = 0, freshness: float = 100.0,
-            buffs: list | None = None, weather: dict | None = None) -> dict:
+            buffs: list | None = None, weather: dict | None = None,
+            contests: list | None = None) -> dict:
     return {
         "round": round_no, "phase": phase,
         "players": [{"playerId": MY_ID, "teamId": "RED", "state": state,
@@ -71,6 +73,7 @@ def inquire(round_no: int, *, node: str = "A", state: str = "IDLE", phase: str =
                      "buffs": buffs or []}],
         "tasks": tasks or [],
         "nodes": nodes or [],
+        "contests": contests or [],
         "actionResults": action_results or [],
         "weather": weather or {},
     }
@@ -294,7 +297,7 @@ class EconomyIceBoxTests(unittest.TestCase):
         self.assertNotIn("USE_RESOURCE", [a["action"] for a in acts])
 
     def test_predictive_use_before_long_edge(self) -> None:
-        # 大距离边 A→B（distance=50 → 69帧 → 损耗 ~3.8）：90.5 出发途中跌破 90 → 提前用
+        # 大距离边 A→B（distance=50 → 69帧 → 损耗 ~3.8）：83.5 出发途中跌破 80 → 提前用
         start = {**START, "edges": [
             {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B", "routeType": "ROAD",
              "distance": 50, "bidirectional": True},
@@ -305,10 +308,17 @@ class EconomyIceBoxTests(unittest.TestCase):
         ]}
         self.state = GameState(MY_ID)
         self.state.update_start(start)
-        # 经济层静默（任务分已满）：用 delivery 下一跳（A→B）预判；93.5 - 3.8 < 90 → 用
-        acts = self.acts(inquire(1, node="A", freshness=93.5, resources={"ICE_BOX": 1},
+        # 经济层静默（任务分已满）：用 delivery 下一跳（A→B）预判；83.5 - 3.8 < 80 → 用
+        acts = self.acts(inquire(1, node="A", freshness=83.5, resources={"ICE_BOX": 1},
                                  task_score=TASK_SCORE_GOAL))
         self.assertIn({"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}, acts)
+
+    def test_does_not_spend_ice_box_in_top_freshness_band(self) -> None:
+        weather = {"active": [{"weatherId": "W1", "type": "HOT", "region": "ALL",
+                               "remainRound": 20}]}
+        acts = self.acts(inquire(1, node="A", freshness=94.5,
+                                 resources={"ICE_BOX": 1}, weather=weather))
+        self.assertNotIn("USE_RESOURCE", [a["action"] for a in acts])
 
     def test_use_rejected_backs_off(self) -> None:
         self.acts(inquire(1, node="A", freshness=81.5, resources={"ICE_BOX": 1}))
@@ -342,9 +352,8 @@ class EconomyGeneralResourceTests(unittest.TestCase):
         self.state.update_inquire(inq)
         return [a for it in self.strategy.propose(self.state) for a in it.actions]
 
-    def test_claims_generalized_resources_at_current_node(self) -> None:
-        for resource_type in ("SHORT_HORSE", "FAST_HORSE", "PASS_TOKEN",
-                              "OFFICIAL_PERMIT", "INTEL"):
+    def test_claims_active_resources_at_current_node(self) -> None:
+        for resource_type in ("SHORT_HORSE", "FAST_HORSE"):
             with self.subTest(resource_type=resource_type):
                 self.setUp()
                 nodes = [{"nodeId": "B", "resourceStock": {resource_type: 1}}]
@@ -353,11 +362,58 @@ class EconomyGeneralResourceTests(unittest.TestCase):
                 self.assertEqual([{"action": "CLAIM_RESOURCE", "targetNodeId": "B",
                                    "resourceType": resource_type}], acts)
 
+    def test_document_resource_claim_requires_open_contest(self) -> None:
+        nodes = [{"nodeId": "B", "resourceStock": {"PASS_TOKEN": 1}}]
+        acts = self.acts(inquire(1, node="B", nodes=nodes, task_score=TASK_SCORE_GOAL))
+        self.assertNotIn("CLAIM_RESOURCE", [a["action"] for a in acts])
+
+        contest = {"contestId": "C1", "contestType": "PASS", "targetNodeId": "B",
+                   "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}
+        acts = self.acts(inquire(2, node="B", nodes=nodes, task_score=TASK_SCORE_GOAL,
+                                 contests=[contest]))
+        self.assertEqual([{"action": "CLAIM_RESOURCE", "targetNodeId": "B",
+                           "resourceType": "PASS_TOKEN"}], acts)
+
     def test_document_resources_are_not_actively_used(self) -> None:
         acts = self.acts(inquire(1, node="A",
                                  resources={"PASS_TOKEN": 1, "OFFICIAL_PERMIT": 1},
                                  task_score=TASK_SCORE_GOAL))
         self.assertNotIn("USE_RESOURCE", [a["action"] for a in acts])
+
+    def test_intel_is_used_on_current_gate_verify(self) -> None:
+        acts = self.acts(inquire(1, node="C", phase="RUSH",
+                                 resources={"INTEL": 1}, task_score=TASK_SCORE_GOAL))
+        self.assertEqual([{"action": "USE_RESOURCE", "resourceType": "INTEL",
+                           "targetNodeId": "C"}], acts)
+
+    def test_intel_is_not_claimed_without_hard_requirement(self) -> None:
+        nodes = [{"nodeId": "B", "resourceStock": {"INTEL": 1}}]
+        acts = self.acts(inquire(1, node="B", nodes=nodes, task_score=TASK_SCORE_GOAL))
+        self.assertNotIn("CLAIM_RESOURCE", [a["action"] for a in acts])
+
+    def test_low_value_intel_is_not_claimed_by_detour(self) -> None:
+        nodes = [{"nodeId": "E", "resourceStock": {"INTEL": 1}}]
+        acts = self.acts(inquire(1, node="A", nodes=nodes, task_score=TASK_SCORE_GOAL))
+        self.assertNotIn("CLAIM_RESOURCE", [a["action"] for a in acts])
+        self.assertNotIn({"action": "MOVE", "targetNodeId": "B"}, acts)
+
+    def test_required_resource_on_delivery_path_is_hard_need(self) -> None:
+        start = {**START, "map": {"gameplay": {
+            "roles": {"startNodeId": "A", "gateNodeId": "C", "terminalNodeIds": ["D"]},
+            "processNodes": [
+                {"nodeId": "C", "processType": "VERIFY", "processRound": 6,
+                 "canWindow": True, "requiredResourceTypes": ["BOAT_RIGHT"]},
+            ],
+        }}}
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        nodes = [{"nodeId": "E", "resourceStock": {"BOAT_RIGHT": 1}}]
+        acts = self.acts(inquire(1, node="B", nodes=nodes, task_score=TASK_SCORE_GOAL))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "E"}], acts)
+
+    def test_use_resource_whitelist_rejects_documents(self) -> None:
+        with self.assertRaises(AssertionError):
+            _use_resource_action("PASS_TOKEN")
 
     def test_uses_fast_horse_before_long_edge(self) -> None:
         start = {**START, "edges": [

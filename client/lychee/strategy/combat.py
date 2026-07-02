@@ -15,10 +15,16 @@ from . import Intent, Strategy
 PRIORITY_COMBAT_MAIN = 130
 PRIORITY_SET_GUARD = 129
 PRIORITY_SQUAD_WEAKEN = 128
+PRIORITY_SQUAD_SCOUT = 127
 PRIORITY_WINDOW_CARD = 125
 
 _STATIONARY_STATES = {"IDLE", "WAITING"}
 _KEY_CONTEST_SCORES = {"GATE": 50, "PASS": 45, "DOCK": 40}
+DOCUMENT_RESOURCES = ("PASS_TOKEN", "OFFICIAL_PERMIT")
+SCOUT_MIN_PROC_FRAMES = 4
+SCOUT_ETA_MAX = 40
+SCOUT_PENDING_TIMEOUT = 8
+SQUAD_RESERVE_FOR_WEAKEN = 4
 GUARD_GOOD_FLOOR = 90
 GUARD_SETUP_FRAMES = 4
 GUARD_GOOD_FRAME_COST = 15
@@ -26,9 +32,18 @@ GUARD_MIN_NET_FRAMES = 30
 
 
 class CombatStrategy(Strategy):
+    def __init__(self) -> None:
+        self._scout_markers: dict[str, int] = {}
+        self._scout_pending: dict[str, int] = {}
+        self._seen_window_reveals: set[str] = set()
+        self._opponent_card_counts: dict[str, int] = {}
+        self._opponent_card_total = 0
+
     def propose(self, state: GameState) -> list[Intent]:
         if state.me.delivered or state.me.retired:
             return []
+
+        self._read_events(state)
 
         intents: list[Intent] = []
         main = self._propose_break_guard(state)
@@ -38,6 +53,8 @@ class CombatStrategy(Strategy):
             intents.append(main)
 
         squad = self._propose_squad_weaken(state)
+        if squad is None:
+            squad = self._propose_squad_scout(state)
         if squad is not None:
             intents.append(squad)
 
@@ -86,7 +103,7 @@ class CombatStrategy(Strategy):
         return ""
 
     def _break_action(self, state: GameState, target: str, defense: int) -> dict | None:
-        bad = min(2, state.my_bad)
+        bad = min(2, state.my_bad, ceil(defense / 3))
         remain = max(0, defense - bad * 3)
         good = min(2, state.my_good, ceil(remain / 2)) if remain > 0 else 0
         attack = bad * 3 + good * 2
@@ -153,6 +170,31 @@ class CombatStrategy(Strategy):
         return Intent(kind="combat.squad", priority=PRIORITY_SQUAD_WEAKEN,
                       actions=[action], note=f"小分队削卡@{me.next_node_id}")
 
+    def _propose_squad_scout(self, state: GameState) -> Intent | None:
+        me = state.me
+        if me.squad_available - 1 < SQUAD_RESERVE_FOR_WEAKEN:
+            return None
+        cur = me.current_node_id
+        if not cur:
+            return None
+        path = self._terminal_path(state, cur)
+        if not path or len(path) < 2:
+            return None
+        for idx, node_id in enumerate(path[1:], start=1):
+            proc = state.process_nodes.get(node_id)
+            if proc is None or proc.process_round < SCOUT_MIN_PROC_FRAMES:
+                continue
+            prefix = path[:idx + 1]
+            if self._eta_to_path_index(state, prefix) > SCOUT_ETA_MAX:
+                continue
+            if self._has_scout_marker(state, node_id) or self._has_pending_scout(state, node_id):
+                continue
+            self._scout_pending[node_id] = state.round
+            action = {"action": "SQUAD_SCOUT", "targetNodeId": node_id}
+            return Intent(kind="combat.squad", priority=PRIORITY_SQUAD_SCOUT,
+                          actions=[action], note=f"小分队探路@{node_id}")
+        return None
+
     def _propose_window_cards(self, state: GameState) -> list[dict]:
         contests = [c for c in state.my_open_contests() if c.contest_id]
         if not contests:
@@ -161,12 +203,116 @@ class CombatStrategy(Strategy):
         score, contest = max(scored, key=lambda item: item[0])
         if score <= 0:
             return []
-        card = "ABSTAIN"
-        if state.me.freshness >= 80 and state.my_good > 0:
-            card = "XIAN_GONG"
-        elif state.my_guard_points > 1:
-            card = "BING_ZHENG"
+        card = self._choose_window_card(state, contest)
         return [{"action": "WINDOW_CARD", "contestId": contest.contest_id, "card": card}]
+
+    def _choose_window_card(self, state: GameState, contest: Contest) -> str:
+        if self._opponent_bing_zheng_tendency():
+            order = ("XIAN_GONG", "BING_ZHENG", "YAN_DIE")
+        else:
+            order = ("BING_ZHENG", "YAN_DIE", "XIAN_GONG")
+        for card in order:
+            if self._can_play_card(state, contest, card):
+                return card
+        return "ABSTAIN"
+
+    def _can_play_card(self, state: GameState, contest: Contest, card: str) -> bool:
+        if card == "BING_ZHENG":
+            reserve = 0 if state.phase == "RUSH" or contest.contest_type in ("GATE", "PASS") else 1
+            return state.my_guard_points > reserve
+        if card == "YAN_DIE":
+            return self._document_resource_count(state) >= 1
+        if card == "XIAN_GONG":
+            return state.me.freshness >= 80 and state.my_good > 0
+        return False
+
+    @staticmethod
+    def _document_resource_count(state: GameState) -> int:
+        return sum(state.me.resources.get(resource_type, 0) for resource_type in DOCUMENT_RESOURCES)
+
+    def _opponent_bing_zheng_tendency(self) -> bool:
+        if self._opponent_card_total < 2:
+            return False
+        return self._opponent_card_counts.get("BING_ZHENG", 0) / self._opponent_card_total >= 0.60
+
+    def _read_events(self, state: GameState) -> None:
+        self._read_scout_events(state)
+        self._read_window_card_reveals(state)
+
+    def _read_scout_events(self, state: GameState) -> None:
+        for node_id, expire in list(self._scout_markers.items()):
+            if expire and expire < state.round:
+                self._scout_markers.pop(node_id, None)
+        for node_id, dispatch_round in list(self._scout_pending.items()):
+            if dispatch_round + SCOUT_PENDING_TIMEOUT < state.round:
+                self._scout_pending.pop(node_id, None)
+
+        my_player_id = state.player_id
+        for event in state.scout_marker_events():
+            if event.player_id != my_player_id or not event.target_node_id:
+                continue
+            if event.type == "SCOUT_MARKER_ADD":
+                expire = event.expire_round or state.round + 45
+                self._scout_markers[event.target_node_id] = expire
+                self._scout_pending.pop(event.target_node_id, None)
+            elif event.type in ("SCOUT_MARKER_EXPIRE", "SCOUT_MARKER_CONSUME"):
+                self._scout_markers.pop(event.target_node_id, None)
+                self._scout_pending.pop(event.target_node_id, None)
+
+    def _read_window_card_reveals(self, state: GameState) -> None:
+        my_team = state.my_team_id or state.me.team_id
+        for reveal in state.window_card_reveals():
+            key = reveal.event_id or f"{reveal.contest_id}:{reveal.round_index}"
+            if key in self._seen_window_reveals:
+                continue
+            self._seen_window_reveals.add(key)
+            card = reveal.blue_card if my_team == "RED" else reveal.red_card
+            if not card:
+                continue
+            self._opponent_card_counts[card] = self._opponent_card_counts.get(card, 0) + 1
+            self._opponent_card_total += 1
+
+    def _has_scout_marker(self, state: GameState, node_id: str) -> bool:
+        expire = self._scout_markers.get(node_id, 0)
+        if expire >= state.round:
+            return True
+        ns = state.node_states.get(node_id)
+        if ns is None:
+            return False
+        my_player_id = state.player_id
+        for marker in ns.scouted:
+            player_id = marker.get("playerId", 0)
+            expire_round = marker.get("expireRound", 0)
+            if player_id == my_player_id and (not expire_round or expire_round >= state.round):
+                return True
+        return False
+
+    def _has_pending_scout(self, state: GameState, node_id: str) -> bool:
+        dispatch_round = self._scout_pending.get(node_id)
+        return dispatch_round is not None and dispatch_round + SCOUT_PENDING_TIMEOUT >= state.round
+
+    @staticmethod
+    def _eta_to_path_index(state: GameState, prefix: list[str]) -> int:
+        """Estimated frames until arrival at prefix[-1], excluding its processing time."""
+        if len(prefix) < 2:
+            return 0
+        target = prefix[-1]
+        target_proc = state.process_nodes.get(target)
+        target_proc_frames = target_proc.process_round if target_proc else 0
+        frames = max(0, pathing.path_frames(state, prefix) - target_proc_frames)
+
+        me = state.me
+        if me.state == "MOVING" and me.next_node_id and len(prefix) >= 2 and prefix[1] == me.next_node_id:
+            remaining = max(0, me.edge_total_ms - me.edge_progress_ms)
+            remaining_frames = ceil(remaining / pathing.BASE_MOVE_PER_FRAME) if remaining else 0
+            if len(prefix) == 2:
+                return remaining_frames
+            tail = prefix[1:]
+            tail_target_proc = state.process_nodes.get(tail[-1])
+            tail_proc_frames = tail_target_proc.process_round if tail_target_proc else 0
+            return remaining_frames + max(0, pathing.path_frames(state, tail) - tail_proc_frames)
+
+        return frames
 
     def _contest_score(self, state: GameState, contest: Contest) -> int:
         score = _KEY_CONTEST_SCORES.get(contest.contest_type, 0)

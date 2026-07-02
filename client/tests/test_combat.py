@@ -5,7 +5,9 @@ import unittest
 from lychee.arbiter import merge_intents
 from lychee.state import GameState
 from lychee.strategy import Intent
-from lychee.strategy.combat import CombatStrategy, PRIORITY_COMBAT_MAIN, PRIORITY_SET_GUARD
+from lychee.strategy.combat import (
+    CombatStrategy, PRIORITY_COMBAT_MAIN, PRIORITY_SET_GUARD, PRIORITY_SQUAD_SCOUT,
+)
 
 MY_ID = 1001
 OPP_ID = 2002
@@ -35,7 +37,8 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
             guard_points: int = 4, contests: list | None = None,
             nodes: list | None = None, phase: str = "NORMAL",
             next_node: str = "", squad_available: int = 8,
-            squad_in_flight: int = 0, opp_node: str = "S10") -> dict:
+            squad_in_flight: int = 0, opp_node: str = "S10",
+            resources: dict | None = None, events: list | None = None) -> dict:
     return {
         "round": round_no,
         "phase": phase,
@@ -44,11 +47,13 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
                      "goodFruit": good, "badFruit": bad,
                      "freshness": freshness, "guardActionPoint": guard_points,
                      "squadAvailable": squad_available,
-                     "squadInFlight": squad_in_flight},
+                     "squadInFlight": squad_in_flight,
+                     "resources": resources or {}},
                     {"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
                      "currentNodeId": opp_node}],
         "nodes": nodes or [],
         "contests": contests or [],
+        "events": events or [],
     }
 
 
@@ -62,6 +67,32 @@ def friendly_guard(node_id: str) -> dict:
     return {"nodeId": node_id, "guard": {"active": True, "ownerTeamId": "RED",
                                          "defense": 6, "initialDefense": 6,
                                          "maxDefense": 7}}
+
+
+SCOUT_START = {
+    "matchId": "scout-test",
+    "durationRound": 600,
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True},
+        {"nodeId": "B", "nodeType": "STATION"},
+        {"nodeId": "C", "nodeType": "FINISH", "terminal": True},
+    ],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+    "map": {"gameplay": {
+        "roles": {"startNodeId": "A", "terminalNodeIds": ["C"]},
+        "processNodes": [
+            {"nodeId": "B", "processType": "TRANSFER", "processRound": 5,
+             "canWindow": True},
+        ],
+    }},
+}
 
 
 class CombatStrategyTests(unittest.TestCase):
@@ -83,6 +114,11 @@ class CombatStrategyTests(unittest.TestCase):
         self.assertEqual(PRIORITY_COMBAT_MAIN, main.priority)
         self.assertEqual({"action": "BREAK_GUARD", "targetNodeId": "S10",
                           "goodFruit": 0, "badFruit": 2}, main.actions[0])
+
+    def test_break_guard_does_not_overkill_with_bad_fruit(self) -> None:
+        acts = self.actions(inquire(320, nodes=guard_s10(defense=1)))
+        self.assertIn({"action": "BREAK_GUARD", "targetNodeId": "S10",
+                       "goodFruit": 0, "badFruit": 1}, acts)
 
     def test_combat_break_suppresses_delivery_move_in_arbiter(self) -> None:
         intents = self.intents(inquire(320, nodes=guard_s10()))
@@ -139,11 +175,11 @@ class CombatStrategyTests(unittest.TestCase):
                                     nodes=guard_s10(), squad_in_flight=3))
         self.assertNotIn("SQUAD_WEAKEN", [a["action"] for a in acts])
 
-    def test_plays_xian_gong_for_relevant_window_when_fresh(self) -> None:
+    def test_plays_bing_zheng_first_for_relevant_window(self) -> None:
         contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",
                      "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
         acts = self.actions(inquire(44, contests=contests))
-        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "XIAN_GONG"}, acts)
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
 
     def test_plays_bing_zheng_when_not_fresh_enough_for_xian_gong(self) -> None:
         contests = [{"contestId": "C1", "contestType": "PASS", "targetNodeId": "S10",
@@ -160,13 +196,87 @@ class CombatStrategyTests(unittest.TestCase):
         ]
         acts = [a for a in self.actions(inquire(44, contests=contests))
                 if a["action"] == "WINDOW_CARD"]
-        self.assertEqual([{"action": "WINDOW_CARD", "contestId": "C2", "card": "XIAN_GONG"}], acts)
+        self.assertEqual([{"action": "WINDOW_CARD", "contestId": "C2", "card": "BING_ZHENG"}], acts)
 
     def test_irrelevant_window_gets_no_explicit_abstain(self) -> None:
         contests = [{"contestId": "C1", "contestType": "RESOURCE", "targetNodeId": "",
                      "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
         acts = self.actions(inquire(44, contests=contests))
         self.assertNotIn("WINDOW_CARD", [a["action"] for a in acts])
+
+    def test_plays_yan_die_from_document_resource_without_use_resource(self) -> None:
+        contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",
+                     "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
+        acts = self.actions(inquire(44, contests=contests, freshness=70.0,
+                                    guard_points=1, resources={"PASS_TOKEN": 1}))
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "YAN_DIE"}, acts)
+        self.assertNotIn("USE_RESOURCE", [a["action"] for a in acts])
+
+    def test_gate_window_spends_last_guard_point(self) -> None:
+        contests = [{"contestId": "C1", "contestType": "GATE", "targetNodeId": "S10",
+                     "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
+        acts = self.actions(inquire(44, contests=contests, freshness=70.0, guard_points=1))
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
+
+    def test_plays_xian_gong_against_bing_zheng_tendency(self) -> None:
+        contests = [{"contestId": "C3", "contestType": "PASS", "targetNodeId": "S10",
+                     "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
+        reveals = [
+            {"eventId": "R1", "type": "WINDOW_CARD_REVEAL", "round": 40,
+             "payload": {"contestId": "C1", "roundIndex": 1,
+                         "redCard": "YAN_DIE", "blueCard": "BING_ZHENG"}},
+            {"eventId": "R2", "type": "WINDOW_CARD_REVEAL", "round": 41,
+             "payload": {"contestId": "C2", "roundIndex": 1,
+                         "redCard": "YAN_DIE", "blueCard": "BING_ZHENG"}},
+        ]
+        acts = self.actions(inquire(44, contests=contests, events=reveals))
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C3", "card": "XIAN_GONG"}, acts)
+
+    def test_squad_scouts_upcoming_process_node(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(SCOUT_START)
+        self.strategy = CombatStrategy()
+        intents = self.intents(inquire(10, node="A", opp_node="C"))
+        scout = [it for it in intents if it.actions[0]["action"] == "SQUAD_SCOUT"][0]
+        self.assertEqual(PRIORITY_SQUAD_SCOUT, scout.priority)
+        self.assertEqual({"action": "SQUAD_SCOUT", "targetNodeId": "B"}, scout.actions[0])
+
+    def test_squad_scout_dedupes_pending_and_marker(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(SCOUT_START)
+        self.strategy = CombatStrategy()
+        self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "B"},
+                      self.actions(inquire(10, node="A", opp_node="C")))
+        self.assertNotIn("SQUAD_SCOUT",
+                         [a["action"] for a in self.actions(inquire(11, node="A", opp_node="C"))])
+
+        add = [{"eventId": "S1", "type": "SCOUT_MARKER_ADD", "round": 12,
+                "payload": {"playerId": MY_ID, "targetNodeId": "B", "expireRound": 50}}]
+        self.assertNotIn("SQUAD_SCOUT",
+                         [a["action"] for a in self.actions(inquire(12, node="A", opp_node="C",
+                                                                    events=add))])
+        consume = [{"eventId": "S2", "type": "SCOUT_MARKER_CONSUME", "round": 13,
+                    "payload": {"playerId": MY_ID, "targetNodeId": "B"}}]
+        self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "B"},
+                      self.actions(inquire(13, node="A", opp_node="C", events=consume)))
+
+    def test_squad_scout_reserves_weaken_budget(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(SCOUT_START)
+        self.strategy = CombatStrategy()
+        acts = self.actions(inquire(10, node="A", squad_available=4, opp_node="C"))
+        self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
+
+    def test_squad_weaken_wins_over_scout(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(SCOUT_START)
+        self.strategy = CombatStrategy()
+        nodes = [{"nodeId": "B", "guard": {"active": True, "ownerTeamId": "BLUE",
+                                            "defense": 6, "initialDefense": 6}}]
+        acts = self.actions(inquire(10, node="A", state="MOVING", next_node="B",
+                                    nodes=nodes, opp_node="C"))
+        self.assertIn({"action": "SQUAD_WEAKEN", "targetNodeId": "B"}, acts)
+        self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
 
 
 if __name__ == "__main__":

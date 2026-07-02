@@ -56,6 +56,17 @@ class StartParsingTests(unittest.TestCase):
         self.assertIn("ROAD", self.state.route_task_buckets)
         self.assertEqual(4, len(self.state.obstacle_candidate_node_ids))
 
+    def test_process_node_required_resources(self) -> None:
+        state = GameState(MY_ID)
+        state.update_start({
+            "players": [{"playerId": MY_ID, "teamId": "RED"}],
+            "map": {"gameplay": {"processNodes": [
+                {"nodeId": "S04", "processType": "BOARD", "processRound": 7,
+                 "requiredResourceTypes": ["BOAT_RIGHT"]},
+            ]}},
+        })
+        self.assertEqual(["BOAT_RIGHT"], state.process_nodes["S04"].required_resource_types)
+
     def test_neighbors(self) -> None:
         neighbors = self.state.neighbors("S01")
         self.assertTrue(neighbors)

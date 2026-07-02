@@ -85,6 +85,7 @@ class ProcessNode:
     node_id: str = ""
     process_type: str = ""
     process_round: int = 0
+    required_resource_types: list[str] = field(default_factory=list)
     can_window: bool = False
 
     @staticmethod
@@ -93,6 +94,7 @@ class ProcessNode:
             node_id=d.get("nodeId", ""),
             process_type=d.get("processType", ""),
             process_round=d.get("processRound", 0),
+            required_resource_types=list(d.get("requiredResourceTypes") or []),
             can_window=bool(d.get("canWindow")),
         )
 
@@ -500,6 +502,27 @@ class Event:
         )
 
 
+@dataclass(frozen=True)
+class ScoutMarkerEvent:
+    """探路标记事件的策略层投影。"""
+    event_id: str = ""
+    type: str = ""
+    player_id: int = 0
+    target_node_id: str = ""
+    expire_round: int = 0
+
+
+@dataclass(frozen=True)
+class WindowCardReveal:
+    """窗口明牌事件的策略层投影。"""
+    event_id: str = ""
+    contest_id: str = ""
+    round_index: int = 0
+    red_card: str = ""
+    blue_card: str = ""
+    winner: str = ""
+
+
 @dataclass
 class ActionResult:
     """上一帧动作结果摘要（第 10 章）。accepted=False 时读 error_code。"""
@@ -643,6 +666,37 @@ class GameState:
 
     def my_events(self) -> list[Event]:
         return [e for e in self.events if e.payload.get("playerId") == self.player_id]
+
+    def scout_marker_events(self) -> list[ScoutMarkerEvent]:
+        """Return normalized scout marker events from the current frame."""
+        out: list[ScoutMarkerEvent] = []
+        for e in self.events:
+            if e.type not in ("SCOUT_MARKER_ADD", "SCOUT_MARKER_EXPIRE", "SCOUT_MARKER_CONSUME"):
+                continue
+            out.append(ScoutMarkerEvent(
+                event_id=e.event_id,
+                type=e.type,
+                player_id=e.payload.get("playerId", 0),
+                target_node_id=e.payload.get("targetNodeId") or e.payload.get("nodeId") or "",
+                expire_round=e.payload.get("expireRound", 0),
+            ))
+        return out
+
+    def window_card_reveals(self) -> list[WindowCardReveal]:
+        """Return normalized WINDOW_CARD_REVEAL events from the current frame."""
+        out: list[WindowCardReveal] = []
+        for e in self.events:
+            if e.type != "WINDOW_CARD_REVEAL":
+                continue
+            out.append(WindowCardReveal(
+                event_id=e.event_id,
+                contest_id=e.payload.get("contestId", ""),
+                round_index=e.payload.get("roundIndex", 0),
+                red_card=e.payload.get("redCard", ""),
+                blue_card=e.payload.get("blueCard", ""),
+                winner=e.payload.get("winner", ""),
+            ))
+        return out
 
     def my_state(self) -> str:
         return self.me.state
