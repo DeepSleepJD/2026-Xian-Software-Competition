@@ -181,5 +181,18 @@ class GuardHandlingTests(unittest.TestCase):
         self.assertEqual({"action": "MOVE", "targetNodeId": "SF"}, s._step_to("SF", {}))
 
 
+class TravellingStateTests(unittest.TestCase):
+    def test_waiting_with_stale_route_edge_is_not_travelling(self) -> None:
+        s = Strategy(1001)
+        me = {"state": "WAITING", "currentNodeId": "S02", "nextNodeId": None,
+              "routeEdgeId": "E01"}
+        self.assertFalse(s._is_travelling(me, "WAITING", "S02"))
+
+    def test_waiting_with_next_node_is_travelling(self) -> None:
+        s = Strategy(1001)
+        me = {"state": "WAITING", "currentNodeId": "S02", "nextNodeId": "S03",
+              "routeEdgeId": "E02"}
+        self.assertTrue(s._is_travelling(me, "WAITING", "S02"))
+
 if __name__ == "__main__":
     unittest.main()

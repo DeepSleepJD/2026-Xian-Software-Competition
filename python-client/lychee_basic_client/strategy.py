@@ -9,16 +9,11 @@ from .graph import Graph
 # main-car states where we are busy and should just let the engine run
 BUSY_STATES = {"PROCESSING", "VERIFYING", "FORCED_PASSING", "RESTING", "CONTESTING"}
 
-# Task base to chase: 90 fills the delivery/time bonus, 110 the top milestone;
-# a bit past that (task score caps at 180) still turns cheap on-route tasks into
-# points, and we have a lot of idle slack before the gate opens at rush.
-TASK_BASE_TARGET = 150
-# task score caps at 180 (~base 130); farm up to here by dwelling for refreshes
-TASK_FARM_TARGET = 130
-LINGER_FROM = 250          # only farm in the end-game task-rich zone
-LINGER_UNTIL = 430         # stop before the rush gate opens (~450) so we deliver
-MAX_LINGER_PER_NODE = 20   # bounded dwell so we keep progressing
-# T06 (争马换乘) burns a horse on claim; skip unless we hold one.
+# Task base to chase: 90 fills the delivery/time bonus and 110 reaches the
+# top milestone. Past 110 only raw task points improve, while the detours can
+# lose the delivery/freshness race against faster demo routes.
+TASK_BASE_TARGET = 110
+# T06 burns a horse on claim; skip unless we hold one.
 HORSE_KEYS = ("FAST_HORSE", "SHORT_HORSE")
 # Ice box raises delivery freshness (freshness score = floor(fresh/100*180)).
 # Grab a few on-route and spend them right before delivery to lock in freshness.
@@ -57,9 +52,6 @@ class Strategy:
         self._guard_blocked: set[str] = set()
         # obstacle nodes we've already sent a squad to clear (avoid re-dispatch)
         self._squad_clear_sent: set[str] = set()
-        # task-farming: candidate nodes tasks can spawn at, and frames dwelt at each
-        self.task_candidates: set[str] = set()
-        self._lingered: dict[str, int] = {}
         # (contestId, roundIndex) pairs we've already played -> never double-play a
         # tap or replay an ended window (that can server-error us into a retire)
         self._contest_played: set[tuple] = set()
@@ -76,12 +68,6 @@ class Strategy:
         self.terminal_node = terminals[0]
         process_nodes = m.get("gameplay", {}).get("processNodes", [])
         self.graph.load_process_nodes(process_nodes, self.gate_node)
-        # nodes where imperial tasks can spawn (for end-game task farming)
-        candidates = m.get("gameplay", {}).get("taskCandidates", {}) or {}
-        self.task_candidates = {
-            nid for nodes in candidates.values() for nid in nodes
-            if nid not in (self.gate_node, self.terminal_node)
-        }
 
     # ---- per-frame decision ----
     def decide(self, inquire_data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -160,7 +146,7 @@ class Strategy:
 
         # travelling on an edge: keep pushing toward the current target end.
         # NB: WAITING while parked on a node is NOT travelling -> fall through.
-        on_edge = state == "MOVING" or (state == "WAITING" and me.get("routeEdgeId"))
+        on_edge = self._is_travelling(me, state, node)
         if on_edge:
             target = me.get("nextNodeId") or self.graph.next_hop(node, self.gate_node)
             if not target:
@@ -168,7 +154,7 @@ class Strategy:
             if target in self._guard_blocked:
                 # the node we're heading into just got guarded. We can't FORCED_PASS
                 # from mid-edge (MOVING_ACTION_FORBIDDEN), so change course to another
-                # neighbour of the segment start that routes around it (rule 4.2 改道);
+                # neighbour of the segment start that routes around it;
                 # if there's no way around (a funnel), wait for the guard to weather.
                 alt = self.graph.next_hop(node, self.gate_node, avoid=self._guard_blocked)
                 if alt and alt != target:
@@ -200,10 +186,10 @@ class Strategy:
                     return [M.use_resource(ICE_BOX)]
                 return [self._mv(self.terminal_node)]
             if phase == "RUSH":
-                # spend our one rush tactic on 护果令 (RUSH_PROTECT) here, before
+                # spend our one rush tactic on RUSH_PROTECT here, before
                 # verifying: it cuts freshness loss to x0.2 for 30 frames, which
                 # covers verify + the hop to S15 + delivery (and the 4th weather
-                # window at 440-480, often 酷暑 x1.5). It costs no fruit and speed
+                # window at 440-480. It costs no fruit and speed
                 # tactics are useless to us (delivery is gated by the rush frame).
                 if me.get("rushTacticUsedCount", 0) == 0 and me.get("freshness", 100) < 100:
                     return [M.rush_protect()]
@@ -219,25 +205,6 @@ class Strategy:
         # PROCESS is correct -- marking it done on the mere sight of a PROCESSING
         # state (or moving off early) leaves us unable to MOVE (PROCESS_REQUIRED)
         # and dead-locked.
-        # grab an imperial task here FIRST -- tasks expire, whereas the station
-        # process and resources don't, and we may claim tasks/resources at a
-        # process station before completing its process (task book 2.4.1). Doing
-        # the mandatory process first was letting on-node tasks expire during it.
-        task = self._claimable_task_here(node, tasks, me, round_no)
-        if task is not None:
-            tid = task["taskId"]
-            self._task_attempts[tid] = self._task_attempts.get(tid, 0) + 1
-            return [M.claim_task(tid)]
-
-        # stock useful resources this node has (no detour)
-        res = self._resource_to_claim(node, nodes_by_id, me)
-        if res is not None:
-            return [M.claim_resource(node, res)]
-
-        # mandatory fixed-process station, detected from LIVE node state
-        # (processRound > 0) so it works even if the map moves process points off
-        # the opening list. Marked done ONLY on PROCESS_COMPLETE (see
-        # _account_process); moving off early -> PROCESS_REQUIRED dead-lock.
         needs_process = (
             node not in (self.gate_node, self.terminal_node)
             and (
@@ -248,24 +215,21 @@ class Strategy:
         if needs_process and node not in self.processed:
             return [M.process()]
 
-        # task-farm: with big frame slack, dwell briefly at a task-candidate node
-        # in the end-game to catch tasks refreshing there (task score caps at 180,
-        # ~base 130). Bounded per node so we still progress and deliver on time.
-        if self._should_linger(node, round_no):
-            self._lingered[node] = self._lingered.get(node, 0) + 1
-            return [M.wait()]
+        # opportunistic: grab an on-route imperial task at this node
+        task = self._claimable_task_here(node, tasks, me, round_no)
+        if task is not None:
+            tid = task["taskId"]
+            self._task_attempts[tid] = self._task_attempts.get(tid, 0) + 1
+            return [M.claim_task(tid)]
+
+        # opportunistic: stock useful resources this node has (no detour)
+        res = self._resource_to_claim(node, nodes_by_id, me)
+        if res is not None:
+            return [M.claim_resource(node, res)]
 
         # head toward the best worth-it task/ice waypoint, else straight to the gate
         dest = self._best_waypoint(node, nodes_by_id, tasks, me, round_no)
         return self._advance(node, nodes_by_id, dest)
-
-    def _should_linger(self, node: str, round_no: int) -> bool:
-        return (
-            node in self.task_candidates
-            and self.task_base < TASK_FARM_TARGET
-            and LINGER_FROM <= round_no < LINGER_UNTIL
-            and self._lingered.get(node, 0) < MAX_LINGER_PER_NODE
-        )
 
     def _resource_to_claim(
         self, node: str, nodes_by_id: dict[str, Any], me: dict[str, Any]
@@ -278,6 +242,17 @@ class Strategy:
             if stock.get(rtype, 0) > 0 and held.get(rtype, 0) < cap:
                 return rtype
         return None
+
+    def _is_travelling(self, me: dict[str, Any], state: str, node: str) -> bool:
+        """Whether the main car is actually on an edge and should keep issuing
+        MOVE. Some server frames can retain routeEdgeId after arriving/waiting on
+        a node; nextNodeId is the reliable signal that a route is still active."""
+        if state == "MOVING":
+            return True
+        if state != "WAITING":
+            return False
+        nxt = me.get("nextNodeId")
+        return bool(me.get("routeEdgeId") and nxt and nxt != node)
 
     def _account_process(self, events: list[dict[str, Any]]) -> None:
         """Mark a fixed-process node done only when the server says so."""
