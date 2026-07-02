@@ -149,6 +149,27 @@ class CombatStrategyTests(unittest.TestCase):
         self.assertEqual({"action": "SET_GUARD", "targetNodeId": "S10",
                           "extraGoodFruit": 2}, guard.actions[0])
 
+    def test_set_guard_yields_to_onnode_task_claim(self) -> None:
+        # A2：同帧 economy 抢脚下任务(110) 与 combat 设卡(108) → 仲裁选抢任务
+        claim = Intent(kind="economy", priority=110,
+                       actions=[{"action": "CLAIM_TASK", "taskId": "T_x"}])
+        guard = Intent(kind="combat.guard", priority=PRIORITY_SET_GUARD,
+                       actions=[{"action": "SET_GUARD", "targetNodeId": "S10",
+                                 "extraGoodFruit": 2}])
+        acts = merge_intents([guard, claim])
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_x"}], acts)
+
+    def test_set_guard_still_beats_bare_delivery_move(self) -> None:
+        # 无经济动作时设卡(108) 仍先于纯走位(100) 触发
+        move = Intent(kind="delivery", priority=100,
+                      actions=[{"action": "MOVE", "targetNodeId": "S11"}])
+        guard = Intent(kind="combat.guard", priority=PRIORITY_SET_GUARD,
+                       actions=[{"action": "SET_GUARD", "targetNodeId": "S10",
+                                 "extraGoodFruit": 2}])
+        acts = merge_intents([move, guard])
+        self.assertEqual([{"action": "SET_GUARD", "targetNodeId": "S10",
+                           "extraGoodFruit": 2}], acts)
+
     def test_does_not_set_guard_at_terminal(self) -> None:
         acts = self.actions(inquire(200, node="S15", opp_node="S09"))
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])

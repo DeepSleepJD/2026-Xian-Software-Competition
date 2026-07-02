@@ -13,7 +13,11 @@ from ..state import Contest, GameState
 from . import Intent, Strategy, safety
 
 PRIORITY_COMBAT_MAIN = 130
-PRIORITY_SET_GUARD = 129
+# 设卡让位经济动作（P4/07-03 复盘：现网两连败均在咽喉先 SET_GUARD 再抢任务，
+# 30 分任务被对手先锁；设卡本身两局 bounty=0 纯亏）。落在 economy(110) 与
+# delivery(100) 之间：有抢任务/领资源/用冰鉴/用马时先做，无经济动作时（raw 拿满/
+# 无可行任务）设卡仍先于纯走位触发，保留巡航中在咽喉设卡的能力。破卡/削卡/清障不动。
+PRIORITY_SET_GUARD = 108
 PRIORITY_SQUAD_WEAKEN = 128
 PRIORITY_SQUAD_SCOUT = 127
 PRIORITY_WINDOW_CARD = 125

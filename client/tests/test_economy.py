@@ -258,13 +258,24 @@ class EconomyTaskTests(unittest.TestCase):
         self.assertEqual([], self.step(inquire(3, node="B", tasks=[task("T_1", "B")],
                                                action_results=rej2)))
 
-    def test_obstacle_task_claimed_from_adjacent(self) -> None:
-        # E 有障碍（清障类任务）：进不去，站相邻节点 B 处理
+    def test_obstacle_clear_task_claimed_from_adjacent(self) -> None:
+        # E 有障碍 + T04 清障任务：进不去，协议 690 允许站相邻节点 B 处理
         nodes = [{"nodeId": "E", "hasObstacle": True, "obstacleType": "ROCK"}]
-        acts = self.acts(inquire(1, node="B", nodes=nodes, tasks=[task("T_e", "E")],
+        acts = self.acts(inquire(1, node="B", nodes=nodes,
+                                 tasks=[task("T_e", "E", template="T04")],
                                  action_results=[{"round": 0, "playerId": MY_ID,
                                                   "action": "PROCESS", "accepted": True}]))
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_e"}], acts)
+
+    def test_obstacle_non_clear_task_skipped(self) -> None:
+        # E 有障碍但任务是普通 T01（非清障）：协议 690 须停目标节点，而障碍节点
+        # 又不可 MOVE 到达 → 不得从相邻节点误发 CLAIM_TASK（现网 NOT_AT_TARGET_NODE）
+        nodes = [{"nodeId": "E", "hasObstacle": True, "obstacleType": "ROCK"}]
+        acts = self.acts(inquire(1, node="B", nodes=nodes,
+                                 tasks=[task("T_e", "E")],
+                                 action_results=[{"round": 0, "playerId": MY_ID,
+                                                  "action": "PROCESS", "accepted": True}]))
+        self.assertNotIn({"action": "CLAIM_TASK", "taskId": "T_e"}, acts)
 
     def test_consumable_task_needs_stock(self) -> None:
         # T06 类模板需要消耗马：没有库存不接（转蹲守），有库存接

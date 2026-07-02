@@ -465,7 +465,14 @@ class EconomyStrategy(Strategy):
                 continue   # 消耗型任务（如 T06 耗马）没有本钱不接
             ns = state.node_states.get(t.node_id)
             if ns is not None and ns.has_obstacle:
-                # 清障任务目标节点进不去：在相邻节点处理（任务书 5.2 例外）
+                # 协议任务书 690：除 T04 清障任务外，主车队必须停在任务目标节点
+                # 才能处理；T04 可在目标障碍节点或相邻节点处理。而障碍节点不可用
+                # 普通 MOVE 到达（协议 294）→ 非清障任务在障碍未清前不可达，跳过
+                # （障碍被清后该任务会重新进候选），否则会对相邻节点误发 CLAIM_TASK
+                # 得 NOT_AT_TARGET_NODE（现网 1349 实证）
+                is_clear = t.process_type == "CLEAR_OBSTACLE" or t.task_template_id == "T04"
+                if not is_clear:
+                    continue
                 claim_nodes = [n for n, _ in state.neighbors(t.node_id)]
                 if not claim_nodes:
                     continue
