@@ -29,8 +29,8 @@ from . import Intent, Strategy
 
 PRIORITY_ICE_USE = 120
 PRIORITY_ECONOMY = 110
-TASK_SCORE_GOAL = 110         # 拿满即闭嘴（里程碑 60/90/110 → +15/+35/+50，无 130 档；
-                              # 皇榜分封顶 180=raw130+50，P3 先冲 110 档验证）
+TASK_SCORE_GOAL = 130         # 拿满即闭嘴：里程碑 60/90/110 → +15/+35/+50（无 130 档），
+                              # 皇榜分封顶 180 = raw 130 + 50，超过 130 边际为零
                               # 注意 inquire.taskScore 是原始任务分，里程碑奖励结算时才补发
 ICE_BOX_VALUE = 18.0          # +10 鲜度 ≈ +18 分（策略文档定量）
 DETOUR_COST_PER_FRAME = 0.12  # 绕路 1 帧的点数成本：移动鲜度损耗 ~0.055/帧 ×
@@ -42,6 +42,12 @@ ICE_USE_MARGIN = 2.0          # freshness ≤ 阈值+2 即用
 ENDGAME_MARGIN = 40           # 目标完成帧 + 回终点帧 ≤ 总帧数 − 此余量
                               # （回程按终点算，途经宫门的验核读条已计入路径成本）
 _INF = 10 ** 9
+
+
+def _task_points(raw: int) -> int:
+    """皇榜任务分结算值：raw + 里程碑奖励，封顶 180（任务书 7.2）。"""
+    bonus = 50 if raw >= 110 else 35 if raw >= 90 else 15 if raw >= 60 else 0
+    return min(180, raw + bonus)
 CLAIM_REJECT_LIMIT = 2        # 领取连续被拒此数后拉黑目标
 MOVE_REJECT_LIMIT = 4         # 赶路连续被拒此数后拉黑目标
 BACKOFF_ROUNDS = 50
@@ -100,7 +106,8 @@ class _Target:
     """一个贪心候选：到 claim_nodes 任一节点停靠后发 action。"""
 
     def __init__(self, key: str, value: float, proc_frames: int,
-                 claim_nodes: list[str], action: dict, expire_round: int, note: str) -> None:
+                 claim_nodes: list[str], action: dict, expire_round: int, note: str,
+                 raw_score: int = 0) -> None:
         self.key = key
         self.value = value
         self.proc_frames = proc_frames
@@ -108,6 +115,17 @@ class _Target:
         self.action = action
         self.expire_round = expire_round
         self.note = note
+        self.raw_score = raw_score      # 任务面值（进 raw 累计）；资源类为 0
+
+    def marginal_value(self, base_raw: int) -> float:
+        """在 raw 累计 base_raw 之上做本目标的真实边际分值。
+
+        任务按里程碑/封顶后的结算差值算（跨档加成、130 后归零都在内）；
+        资源类不进 raw，用固定 value。
+        """
+        if self.raw_score <= 0:
+            return self.value
+        return float(_task_points(base_raw + self.raw_score) - _task_points(base_raw))
 
 
 class EconomyStrategy(Strategy):
@@ -190,8 +208,10 @@ class EconomyStrategy(Strategy):
         target, spot = self._pick_target(state, cur)
         self._cur_target_key = target.key if target else ""
         if target is None:
-            # 无候选：离终局截止尚早就原地蹲守刷新（任务只在刷新后才可见）
-            if self._can_linger(state, cur):
+            # 无候选：离终局截止尚早就原地蹲守刷新（任务只在刷新后才可见）。
+            # 只为未拿到的里程碑档（<110）蹲；110 后边际最多 +10，
+            # 抵不过蹲守的用时分流失（~0.117/帧）
+            if me.task_score < 110 and self._can_linger(state, cur):
                 return Intent(kind="economy", priority=PRIORITY_ECONOMY,
                               actions=[{"action": "WAIT"}], note="蹲守任务刷新")
             return None
@@ -241,9 +261,11 @@ class EconomyStrategy(Strategy):
         from_spot = {spot: pathing.all_costs(state, spot)
                      for spot in {s for _, s, _, _ in feasible}}
 
+        raw = state.me.task_score
+
         def net_of(cand: _Target, to: int, back: int) -> float:
             cost = max(0, to + cand.proc_frames + back - base_frames)
-            return cand.value - cost * DETOUR_COST_PER_FRAME
+            return cand.marginal_value(raw) - cost * DETOUR_COST_PER_FRAME
 
         best: tuple[float, int, _Target, str] | None = None
         for cand, spot, to_frames, done_round in feasible:
@@ -267,7 +289,8 @@ class EconomyStrategy(Strategy):
                 if done2 + back2 > deadline:
                     continue
                 cost2 = max(0, to2 + c2.proc_frames + back2 - back)
-                follow = max(follow, c2.value - cost2 * DETOUR_COST_PER_FRAME)
+                follow = max(follow, c2.marginal_value(raw + cand.raw_score)
+                             - cost2 * DETOUR_COST_PER_FRAME)
             plan = net + follow
             if cand.key == self._cur_target_key:
                 plan += TARGET_STICKINESS
@@ -316,7 +339,8 @@ class EconomyStrategy(Strategy):
                 key=t.task_id, value=float(t.score), proc_frames=t.process_round,
                 claim_nodes=claim_nodes,
                 action={"action": "CLAIM_TASK", "taskId": t.task_id},
-                expire_round=t.expire_round, note=f"任务{t.task_id}@{t.node_id}"))
+                expire_round=t.expire_round, note=f"任务{t.task_id}@{t.node_id}",
+                raw_score=int(t.score)))
 
         if me.resources.get("ICE_BOX", 0) < ICE_BOX_MAX_HOLD:
             for node_id, ns in state.node_states.items():
