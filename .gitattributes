@@ -1,0 +1,2 @@
+# 比赛提交物在 Linux 运行，shell 脚本必须保持 LF（Windows 检出也不转 CRLF）
+*.sh text eol=lf

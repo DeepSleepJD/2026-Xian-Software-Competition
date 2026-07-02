@@ -1,0 +1,40 @@
+# P1 执行计划
+
+> 验证命令统一：`python tools/run_match.py --client-cmd "python client/main.py {player_id} {host} {port}" --no-ui`
+> 分数看 `refs/debug-kit-v1/arena/server/data.csv`，客户端日志在 `tools/logs/`。
+
+## 里程碑 1：600 帧不掉线
+
+- [x] 1.1 建 `client/` 目录骨架（架构文档第二节结构），空模块 + main.py 入口解析 `<playerId> <host> <port>`
+- [x] 1.2 net.py：移植官方 framing（5 位十进制长度前缀收发），连接/重试/EOF 处理
+- [x] 1.3 protocol.py 最小版：识别 start/inquire/over/error 消息类型，取 round 号；构造注册/ready/心跳 action 消息
+- [x] 1.4 runtime.py：主循环（注册 → ready → 每帧 inquire→响应）+ 铁律兜底（异常全捕获、round 匹配、时间预算、空心跳）
+- [x] 1.5 recorder.py：每帧收发 jsonl 落盘
+- [x] 1.6 start.sh
+- [x] **验证 1**：run_match.py 对打官方 demo，全程 600 帧 online=TRUE，data.csv 出分（我方 0 分正常，demo 正常得分）——2026-07-02：1001 online=TRUE round=600，recorder 602收/602发；demo 2002 得 420
+- [x] **验证 2**：铁律测试——在策略处人为抛异常，客户端仍打满 600 帧——单测覆盖（CrashingStrategy/UnserializableStrategy/error消息/畸形消息，8 用例全绿）
+
+里程碑 1 备注：over.msg_data 的 round/players 字段名与猜测不符（日志打出 None），M2 对照协议第 9 章修正 over 解析。
+
+## 里程碑 2：GameState/Intent 契约定稿
+
+- [ ] 2.1 对照 `refs/debug-kit-v1/一骑红尘：荔枝争运战 通信协议.md` 逐字段解析 start/inquire → state.py GameState
+- [ ] 2.2 Intent 数据类 + Strategy 基类 + arbiter.py 首版（优先级合并去冲突）
+- [ ] 2.3 单测：用 start消息.json / inquire消息.json 夹具驱动 protocol/state（不碰 socket）
+- [ ] **验证**：单测全绿；接口契约冻结记录到 design.md
+
+## 里程碑 3：寻路 + 主线交付
+
+- [ ] 3.1 pathing.py：从 start 地图建图 + 最短路（支持换图变体，不写死地图）
+- [ ] 3.2 strategy/delivery.py：移动/处理/验核/交付状态机
+- [ ] **验证**：对打官方 demo，100% 交付，得分 ≥ 461 基准，力争 ≥ 500
+
+## 收尾
+
+- [ ] 全量质量检查（trellis-check）
+- [ ] 更新 CLAUDE.md 进度勾选 P1 + spec 更新（如有沉淀）
+- [ ] 提交 commit
+
+## 回滚点
+
+- 每个里程碑验证通过后各提交一次 commit，回滚以里程碑为粒度。
