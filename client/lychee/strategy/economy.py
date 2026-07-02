@@ -7,7 +7,8 @@
 - 对方归属（ownerPlayerId）或保护（protectionPlayerId）的任务不碰
 
 与 delivery 的分工：economy 高优先级（110/120）在 NORMAL 阶段抢主车队动作权
-去做任务，一到 RUSH 或任务分拿满 90 即闭嘴，delivery（100）接管直奔宫门；
+去做任务/领冰鉴，一到 RUSH 即闭嘴，delivery（100）接管直奔宫门；任务分拿满
+（raw≥130 封顶）后任务候选关闭但冰鉴领取照常（P3 修正：不再连坐闭嘴）；
 冰鉴使用（120）不受任务窗口限制，交付前全程有效。
 固定处理站点未处理完不得离站（任务书 2.4.1）→ economy 在此类站点上
 不抢 MOVE/WAIT，让位 delivery 的 PROCESS（用与 delivery 同源的完成推断）。
@@ -202,8 +203,10 @@ class EconomyStrategy(Strategy):
 
     def _propose_economy(self, state: GameState, cur: str) -> Intent | None:
         me = state.me
-        if state.phase != "NORMAL" or me.verified or me.task_score >= TASK_SCORE_GOAL:
+        if state.phase != "NORMAL" or me.verified:
             return None
+        # 任务分闸门只挡任务候选（见 _candidates），不连坐冰鉴领取——
+        # P2/P3-1 实测：raw 拿满后整体闭嘴导致脚下 0 绕路的 S07 冰鉴都不领
 
         target, spot = self._pick_target(state, cur)
         self._cur_target_key = target.key if target else ""
@@ -317,7 +320,7 @@ class EconomyStrategy(Strategy):
     def _candidates(self, state: GameState, cur: str) -> list[_Target]:
         me = state.me
         out: list[_Target] = []
-        for t in state.tasks:
+        for t in state.tasks if me.task_score < TASK_SCORE_GOAL else []:
             if not t.active or t.completed or t.failed or not t.node_id:
                 continue
             if t.owner_player_id not in (0, state.player_id):

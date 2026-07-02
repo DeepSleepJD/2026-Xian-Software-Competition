@@ -249,6 +249,15 @@ class EconomyIceBoxTests(unittest.TestCase):
         acts = self.acts(inquire(1, node="A", nodes=nodes, resources={"ICE_BOX": 2}))
         self.assertNotIn("CLAIM_RESOURCE", [a["action"] for a in acts])
 
+    def test_claims_ice_box_after_task_goal(self) -> None:
+        # 任务分拿满只关任务候选，冰鉴领取不连坐（P3 修正：756 局停 S07
+        # 脚下冰鉴 0 绕路却因整体闭嘴没领）
+        nodes = [{"nodeId": "A", "resourceStock": {"ICE_BOX": 1}}]
+        acts = self.acts(inquire(1, node="A", nodes=nodes, tasks=[task("T_1", "B")],
+                                 task_score=TASK_SCORE_GOAL))
+        self.assertEqual([{"action": "CLAIM_RESOURCE", "targetNodeId": "A",
+                           "resourceType": "ICE_BOX"}], acts)
+
     def test_ice_en_route_claimed_before_task(self) -> None:
         # 一步前瞻：脚下的冰鉴先领（读条 2 帧），再去做前面的任务。
         # 单步贪心会因"前面总有更大的任务"而永远跳过顺路冰鉴（实测全场 0 领取）
