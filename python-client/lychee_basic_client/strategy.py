@@ -17,7 +17,13 @@ HORSE_KEYS = ("FAST_HORSE", "SHORT_HORSE")
 # Ice box raises delivery freshness (freshness score = floor(fresh/100*180)).
 # Grab a few on-route and spend them right before delivery to lock in freshness.
 ICE_BOX = "ICE_BOX"
-ICE_BOX_CAP = 3
+# Resources worth stocking on-route (no detour), with a per-type cap.
+# Ice box -> freshness; documents -> YAN_DIE ammo for gate/task windows.
+STOCK_TARGETS = {
+    ICE_BOX: 3,
+    "PASS_TOKEN": 2,
+    "OFFICIAL_PERMIT": 2,
+}
 
 
 class Strategy:
@@ -148,20 +154,25 @@ class Strategy:
             self._task_attempts[tid] = self._task_attempts.get(tid, 0) + 1
             return [M.claim_task(tid)]
 
-        # opportunistic: stock ice boxes if this node has any (no detour)
-        if self._should_claim_ice(node, nodes_by_id, me):
-            return [M.claim_resource(node, ICE_BOX)]
+        # opportunistic: stock useful resources this node has (no detour)
+        res = self._resource_to_claim(node, nodes_by_id, me)
+        if res is not None:
+            return [M.claim_resource(node, res)]
 
         # otherwise advance along the shortest route toward the gate
         return self._advance(node, nodes_by_id)
 
-    def _should_claim_ice(
+    def _resource_to_claim(
         self, node: str, nodes_by_id: dict[str, Any], me: dict[str, Any]
-    ) -> bool:
-        if me.get("resources", {}).get(ICE_BOX, 0) >= ICE_BOX_CAP:
-            return False
+    ) -> Optional[str]:
+        """A useful resource in stock here that we're still under our cap on
+        (ice box prioritised over window-card documents), else None."""
         stock = nodes_by_id.get(node, {}).get("resourceStock", {}) or {}
-        return stock.get(ICE_BOX, 0) > 0
+        held = me.get("resources", {}) or {}
+        for rtype, cap in STOCK_TARGETS.items():
+            if stock.get(rtype, 0) > 0 and held.get(rtype, 0) < cap:
+                return rtype
+        return None
 
     def _account_tasks(self, tasks: list[dict[str, Any]]) -> None:
         """Tally task-base from tasks the engine reports as completed by us."""
