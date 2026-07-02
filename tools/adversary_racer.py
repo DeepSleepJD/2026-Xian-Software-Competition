@@ -166,6 +166,45 @@ class RacerObstacleClearer(Strategy):
                        note=f"清障@{path[1]}")]
 
 
+class RacerResourceClaimer(Strategy):
+    """到站领冰鉴/马（脚下有库存且没到持有上限就领）——现网强对手靠冰鉴保鲜跑山路。"""
+
+    CAPS = {"ICE_BOX": 2, "FAST_HORSE": 1, "SHORT_HORSE": 1}
+
+    def propose(self, state: GameState) -> list[Intent]:
+        me = state.me
+        if me.delivered or me.retired or me.current_process is not None:
+            return []
+        if me.state not in ("IDLE", "WAITING") or me.next_node_id:
+            return []
+        cur = me.current_node_id
+        ns = state.node_states.get(cur) if cur else None
+        if ns is None:
+            return []
+        for rt, cap in self.CAPS.items():
+            if ns.resource_stock.get(rt, 0) >= 1 and me.resources.get(rt, 0) < cap:
+                return [Intent(kind="racer.claim", priority=PRIORITY_GRAB - 1,
+                               actions=[{"action": "CLAIM_RESOURCE", "targetNodeId": cur,
+                                         "resourceType": rt}], note=f"领{rt}")]
+        return []
+
+
+class RacerIceUser(Strategy):
+    """鲜度跌到 80 就用冰鉴保鲜（停靠时用）——把山路的鲜度代价抹平。"""
+
+    def propose(self, state: GameState) -> list[Intent]:
+        me = state.me
+        if me.delivered or me.retired or me.current_process is not None:
+            return []
+        if me.state != "IDLE" or me.next_node_id:   # 只在节点上停稳时用，绝不饿死移动
+            return []
+        if me.resources.get("ICE_BOX", 0) < 1 or me.freshness > 80 or me.freshness <= 0:
+            return []
+        return [Intent(kind="racer.ice", priority=PRIORITY_HORSE + 1,
+                       actions=[{"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}],
+                       note=f"用冰鉴@{me.freshness:.0f}")]
+
+
 class RacerHorseUser(Strategy):
     def propose(self, state: GameState) -> list[Intent]:
         me = state.me
@@ -220,7 +259,8 @@ def main(argv: list[str]) -> int:
             player_id=args.player_id,
             player_name="racer-adversary",
             version=VERSION,
-            strategies=[RacerTaskGrabber(), RacerObstacleClearer(), RacerHorseUser(),
+            strategies=[RacerTaskGrabber(), RacerResourceClaimer(), RacerIceUser(),
+                        RacerObstacleClearer(), RacerHorseUser(),
                         RacerDelivery(args.stagger)],
             recorder=Recorder.from_env(args.player_id),
         )
