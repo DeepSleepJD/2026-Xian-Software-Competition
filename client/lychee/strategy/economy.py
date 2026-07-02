@@ -37,7 +37,8 @@ ICE_BOX_VALUE = 18.0          # +10 鲜度 ≈ +18 分（策略文档定量）
 DETOUR_COST_PER_FRAME = 0.12  # 绕路 1 帧的点数成本：移动鲜度损耗 ~0.055/帧 ×
                               # 鲜度边际价值 ~1.8 分 + 风险余量（时间本身不值钱，洞察#3）
 TARGET_STICKINESS = 2.0       # 换目标需净值优势超过此值（防止停靠间目标抖动）
-ICE_BOX_MAX_HOLD = 2          # 库存到量后不再追领
+ICE_BOX_MAX_HOLD = 2          # 库存到量后不再追领（本图第 3 个在 S06 支线，
+                              # 实账往返~118帧鲜度+用时亏损 > 冰鉴收益，正确放弃）
 RESOURCE_CLAIM_FRAMES = 2     # 实测资源领取读条帧数（估值用，非规则常量）
 ICE_USE_MARGIN = 2.0          # freshness ≤ 阈值+2 即用
 ENDGAME_MARGIN = 40           # 目标完成帧 + 回终点帧 ≤ 总帧数 − 此余量
