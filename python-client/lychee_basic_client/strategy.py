@@ -38,10 +38,9 @@ class Strategy:
         self.gate_node = "S14"
         self.terminal_node = "S15"
         self.start_node = "S01"
-        # nodes whose mandatory fixed-process we have already completed this run
+        # nodes whose mandatory fixed-process the server has confirmed complete
+        # (via a PROCESS_COMPLETE event)
         self.processed: set[str] = set()
-        # per-node bookkeeping so we can tell "process finished" from "not started yet"
-        self._saw_processing_at: Optional[str] = None
         # task accounting
         self.task_base = 0                       # sum of scores of tasks we completed
         self._counted_tasks: set[str] = set()    # taskIds already added to task_base
@@ -91,6 +90,7 @@ class Strategy:
         nodes_by_id = {n["nodeId"]: n for n in inquire_data.get("nodes", [])}
 
         self._account_tasks(tasks)
+        self._account_process(inquire_data.get("events") or [])
         # enemy guards blocking passage, read straight off the node state each frame
         # (we never set guards, so any guard is the opponent's). Recomputed every
         # frame so a weathered/broken guard automatically becomes passable again.
@@ -139,7 +139,6 @@ class Strategy:
         # NB: WAITING while parked on a node is NOT travelling -> fall through.
         on_edge = state == "MOVING" or (state == "WAITING" and me.get("routeEdgeId"))
         if on_edge:
-            self._saw_processing_at = None
             target = me.get("nextNodeId") or self.graph.next_hop(node, self.gate_node)
             if not target:
                 return []
@@ -156,8 +155,6 @@ class Strategy:
 
         # busy finishing something server-side: don't interrupt
         if state in BUSY_STATES:
-            if state == "PROCESSING":
-                self._saw_processing_at = node
             return []
 
         # here state is IDLE / WAITING-on-node / COST_BANKRUPT: pick a fresh action
@@ -190,14 +187,14 @@ class Strategy:
                 return [M.verify_gate()]
             return []  # wait for the rush phase to open the gate
 
-        # mandatory fixed-process node not yet cleared this visit -> finish it first
+        # mandatory fixed-process node not confirmed done -> keep PROCESSing.
+        # We mark it done ONLY on the server's PROCESS_COMPLETE event (see
+        # _account_process); a process interrupted by a contest returns us to IDLE
+        # unfinished, and re-issuing PROCESS is correct -- marking it done on the
+        # mere sight of a PROCESSING state would leave us unable to MOVE
+        # (PROCESS_REQUIRED) and dead-locked.
         if node in self.graph.process_rounds and node not in self.processed:
-            if self._saw_processing_at == node:
-                # we were PROCESSING here and are IDLE again -> finished
-                self.processed.add(node)
-                self._saw_processing_at = None
-            else:
-                return [M.process()]
+            return [M.process()]
 
         # opportunistic: grab an on-route imperial task at this node
         task = self._claimable_task_here(node, tasks, me, round_no)
@@ -226,6 +223,14 @@ class Strategy:
             if stock.get(rtype, 0) > 0 and held.get(rtype, 0) < cap:
                 return rtype
         return None
+
+    def _account_process(self, events: list[dict[str, Any]]) -> None:
+        """Mark a fixed-process node done only when the server says so."""
+        for e in events:
+            if e.get("type") == "PROCESS_COMPLETE":
+                pl = e.get("payload") or {}
+                if pl.get("playerId") == self.player_id and pl.get("targetNodeId"):
+                    self.processed.add(pl["targetNodeId"])
 
     def _account_tasks(self, tasks: list[dict[str, Any]]) -> None:
         """Tally task-base from tasks the engine reports as completed by us."""
