@@ -38,3 +38,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: P4 对抗层后续 backlog
+
+**Date**: 2026-07-02
+**Task**: P4 对抗层后续 backlog
+**Branch**: `xichen`
+
+### Summary
+
+完成主动设卡、资源语义表、马类使用、天气感知路径成本与 HOT 冰鉴阈值，并补充对应单测和 backend strategy contract spec。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a40b2c2` | (see git log) |
+| `4f99226` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
