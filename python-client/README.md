@@ -23,6 +23,27 @@
 
 调测方法见调测包 `调测\test.bat`：把 `调测\client\start.bat` 换成启动本客户端即可（注册 playerId=1001，连接服务端 `127.0.0.1:<port>`）。
 
+## 对局记录与失分分析（`recorder.py` + `analyze.py`）
+
+加 `--record-dir <目录>` 启动客户端，会把每个结算帧的服务端 `inquire`（含双方完整状态、任务、窗口、事件、动作结果）以及结束时的 `over`（双方权威最终分）写成一个 JSONL 记录文件：
+
+```powershell
+py -3 .\basic_client.py --host 127.0.0.1 --port 30000 --player-id 1001 --record-dir .\rec
+```
+
+对局结束后分析该记录，定位「为什么分不如对手」：
+
+```powershell
+py -3 -m lychee_basic_client.analyze .\rec\<对局>_1001_<时间>.jsonl
+```
+
+报告分两层：
+
+- **L1 丢在哪一项**：拿 `over` 双方 `scoreDetail` 逐项相减（送达/任务/好果/鲜度/用时/悬赏/惩罚），按落后幅度排序，一眼看出输在哪几项。
+- **L2 哪段拉开**：逐帧鲜度曲线对比 + 最快掉队窗口（并给出那段在走哪种路线、有无天气命中、有无增益）；以及双方帧数拆解（各路线移动帧 / 处理 / 验核 / 等待 / 休整·窗口·强制通行的浪费帧）。
+
+注意：对手侧的逐帧对比只在本地 `client-debug` 全可见性记录里完整；正式赛对手私有逐帧数据不公开，但对我方自身的归因始终成立。
+
 ## 运行环境
 
 - Windows：Windows 10/11，安装 Python 后在 PowerShell 或 CMD 中运行。

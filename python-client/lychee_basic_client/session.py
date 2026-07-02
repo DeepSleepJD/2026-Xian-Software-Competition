@@ -6,6 +6,7 @@ from typing import Any, Optional
 from .config import Config
 from .framing import read_frame, write_frame
 from . import messages as M
+from .recorder import MatchRecorder
 from .strategy import Strategy
 
 
@@ -15,6 +16,11 @@ class ClientSession:
         self._config = config
         self._match_id = ""
         self._strategy = Strategy(config.player_id)
+        self._recorder = (
+            MatchRecorder(config.record_dir, config.player_id)
+            if config.record_dir
+            else None
+        )
 
     def run(self) -> int:
         self._send_registration()
@@ -24,6 +30,7 @@ class ClientSession:
                 message = read_frame(self._sock)
             except EOFError:
                 print("connection closed")
+                self._close_recorder()
                 return 0
 
             result = self._handle_message(message)
@@ -43,6 +50,9 @@ class ClientSession:
             self._handle_inquire(data)
         elif msg_name == "over":
             print("over received")
+            if self._recorder is not None:
+                self._recorder.record_over(data)
+            self._close_recorder()
             return 0
         elif msg_name == "error":
             print(f"error received: {json.dumps(message, ensure_ascii=False)}", file=sys.stderr)
@@ -60,12 +70,21 @@ class ClientSession:
 
     def _handle_inquire(self, data: dict[str, Any]) -> None:
         round_no = data["round"]
+        if self._recorder is not None:
+            self._recorder.record_inquire(data)
         actions = self._strategy.decide(data)
         self._log_state(round_no, data, actions)
         write_frame(
             self._sock,
             M.action_message(self._match_id, round_no, self._config.player_id, actions),
         )
+
+    def _close_recorder(self) -> None:
+        if self._recorder is not None:
+            self._recorder.close()
+            if self._recorder.path:
+                print(f"recorded {self._recorder.rounds} rounds -> {self._recorder.path}")
+            self._recorder = None
 
     def _log_state(self, round_no: int, data: dict[str, Any], actions: list) -> None:
         me = None
