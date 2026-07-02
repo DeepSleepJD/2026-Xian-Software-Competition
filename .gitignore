@@ -1,0 +1,11 @@
+# IDE / 缓存
+.idea/
+__pycache__/
+*.pyc
+
+# 本地对局产物
+tools/logs/
+
+# 调测包二进制（server/demo exe + 500MB 回放 UI，由官方 ZIP 分发，不入库；
+# 同目录的任务书/协议/地图等文档正常纳入版本管理）
+refs/debug-kit-v1/arena/

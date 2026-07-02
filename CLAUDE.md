@@ -1,0 +1,42 @@
+# 2026 西安软件大赛 —《一骑红尘：荔枝争运战》参赛项目
+
+## 项目是什么
+
+编写一个 AI 客户端（TCP + JSON 协议）参加双人对抗贡运赛：600 结算帧内把荔枝从 S01 运到 S15，总分高者胜。提交 ZIP（根目录 `start.sh <playerId> <host> <port>`），Linux 离线环境运行（Python 3.12.9 可用，禁止第三方依赖现场安装）。
+
+## 必读文档（新 session 先读这个）
+
+- **`docs/比赛分析与取胜策略.md`** — 已完成的完整赛题分析：得分结构、路线定量、机制备忘、P0-P5 开发路线图、调测方法。所有战略决策以它为基准。
+- 任务书 / 通信协议 / 地图配置原文在 `refs/debug-kit-v1/`。
+
+## 目录结构
+
+- `python-client/` — 官方 Python 基础工程副本（framing/messages/session，已处理 5 位长度前缀拆包），作为我方客户端起点
+- `refs/official-base-clients/` — 官方 6 语言基础工程原件
+- `refs/debug-kit-v1/arena/` — 本地裁判服务器 + 官方 demo + 回放 UI
+- `docs/` — 分析与设计文档
+
+## 本地调测
+
+- **首选**：`python tools/run_match.py`（本项目的对局启动器，默认 50ms/帧 + 自动拉起回放 UI；`--no-ui` 只出分；`--client-cmd "... {player_id} {host} {port}"` 换成自己客户端；`--seed` 指定种子）
+- 注意：官方 `test.bat` 在 agent/git-bash 环境下不可用（中文路径过 cmd 边界编码损坏 + GNU timeout 遮蔽 Windows timeout.exe），双击运行则正常。`tools/run_match.py` 即为此而写，P5 批量自对弈也复用它
+- 分数在 `refs/debug-kit-v1/arena/server/data.csv`，进程控制台日志在 `tools/logs/`
+- 回放 UI：http://127.0.0.1:9091/litchi_delivery_replay/ （PowerShell HTTP 服务，PID 记录在 UI 构建目录 `.lychee_web_server.pid`）
+
+## 硬性约束（违反即输）
+
+- 每帧必发 action（空 `actions:[]` 也是心跳）；连续 60 帧缺动作 = 退赛判负
+- `action.round` 必须等于当前 `inquire.round`
+- 不得写死 playerId / host / port / 阵营 / 地图（会换地图变体，一切以 `start`/`inquire` 下发为准）
+- 决策必须在 500ms/帧内完成
+
+## 当前进度
+
+- [x] 赛题完整分析（见 docs/比赛分析与取胜策略.md）
+- [x] P0：跑通本地调测环境（2026-07-02，`tools/run_match.py` 起一局 demo 对局：2002 得 500 / 1001 得 461，均 100% 交付；回放 UI 正常）
+- [ ] P1：稳定交付客户端（骨架 + 寻路 + 验核 + 交付）
+- [ ] P2-P5：经济层 → 优化层 → 对抗层 → 自对弈调参
+
+## 相关工具
+
+- 已安装 skill `lychee-demo-movement-starter`：把基础工程升级到"能合法移动并跑 100 回合"，调用时需提供任务书、通信协议、调测指南的**绝对路径**。
