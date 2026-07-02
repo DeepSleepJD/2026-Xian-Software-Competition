@@ -7,13 +7,15 @@
 ## 必读文档（新 session 先读这个）
 
 - **`docs/比赛分析与取胜策略.md`** — 已完成的完整赛题分析：得分结构、路线定量、机制备忘、P0-P5 开发路线图、调测方法。所有战略决策以它为基准。
+- **`docs/客户端架构设计.md`** — 已批准的客户端架构（分层 + GameState/Intent 契约 + 铁律兜底 + 三人分工），P1 骨架搭建按它实施，文末有执行清单。
 - 任务书 / 通信协议 / 地图配置原文在 `refs/debug-kit-v1/`。
 
 ## 目录结构
 
-- `python-client/` — 官方 Python 基础工程副本（framing/messages/session，已处理 5 位长度前缀拆包），作为我方客户端起点
-- `refs/official-base-clients/` — 官方 6 语言基础工程原件
-- `refs/debug-kit-v1/arena/` — 本地裁判服务器 + 官方 demo + 回放 UI
+- `client/` — 我方参赛客户端（P1 起搭建，结构见 docs/客户端架构设计.md）
+- `refs/official-base-clients/` — 官方 6 语言基础工程原件（根目录的 python-client 副本已删，framing 参考从这里取）
+- `refs/debug-kit-v1/arena/` — 本地裁判服务器 + 官方 demo + 回放 UI（不入库，官方 ZIP 分发）
+- `tools/` — run_match.py 本地对局启动器等
 - `docs/` — 分析与设计文档
 
 ## 本地调测
@@ -33,8 +35,9 @@
 ## 当前进度
 
 - [x] 赛题完整分析（见 docs/比赛分析与取胜策略.md）
-- [x] P0：跑通本地调测环境（2026-07-02，`tools/run_match.py` 起一局 demo 对局：2002 得 500 / 1001 得 461，均 100% 交付；回放 UI 正常）
-- [ ] P1：稳定交付客户端（骨架 + 寻路 + 验核 + 交付）
+- [x] P0：跑通本地调测环境（2026-07-02，`tools/run_match.py` 起一局 demo 对局：2002 得 500 / 1001 得 461，均 100% 交付；回放 UI 正常。该分数即官方 demo 基准线）
+- [x] 客户端架构定稿（2026-07-02 批准，见 docs/客户端架构设计.md；官方 python-client 副本已删）
+- [ ] **P1（当前）**：按架构设计搭 client/ 骨架 → 600 帧不掉线 → 寻路/验核/交付（执行清单在架构文档第六节；已同意建 Trellis 任务跟踪）
 - [ ] P2-P5：经济层 → 优化层 → 对抗层 → 自对弈调参
 
 ## 相关工具
