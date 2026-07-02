@@ -2,6 +2,7 @@
 from typing import Any, Optional
 
 from . import messages as M
+from .contest import active_contest, pick_card
 from .graph import Graph
 
 # main-car states where we are busy and should just let the engine run
@@ -34,6 +35,9 @@ class Strategy:
         self.task_base = 0                       # sum of scores of tasks we completed
         self._counted_tasks: set[str] = set()    # taskIds already added to task_base
         self._task_attempts: dict[str, int] = {}  # per-task claim attempts (loop guard)
+        # nodes an enemy guard is blocking us from entering (detected reactively)
+        self._guard_blocked: set[str] = set()
+        self._last_move_target: Optional[str] = None
 
     # ---- setup from the start message ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -67,20 +71,30 @@ class Strategy:
         phase = inquire_data.get("phase", "NORMAL")
         round_no = inquire_data.get("round", 0)
         tasks = inquire_data.get("tasks", [])
+        contests = inquire_data.get("contests", [])
         nodes_by_id = {n["nodeId"]: n for n in inquire_data.get("nodes", [])}
 
         self._account_tasks(tasks)
+        self._note_blocked_moves(inquire_data.get("actionResults", []), nodes_by_id)
 
         if me.get("delivered") or me.get("retired"):
             return []
+
+        # play any window we're a party to first -- otherwise we abstain and lose
+        # the contested object. Must precede the busy check so a forced-pass
+        # attacker (state FORCED_PASSING) still plays its PASS window.
+        contest = active_contest(self.player_id, contests)
+        if contest is not None:
+            return [M.window_card(contest["contestId"], pick_card(me, contest))]
 
         # travelling on an edge: keep pushing toward the current target end.
         # NB: WAITING while parked on a node is NOT travelling -> fall through.
         on_edge = state == "MOVING" or (state == "WAITING" and me.get("routeEdgeId"))
         if on_edge:
             self._saw_processing_at = None
+            self._guard_blocked.discard(node)  # we're moving, no longer blocked here
             target = me.get("nextNodeId") or self.graph.next_hop(node, self.gate_node)
-            return [M.move(target)] if target else []
+            return [self._mv(target)] if target else []
 
         # busy finishing something server-side: don't interrupt
         if state in BUSY_STATES:
@@ -95,7 +109,7 @@ class Strategy:
             if me.get("verified"):
                 return [M.deliver()]
             # shouldn't normally get here before verifying; step back to the gate
-            return [M.move(self.gate_node)]
+            return [self._mv(self.gate_node)]
 
         # at gate: verify (rush only), then step into terminal.
         # The gate is a shared object: if the opponent is verifying it we get
@@ -106,7 +120,7 @@ class Strategy:
                 # S15 only allows wait/deliver/return) then step into the terminal
                 if me.get("resources", {}).get(ICE_BOX, 0) > 0 and me.get("freshness", 100) < 100:
                     return [M.use_resource(ICE_BOX)]
-                return [M.move(self.terminal_node)]
+                return [self._mv(self.terminal_node)]
             if phase == "RUSH":
                 return [M.verify_gate()]
             return []  # wait for the rush phase to open the gate
@@ -185,7 +199,7 @@ class Strategy:
         return best
 
     def _advance(self, node: str, nodes_by_id: dict[str, Any]) -> list[dict[str, Any]]:
-        """Step toward the gate; force through a road obstacle on the next hop."""
+        """Step toward the gate; force through a road obstacle / enemy guard."""
         nxt = self.graph.next_hop(node, self.gate_node)
         if not nxt:
             return []
@@ -199,7 +213,34 @@ class Strategy:
             # FORCED_PASS_REPEAT on two obstacles in a row is a harmless
             # business reject (no penalty) that self-resolves.
             return [M.forced_pass(nxt)]
-        return [M.move(nxt)]
+        if nxt in self._guard_blocked:
+            # an enemy guard is blocking the only way forward: FORCED_PASS opens
+            # a PASS window which our card policy then plays to get through.
+            return [M.forced_pass(nxt)]
+        return [self._mv(nxt)]
+
+    def _mv(self, target: str) -> dict[str, Any]:
+        """Emit a MOVE, remembering the target so we can detect if it's blocked."""
+        self._last_move_target = target
+        return M.move(target)
+
+    def _note_blocked_moves(
+        self, action_results: list[dict[str, Any]], nodes_by_id: dict[str, Any]
+    ) -> None:
+        """If our last MOVE was rejected and the target has no obstacle, an enemy
+        guard is blocking it -> remember to FORCED_PASS it next time."""
+        tgt = self._last_move_target
+        if not tgt:
+            return
+        for r in action_results:
+            if (
+                r.get("playerId") == self.player_id
+                and r.get("action") == "MOVE"
+                and not r.get("accepted", True)
+            ):
+                if not nodes_by_id.get(tgt, {}).get("hasObstacle"):
+                    self._guard_blocked.add(tgt)
+                break
 
     def _find_me(self, players: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
         for p in players:

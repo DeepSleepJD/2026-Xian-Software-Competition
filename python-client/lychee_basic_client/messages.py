@@ -97,3 +97,7 @@ def clear(target_node_id: str) -> dict[str, Any]:
 
 def forced_pass(target_node_id: str) -> dict[str, Any]:
     return {"action": "FORCED_PASS", "targetNodeId": target_node_id}
+
+
+def window_card(contest_id: str, card: str) -> dict[str, Any]:
+    return {"action": "WINDOW_CARD", "contestId": contest_id, "card": card}
