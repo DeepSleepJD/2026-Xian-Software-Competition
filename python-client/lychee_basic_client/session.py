@@ -3,6 +3,7 @@ import socket
 import sys
 from typing import Any, Optional
 
+from . import __version__
 from .battle_logger import BattleLogger
 from .config import Config
 from .framing import read_frame, write_frame
@@ -68,6 +69,10 @@ class ClientSession:
     def _handle_start(self, data: dict[str, Any]) -> None:
         self._match_id = data["matchId"]
         round_no = data["round"]
+        # stamp the build into the log so any report/inspect can name the version
+        self._battle_logger.log_message(
+            "client", {"version": __version__, "playerId": self._config.player_id}
+        )
         self._battle_logger.log_message("start", data)
         self._strategy.ingest_start(data)
         print(f"start match={self._match_id} round={round_no}")

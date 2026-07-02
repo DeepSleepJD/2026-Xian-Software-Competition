@@ -72,7 +72,11 @@ def _has_blocking_reject(inq: dict[str, Any], me_id: Optional[int]) -> bool:
 def build_report(path: str, before: int, after: int) -> str:
     rows = _load(path)
     me_id = _my_id(rows)
-    out = [f"me_id = {me_id}"]
+    version = next(
+        ((r.get("payload") or {}).get("version") for r in rows if r.get("type") == "client"),
+        None,
+    )
+    out = [f"客户端构建 = {version or '(日志未标记版本)'}", f"me_id = {me_id}"]
 
     seq = []
     for row in rows:

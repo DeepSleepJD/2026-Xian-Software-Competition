@@ -27,7 +27,15 @@ SCORE_LABELS = {
 }
 
 
-def _load(path: str) -> tuple[Optional[int], list[dict[str, Any]], Optional[dict[str, Any]]]:
+def _client_version(obj: dict[str, Any]) -> Optional[str]:
+    if obj.get("type") == "client":
+        return (obj.get("payload") or {}).get("version")
+    return None
+
+
+def _load(
+    path: str,
+) -> tuple[Optional[int], list[dict[str, Any]], Optional[dict[str, Any]], Optional[str]]:
     """Load a match log, auto-detecting the format. Supports:
       A. our recorder:      {"kind":"meta|inquire|over", ...}
       B. our BattleLogger:  {"type":"round|start|over|error", "inquire"/"payload":...}
@@ -37,12 +45,18 @@ def _load(path: str) -> tuple[Optional[int], list[dict[str, Any]], Optional[dict
     my_id: Optional[int] = None
     rounds: list[dict[str, Any]] = []
     over: Optional[dict[str, Any]] = None
+    version: Optional[str] = None
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:
                 continue
             obj = json.loads(line)
+
+            ver = _client_version(obj)        # build stamp
+            if ver:
+                version = ver
+                continue
 
             kind = obj.get("kind")            # format A (recorder)
             if kind == "meta":
@@ -82,7 +96,7 @@ def _load(path: str) -> tuple[Optional[int], list[dict[str, Any]], Optional[dict
                 elif name == "over":
                     over = md
                 continue
-    return my_id, rounds, over
+    return my_id, rounds, over, version
 
 
 def _player(rec: dict[str, Any], pid: int) -> Optional[dict[str, Any]]:
@@ -93,7 +107,7 @@ def _player(rec: dict[str, Any], pid: int) -> Optional[dict[str, Any]]:
 
 
 def analyze_file(path: str) -> dict[str, Any]:
-    my_id, rounds, over = _load(path)
+    my_id, rounds, over, client_version = _load(path)
     if not rounds:
         raise SystemExit(f"no inquire records in {path}")
     last = rounds[-1]
@@ -340,6 +354,7 @@ def analyze_file(path: str) -> dict[str, Any]:
         "rounds": len(rounds),
         "my_id": my_id,
         "opp_id": opp_id,
+        "client_version": client_version,
         "result_type": (over or {}).get("resultType"),
         "over_reason": (over or {}).get("overReason"),
         "winner_id": (over or {}).get("winnerPlayerId"),
@@ -365,6 +380,7 @@ def format_report(a: dict[str, Any]) -> str:
     my, opp = a["my_id"], a["opp_id"]
     md, od = a["my_detail"], a["opp_detail"]
     out: list[str] = []
+    out.append(f"客户端构建 = {a.get('client_version') or '(日志未标记版本)'}")
     out.append(f"对局 {a['match_id']}  记录回合数={a['rounds']}  我方={my} 对手={opp}")
     if a.get("has_over"):
         win = a.get("winner_id")
