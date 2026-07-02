@@ -71,17 +71,13 @@ class Graph:
         loss += self.process_rounds.get(dst, 0) * IDLE_FRESHNESS_LOSS
         return loss
 
-    def shortest_path(self, src: str, dst: str) -> Optional[list[str]]:
-        """Dijkstra by estimated frames (incl. mandatory process waits). Returns node list."""
-        if src == dst:
-            return [src]
+    def _dijkstra(self, src: str) -> tuple[dict[str, float], dict[str, str]]:
+        """Min freshness-cost from src to every node (incl. mandatory process waits)."""
         dist: dict[str, float] = {src: 0.0}
         prev: dict[str, str] = {}
         pq: list[tuple[float, str]] = [(0.0, src)]
         while pq:
             d, u = heapq.heappop(pq)
-            if u == dst:
-                break
             if d > dist.get(u, math.inf):
                 continue
             for v, rt, dd in self.adj.get(u, []):
@@ -90,6 +86,13 @@ class Graph:
                     dist[v] = nd
                     prev[v] = u
                     heapq.heappush(pq, (nd, v))
+        return dist, prev
+
+    def shortest_path(self, src: str, dst: str) -> Optional[list[str]]:
+        """Least-freshness-loss path as a node list, or None if unreachable."""
+        if src == dst:
+            return [src]
+        dist, prev = self._dijkstra(src)
         if dst not in dist:
             return None
         path = [dst]
@@ -97,6 +100,13 @@ class Graph:
             path.append(prev[path[-1]])
         path.reverse()
         return path
+
+    def path_cost(self, src: str, dst: str) -> float:
+        """Least freshness cost from src to dst (math.inf if unreachable)."""
+        if src == dst:
+            return 0.0
+        dist, _ = self._dijkstra(src)
+        return dist.get(dst, math.inf)
 
     def next_hop(self, src: str, dst: str) -> Optional[str]:
         path = self.shortest_path(src, dst)

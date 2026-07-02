@@ -1,4 +1,5 @@
 """Decision logic: navigate S01 -> ... -> S14 (verify) -> S15 (deliver)."""
+import math
 from typing import Any, Optional
 
 from . import messages as M
@@ -24,6 +25,10 @@ STOCK_TARGETS = {
     "PASS_TOKEN": 2,
     "OFFICIAL_PERMIT": 2,
 }
+# waypoint (orienteering) tuning
+FRESH_SCORE_PER_POINT = 1.8   # freshness/goodfruit score per 1 freshness point
+ICE_GAIN_SCORE = 18.0         # ~ +10 freshness locked at delivery (10 * 1.8)
+WAYPOINT_MIN_NET = 8.0        # only detour when net score gain clears this
 
 
 class Strategy:
@@ -159,8 +164,9 @@ class Strategy:
         if res is not None:
             return [M.claim_resource(node, res)]
 
-        # otherwise advance along the shortest route toward the gate
-        return self._advance(node, nodes_by_id)
+        # head toward the best worth-it task/ice waypoint, else straight to the gate
+        dest = self._best_waypoint(node, nodes_by_id, tasks, me, round_no)
+        return self._advance(node, nodes_by_id, dest)
 
     def _resource_to_claim(
         self, node: str, nodes_by_id: dict[str, Any], me: dict[str, Any]
@@ -186,39 +192,104 @@ class Strategy:
                 self._counted_tasks.add(tid)
                 self.task_base += int(t.get("score", 0))
 
+    def _task_claimable(self, t: dict[str, Any], me: dict[str, Any], round_no: int) -> bool:
+        """Whether task instance t is one we could go and complete (ignoring where we
+        currently stand)."""
+        if not t.get("active") or t.get("completed") or t.get("failed"):
+            return False
+        if t.get("ownerPlayerId", 0) not in (0, self.player_id):
+            return False
+        if t.get("protectionPlayerId", 0) not in (0, self.player_id):
+            return False  # window-protected for the opponent
+        expire = t.get("expireRound", 0)
+        if expire and round_no >= expire:
+            return False
+        if t.get("taskTemplateId") == "T06":
+            if sum(me.get("resources", {}).get(k, 0) for k in HORSE_KEYS) <= 0:
+                return False  # needs a horse to claim
+        if self._task_attempts.get(t.get("taskId"), 0) >= 3:
+            return False  # give up after repeated rejects (loop guard)
+        return True
+
     def _claimable_task_here(
         self, node: str, tasks: list[dict[str, Any]], me: dict[str, Any], round_no: int
     ) -> Optional[dict[str, Any]]:
         """Highest-value imperial task claimable at the current node, or None."""
         if self.task_base >= TASK_BASE_TARGET:
             return None
-        horses = sum(me.get("resources", {}).get(k, 0) for k in HORSE_KEYS)
         best = None
         for t in tasks:
-            if t.get("nodeId") != node:
+            if t.get("nodeId") != node or not self._task_claimable(t, me, round_no):
                 continue
-            if not t.get("active") or t.get("completed") or t.get("failed"):
-                continue
-            owner = t.get("ownerPlayerId", 0)
-            if owner not in (0, self.player_id):
-                continue
-            prot = t.get("protectionPlayerId", 0)
-            if prot not in (0, self.player_id):
-                continue  # window-protected for the opponent
-            expire = t.get("expireRound", 0)
-            if expire and round_no >= expire:
-                continue
-            if t.get("taskTemplateId") == "T06" and horses <= 0:
-                continue  # needs a horse to claim
-            if self._task_attempts.get(t.get("taskId"), 0) >= 3:
-                continue  # give up after repeated rejects (loop guard)
             if best is None or int(t.get("score", 0)) > int(best.get("score", 0)):
                 best = t
         return best
 
-    def _advance(self, node: str, nodes_by_id: dict[str, Any]) -> list[dict[str, Any]]:
-        """Step toward the gate; force through a road obstacle / enemy guard."""
-        nxt = self.graph.next_hop(node, self.gate_node)
+    def _task_value(self, t: dict[str, Any]) -> float:
+        """Score value of completing t now, weighting tasks below 90 base higher
+        because they also unlock the delivery base and time score."""
+        s = float(t.get("score", 0))
+        if self.task_base < 90:
+            return s * 2.5  # also lifts delivery (x4/3) + unlocks time score
+        if self.task_base < TASK_BASE_TARGET:
+            return s
+        return 0.0
+
+    def _best_waypoint(
+        self,
+        node: str,
+        nodes_by_id: dict[str, Any],
+        tasks: list[dict[str, Any]],
+        me: dict[str, Any],
+        round_no: int,
+    ) -> Optional[str]:
+        """Pick a task/ice node worth detouring to before the gate: a detour pays
+        off when its score gain beats the extra freshness it costs. Our huge frame
+        slack (deliver ~470 vs 600) makes on-route collection the main score lever."""
+        gate = self.gate_node
+        base = self.graph.path_cost(node, gate)
+        if not math.isfinite(base):
+            return None
+
+        gains: dict[str, float] = {}
+        # claimable tasks (skip ones that would expire before we could arrive)
+        if self.task_base < TASK_BASE_TARGET:
+            for t in tasks:
+                if not self._task_claimable(t, me, round_no):
+                    continue
+                w = t.get("nodeId")
+                cost = self.graph.path_cost(node, w)
+                if not math.isfinite(cost):
+                    continue
+                est_arrival = round_no + cost / 0.055  # rough frames from freshness cost
+                expire = t.get("expireRound", 0)
+                if expire and est_arrival >= expire:
+                    continue
+                gains[w] = gains.get(w, 0.0) + self._task_value(t)
+        # ice boxes still under our cap
+        if me.get("resources", {}).get(ICE_BOX, 0) < STOCK_TARGETS[ICE_BOX]:
+            for nid, n in nodes_by_id.items():
+                if (n.get("resourceStock", {}) or {}).get(ICE_BOX, 0) > 0:
+                    gains[nid] = gains.get(nid, 0.0) + ICE_GAIN_SCORE
+
+        best, best_net = None, WAYPOINT_MIN_NET
+        for w, gain in gains.items():
+            if w == node:
+                continue
+            detour = self.graph.path_cost(node, w) + self.graph.path_cost(w, gate) - base
+            if not math.isfinite(detour):
+                continue
+            net = gain - max(0.0, detour) * FRESH_SCORE_PER_POINT
+            if net > best_net:
+                best, best_net = w, net
+        return best
+
+    def _advance(
+        self, node: str, nodes_by_id: dict[str, Any], dest: Optional[str] = None
+    ) -> list[dict[str, Any]]:
+        """Step toward dest (default: the gate); force through a road obstacle /
+        enemy guard on the next hop."""
+        nxt = self.graph.next_hop(node, dest or self.gate_node)
         if not nxt:
             return []
         tgt = nodes_by_id.get(nxt, {})

@@ -29,6 +29,13 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(["S01"], g.shortest_path("S01", "S01"))
         self.assertIsNone(g.next_hop("S01", "S01"))
 
+    def test_path_cost(self) -> None:
+        g = self._line_graph()
+        self.assertEqual(0.0, g.path_cost("S01", "S01"))
+        # S01->S02->S03 is reachable with finite cost; monotonic with distance
+        self.assertLess(g.path_cost("S01", "S02"), g.path_cost("S01", "S03"))
+        self.assertEqual(float("inf"), g.path_cost("S01", "SXX"))
+
     def test_prefers_lower_freshness_loss_route(self) -> None:
         # Two ways S01 -> S03: direct MOUNTAIN (high loss) vs via S02 on ROAD/WATER.
         g = Graph()
