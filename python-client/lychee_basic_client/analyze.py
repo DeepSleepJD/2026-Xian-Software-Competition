@@ -28,6 +28,12 @@ SCORE_LABELS = {
 
 
 def _load(path: str) -> tuple[Optional[int], list[dict[str, Any]], Optional[dict[str, Any]]]:
+    """Load a match log, auto-detecting the format. Supports:
+      A. our recorder:      {"kind":"meta|inquire|over", ...}
+      B. our BattleLogger:  {"type":"round|start|over|error", "inquire"/"payload":...}
+      C. raw wire trace:    {"t":.., "dir":"send|recv", "msg":{msg_name,msg_data}}
+    Normalises all three to (my_player_id, [inquire dicts], over dict).
+    """
     my_id: Optional[int] = None
     rounds: list[dict[str, Any]] = []
     over: Optional[dict[str, Any]] = None
@@ -37,13 +43,45 @@ def _load(path: str) -> tuple[Optional[int], list[dict[str, Any]], Optional[dict
             if not line:
                 continue
             obj = json.loads(line)
-            kind = obj.get("kind")
+
+            kind = obj.get("kind")            # format A (recorder)
             if kind == "meta":
-                my_id = obj.get("playerId")
-            elif kind == "inquire":
+                my_id = my_id or obj.get("playerId")
+                continue
+            if kind == "inquire":
                 rounds.append(obj)
-            elif kind == "over":
+                continue
+            if kind == "over":
                 over = obj
+                continue
+
+            typ = obj.get("type")             # format B (BattleLogger)
+            if typ == "round":
+                my_id = my_id or obj.get("playerId")
+                inq = obj.get("inquire")
+                if inq is not None:
+                    rounds.append(inq)
+                continue
+            if typ == "start":
+                my_id = my_id or obj.get("playerId")
+                continue
+            if typ == "over":
+                over = obj.get("payload")
+                continue
+            if typ == "error":
+                continue
+
+            if "msg" in obj:                  # format C (raw wire trace)
+                m = obj.get("msg") or {}
+                name = m.get("msg_name")
+                md = m.get("msg_data") or {}
+                if obj.get("dir") == "send" and name == "registration":
+                    my_id = my_id or md.get("playerId")
+                elif name == "inquire":
+                    rounds.append(md)
+                elif name == "over":
+                    over = md
+                continue
     return my_id, rounds, over
 
 
@@ -243,6 +281,49 @@ def analyze_file(path: str) -> dict[str, Any]:
         res["forced_tax_frames"] = max(0, res["forced_tax_frames"])
         return res
 
+    # --- tactics actually exercised (rush tactic / resources / forced pass /
+    #     guards / window outcomes) -- reflects the added strategy layers ---
+    def tactics(pid: int) -> dict[str, Any]:
+        t: dict[str, Any] = {
+            "rush_tactic": None,
+            "claim": Counter(),
+            "use": Counter(),
+            "forced_pass": Counter(),   # by blockType (OBSTACLE / GUARD)
+            "guard_set": 0,
+            "win": {"played": 0, "won": 0, "lost": 0, "draw": 0},
+        }
+        for rec in rounds:
+            for e in rec.get("events", []):
+                pl = e.get("payload") or {}
+                if pl.get("playerId") != pid:
+                    continue
+                typ = e.get("type")
+                if typ == "RUSH_TACTIC_USE":
+                    t["rush_tactic"] = pl.get("rushTactic")
+                elif typ == "RESOURCE_CLAIM":
+                    t["claim"][pl.get("resourceType")] += 1
+                elif typ == "RESOURCE_USE":
+                    t["use"][pl.get("resourceType")] += 1
+                elif typ == "FORCED_PASS_START":
+                    t["forced_pass"][pl.get("blockType", "?")] += 1
+                elif typ == "GUARD_SET":
+                    t["guard_set"] += 1
+        # window outcomes from the contests we were a party to
+        done: set = set()
+        for rec in rounds:
+            for c in rec.get("contests", []):
+                cid = c.get("contestId")
+                if cid in done or pid not in (c.get("redPlayerId"), c.get("bluePlayerId")):
+                    continue
+                if c.get("resolved"):
+                    done.add(cid)
+                    t["win"]["played"] += 1
+                    am_red = c.get("redPlayerId") == pid
+                    mine = c.get("redPoint", 0) if am_red else c.get("bluePoint", 0)
+                    theirs = c.get("bluePoint", 0) if am_red else c.get("redPoint", 0)
+                    t["win"]["won" if mine > theirs else "lost" if mine < theirs else "draw"] += 1
+        return t
+
     # score-gap timeline (opp.total - my.total) and worst round
     gap_series: list[tuple[int, float]] = []
     for rec in rounds:
@@ -276,6 +357,7 @@ def analyze_file(path: str) -> dict[str, Any]:
         "fresh_checkpoints": fresh_checkpoints,
         "fresh_worst_window": worst_window,
         "events": {my_id: event_attribution(my_id), opp_id: event_attribution(opp_id)},
+        "tactics": tactics(my_id),
     }
 
 
@@ -376,6 +458,24 @@ def format_report(a: dict[str, Any]) -> str:
         out.append("  (双方同时在途的帧不足，无法定位窗口)")
     out.append("")
 
+    # --- tactics exercised (reflects the added strategy layers) ---
+    t = a.get("tactics", {})
+    out.append("== 战术使用(我方) ==")
+    out.append(f"  终局急策: {t.get('rush_tactic') or '未使用'}")
+    claim = t.get("claim") or {}
+    use = t.get("use") or {}
+    out.append(f"  资源领取: {dict(claim) or '无'}")
+    out.append(f"  资源使用: {dict(use) or '无'}")
+    fp = t.get("forced_pass") or {}
+    out.append(f"  强制通行: {dict(fp) or '无'}  (OBSTACLE=障碍, GUARD=敌方设卡)")
+    out.append(f"  我方设卡: {t.get('guard_set', 0)} 次")
+    w = t.get("win") or {}
+    out.append(
+        f"  窗口出牌: 参与 {w.get('played', 0)} 次 (胜 {w.get('won', 0)} / "
+        f"负 {w.get('lost', 0)} / 平 {w.get('draw', 0)})"
+    )
+    out.append("")
+
     # --- L3: event attribution ---
     ev = a["events"].get(my, {})
     out.append("== L3 丢分/浪费事件归因(我方) ==")
@@ -406,10 +506,23 @@ def main() -> int:
         sys.stdout.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
     except Exception:
         pass
-    parser = argparse.ArgumentParser(description="Analyse a recorded Lychee match")
-    parser.add_argument("path", help="recording .jsonl file")
+    parser = argparse.ArgumentParser(
+        description="Analyse a recorded Lychee match (recorder / BattleLogger / raw-wire logs). "
+        "Runs offline with the standard library only."
+    )
+    parser.add_argument("path", help="log file (.jsonl)")
+    parser.add_argument(
+        "-o", "--out",
+        help="also write the (small) report to this file, so only the report needs "
+        "to leave an air-gapped machine while the large raw log stays put",
+    )
     args = parser.parse_args()
-    print(format_report(analyze_file(args.path)))
+    report = format_report(analyze_file(args.path))
+    print(report)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as fh:
+            fh.write(report + "\n")
+        print(f"\n[report written to {args.out}]")
     return 0
 
 

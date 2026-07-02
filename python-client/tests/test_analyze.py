@@ -86,6 +86,43 @@ class AnalyzeTests(unittest.TestCase):
         self.assertEqual(1, my_bd["buckets"]["process"])
         self.assertEqual(1, a["breakdown"][2002]["buckets"]["waste"])
 
+    def test_reads_battle_logger_format(self) -> None:
+        # BattleLogger format: {"type":"round"/"start"/"over", ...}
+        fd, path = tempfile.mkstemp(suffix=".jsonl")
+        os.close(fd)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(_line({"type": "start", "playerId": 1001, "payload": {"matchId": "m"}}))
+            fh.write(_line({
+                "type": "round", "playerId": 1001, "round": 1,
+                "clientAction": {"actions": []},
+                "inquire": {
+                    "round": 1, "weather": {"active": []}, "tasks": [],
+                    "players": [
+                        {"playerId": 1001, "state": "MOVING", "routeType": "ROAD",
+                         "freshness": 100.0, "goodFruit": 100, "delivered": False},
+                        {"playerId": 2002, "state": "MOVING", "freshness": 100.0,
+                         "goodFruit": 100, "delivered": False},
+                    ],
+                    "events": [{"type": "RUSH_TACTIC_USE",
+                                "payload": {"playerId": 1001, "rushTactic": "RUSH_PROTECT"}}],
+                },
+            }))
+            fh.write(_line({"type": "over", "payload": {
+                "matchId": "m", "resultType": "NORMAL", "winnerPlayerId": 1001,
+                "players": [
+                    {"playerId": 1001, "delivered": True, "scoreDetail": {"total": 500}},
+                    {"playerId": 2002, "delivered": True, "scoreDetail": {"total": 400}},
+                ],
+            }}))
+        try:
+            a = analyze_file(path)
+        finally:
+            os.remove(path)
+        self.assertEqual(1001, a["my_id"])
+        self.assertEqual(1001, a["winner_id"])
+        self.assertEqual(500, a["my_detail"]["total"])
+        self.assertEqual("RUSH_PROTECT", a["tactics"]["rush_tactic"])
+
     def test_format_report_runs(self) -> None:
         path = self._write_recording()
         try:
