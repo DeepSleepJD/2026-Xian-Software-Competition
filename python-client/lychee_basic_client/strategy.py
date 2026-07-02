@@ -38,9 +38,11 @@ class Strategy:
         self.gate_node = "S14"
         self.terminal_node = "S15"
         self.start_node = "S01"
-        # nodes whose mandatory fixed-process the server has confirmed complete
-        # (via a PROCESS_COMPLETE event)
+        # mandatory fixed-process nodes confirmed complete for THIS visit (via a
+        # PROCESS_COMPLETE event); cleared when we leave, because re-arriving at a
+        # process station requires processing it again (task book 2.4.1)
         self.processed: set[str] = set()
+        self._last_node: Optional[str] = None
         # task accounting
         self.task_base = 0                       # sum of scores of tasks we completed
         self._counted_tasks: set[str] = set()    # taskIds already added to task_base
@@ -88,6 +90,13 @@ class Strategy:
         tasks = inquire_data.get("tasks", [])
         contests = inquire_data.get("contests", [])
         nodes_by_id = {n["nodeId"]: n for n in inquire_data.get("nodes", [])}
+
+        # leaving a station clears its "processed" mark: coming back requires
+        # re-processing (task book 2.4.1). Without this, a revisit skips PROCESS
+        # and MOVE is rejected forever (PROCESS_REQUIRED).
+        if node != self._last_node:
+            self.processed.clear()
+            self._last_node = node
 
         self._account_tasks(tasks)
         self._account_process(inquire_data.get("events") or [])
@@ -355,6 +364,11 @@ class Strategy:
         best, best_net = None, WAYPOINT_MIN_NET
         for w, gain in gains.items():
             if w == node:
+                continue
+            # never detour BACKWARD: only to waypoints no farther from the gate than
+            # we already are. Backtracking (e.g. S12 -> S11 for a task) wastes the
+            # endgame and can force a costly re-process of a station behind us.
+            if self.graph.path_cost(w, gate) > base:
                 continue
             detour = self.graph.path_cost(node, w) + self.graph.path_cost(w, gate) - base
             if not math.isfinite(detour):

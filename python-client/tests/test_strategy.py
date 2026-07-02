@@ -62,6 +62,71 @@ class ContestDedupTests(unittest.TestCase):
         self.assertEqual("WINDOW_CARD", second[0]["action"])
 
 
+def _node(nid, process_round=0, obstacle=False, ice=0):
+    n = {"nodeId": nid, "processRound": process_round, "effectiveCombatCount": 0,
+         "guardBlockCount": 0, "hasObstacle": obstacle, "resourceStock": {}}
+    if ice:
+        n["resourceStock"] = {"ICE_BOX": ice}
+    return n
+
+
+def _me(node, state="IDLE"):
+    return {"playerId": 1001, "state": state, "currentNodeId": node, "nextNodeId": None,
+            "routeEdgeId": None, "resources": {}, "freshness": 90.0, "goodFruit": 100,
+            "verified": False, "delivered": False, "retired": False,
+            "squadAvailable": 0, "rushTacticUsedCount": 1}
+
+
+def _inq(round_no, node, state, nodes, events=None):
+    return {"round": round_no, "phase": "NORMAL", "players": [_me(node, state)],
+            "nodes": nodes, "tasks": [], "contests": [], "events": events or [],
+            "actionResults": []}
+
+
+class ReprocessOnRevisitTests(unittest.TestCase):
+    def _strat(self):
+        s = Strategy(1001)
+        s.gate_node = "S03"
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        return s
+
+    def test_reprocesses_a_station_on_revisit(self) -> None:
+        s = self._strat()
+        nodes = [_node("S01"), _node("S02", process_round=4), _node("S03")]
+        done = [{"type": "PROCESS_COMPLETE", "payload": {"playerId": 1001, "targetNodeId": "S02"}}]
+
+        # arrive S02 -> must PROCESS
+        self.assertEqual("PROCESS", s.decide(_inq(1, "S02", "IDLE", nodes))[0]["action"])
+        # server confirms completion -> now free to move on
+        self.assertEqual("MOVE", s.decide(_inq(2, "S02", "IDLE", nodes, done))[0]["action"])
+        # leave to S03 (node changes -> processed cleared)
+        s.decide(_inq(3, "S03", "IDLE", nodes))
+        # come back to S02 -> must PROCESS AGAIN, not MOVE (the dead-lock bug)
+        self.assertEqual("PROCESS", s.decide(_inq(4, "S02", "IDLE", nodes))[0]["action"])
+
+
+class WaypointNoBacktrackTests(unittest.TestCase):
+    def test_skips_task_behind_us(self) -> None:
+        s = Strategy(1001)
+        s.gate_node = "S05"
+        s.task_base = 0
+        s.graph.load_edges([
+            {"fromNodeId": a, "toNodeId": b, "routeType": "ROAD", "distance": 10,
+             "bidirectional": True}
+            for a, b in [("S01", "S02"), ("S02", "S03"), ("S03", "S04"), ("S04", "S05")]
+        ])
+        task_behind = [{"taskId": "T", "taskTemplateId": "T01", "nodeId": "S01",
+                        "score": 30, "active": True, "completed": False, "failed": False,
+                        "ownerPlayerId": 0, "protectionPlayerId": 0, "expireRound": 999}]
+        # we're at S03; a task at S01 is behind us (farther from the gate) -> ignore
+        self.assertIsNone(s._best_waypoint("S03", {}, task_behind, _me("S03"), 100))
+
+
 class GuardHandlingTests(unittest.TestCase):
     def _diamond(self) -> Strategy:
         # S01 -> S02 -> S04  and  S01 -> S03 -> S04  (two ways to the gate S04)
