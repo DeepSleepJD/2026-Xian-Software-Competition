@@ -119,8 +119,14 @@ class Runtime:
 
     def _on_over(self, data: dict) -> None:
         players = data.get("players") or []
-        summary = ", ".join(f"{p.get('playerId')}:{p.get('score')}" for p in players if isinstance(p, dict))
-        _log(f"over: round={data.get('round')} 得分[{summary}]")
+        summary = ", ".join(f"{p.get('playerId')}:{p.get('totalScore')}"
+                            for p in players if isinstance(p, dict))
+        _log(f"over: overRound={data.get('overRound')} resultType={data.get('resultType')} "
+             f"reason={data.get('overReason')} winner={data.get('winnerPlayerId')} 总分[{summary}]")
+        for p in players:
+            if isinstance(p, dict) and p.get("playerId") == self._player_id:
+                _log(f"我方结算: online={p.get('online')} delivered={p.get('delivered')} "
+                     f"deliverRound={p.get('deliverRound')} scoreDetail={p.get('scoreDetail')}")
 
     def _send(self, message: dict) -> None:
         self._conn.write(message)

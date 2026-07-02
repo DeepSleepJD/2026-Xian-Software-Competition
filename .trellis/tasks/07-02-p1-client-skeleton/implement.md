@@ -18,10 +18,10 @@
 
 ## 里程碑 2：GameState/Intent 契约定稿
 
-- [ ] 2.1 对照 `refs/debug-kit-v1/一骑红尘：荔枝争运战 通信协议.md` 逐字段解析 start/inquire → state.py GameState
-- [ ] 2.2 Intent 数据类 + Strategy 基类 + arbiter.py 首版（优先级合并去冲突）
-- [ ] 2.3 单测：用 start消息.json / inquire消息.json 夹具驱动 protocol/state（不碰 socket）
-- [ ] **验证**：单测全绿；接口契约冻结记录到 design.md
+- [x] 2.1 对照 `refs/debug-kit-v1/一骑红尘：荔枝争运战 通信协议.md` 逐字段解析 start/inquire → state.py GameState（2026-07-02；文档/样例差异见 state.py docstring：name/playerName、resources 回退、guard.active 推导等）
+- [x] 2.2 Intent 数据类 + Strategy 基类 + arbiter.py 首版（优先级合并 + 动作类别同帧上限去冲突，防 INVALID_ACTION_CONFLICT）
+- [x] 2.3 单测：用 start消息.json / inquire消息.json 夹具驱动 protocol/state（不碰 socket；35 例全绿，含 trellis-check 质检补充的 guard 推导/null 容错用例）
+- [x] **验证**：单测全绿 + 集成对局 600 帧满勤、over 结算解析正确；契约草案完成，**待负责人确认后冻结**（冻结记录写 design.md）
 
 ## 里程碑 3：寻路 + 主线交付
 

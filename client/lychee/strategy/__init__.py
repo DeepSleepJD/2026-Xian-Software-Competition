@@ -13,8 +13,9 @@ from ..state import GameState
 @dataclass
 class Intent:
     kind: str                       # 意图类型，如 "move" / "deliver" / "combat"
-    priority: int                   # 仲裁优先级，大者先
+    priority: int                   # 仲裁优先级，大者先；同类别动作冲突时只放行最高者
     actions: list[dict] = field(default_factory=list)  # 候选动作（协议 actions[] 元素）
+    note: str = ""                  # 调试备注（不发给服务端）
 
 
 class Strategy:
