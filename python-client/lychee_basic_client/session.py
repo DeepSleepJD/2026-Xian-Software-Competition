@@ -3,6 +3,7 @@ import socket
 import sys
 from typing import Any, Optional
 
+from .battle_logger import BattleLogger
 from .config import Config
 from .framing import read_frame, write_frame
 from . import messages as M
@@ -16,6 +17,7 @@ class ClientSession:
         self._config = config
         self._match_id = ""
         self._strategy = Strategy(config.player_id)
+        self._battle_logger = BattleLogger(config.player_id)
         self._recorder = (
             MatchRecorder(config.record_dir, config.player_id)
             if config.record_dir
@@ -74,10 +76,9 @@ class ClientSession:
             self._recorder.record_inquire(data)
         actions = self._strategy.decide(data)
         self._log_state(round_no, data, actions)
-        write_frame(
-            self._sock,
-            M.action_message(self._match_id, round_no, self._config.player_id, actions),
-        )
+        message = M.action_message(self._match_id, round_no, self._config.player_id, actions)
+        self._battle_logger.log_round(data, message["msg_data"])
+        write_frame(self._sock, message)
 
     def _close_recorder(self) -> None:
         if self._recorder is not None:

@@ -1,3 +1,7 @@
+# battle logs (round-by-round output from BattleLogger)
+battle_rounds.jsonl
+*.jsonl
+
 # Python
 __pycache__/
 *.py[cod]
