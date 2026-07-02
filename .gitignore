@@ -13,3 +13,5 @@ refs/
 
 # 提交包产物（tools/package.py 随时可重建）
 dist/
+
+looog/
