@@ -12,7 +12,7 @@ BUSY_STATES = {"PROCESSING", "VERIFYING", "FORCED_PASSING", "RESTING", "CONTESTI
 # Task base to chase: 90 fills the delivery/time bonus and 110 reaches the
 # top milestone. Past 110 only raw task points improve, while the detours can
 # lose the delivery/freshness race against faster demo routes.
-TASK_BASE_TARGET = 110
+TASK_BASE_TARGET = 130
 # T06 burns a horse on claim; skip unless we hold one.
 HORSE_KEYS = ("FAST_HORSE", "SHORT_HORSE")
 # Ice box raises delivery freshness (freshness score = floor(fresh/100*180)).
@@ -196,15 +196,25 @@ class Strategy:
                 return [M.verify_gate()]
             return []  # wait for the rush phase to open the gate
 
-        # mandatory fixed-process node not confirmed done -> keep PROCESSing.
-        # Detect a process station from the LIVE node state (processRound > 0) so
-        # this works even if the map puts a process point somewhere the opening
-        # processNodes list didn't (map variability). We mark it done ONLY on the
-        # server's PROCESS_COMPLETE event (see _account_process); a process
-        # interrupted by a contest returns us to IDLE unfinished and re-issuing
-        # PROCESS is correct -- marking it done on the mere sight of a PROCESSING
-        # state (or moving off early) leaves us unable to MOVE (PROCESS_REQUIRED)
-        # and dead-locked.
+        # grab an imperial task here FIRST -- tasks expire, whereas the station
+        # process and resources don't, and we may claim tasks/resources at a
+        # process station before completing its process (task book 2.4.1). Doing
+        # the mandatory process first was letting on-node tasks (e.g. T_019 @ S13)
+        # expire during it -- task score is our only losing component.
+        task = self._claimable_task_here(node, tasks, me, round_no)
+        if task is not None:
+            tid = task["taskId"]
+            self._task_attempts[tid] = self._task_attempts.get(tid, 0) + 1
+            return [M.claim_task(tid)]
+
+        # stock useful resources this node has (no detour)
+        res = self._resource_to_claim(node, nodes_by_id, me)
+        if res is not None:
+            return [M.claim_resource(node, res)]
+
+        # mandatory fixed-process station, detected from LIVE node state
+        # (processRound > 0). Marked done ONLY on PROCESS_COMPLETE (see
+        # _account_process); moving off early -> PROCESS_REQUIRED dead-lock.
         needs_process = (
             node not in (self.gate_node, self.terminal_node)
             and (
@@ -214,18 +224,6 @@ class Strategy:
         )
         if needs_process and node not in self.processed:
             return [M.process()]
-
-        # opportunistic: grab an on-route imperial task at this node
-        task = self._claimable_task_here(node, tasks, me, round_no)
-        if task is not None:
-            tid = task["taskId"]
-            self._task_attempts[tid] = self._task_attempts.get(tid, 0) + 1
-            return [M.claim_task(tid)]
-
-        # opportunistic: stock useful resources this node has (no detour)
-        res = self._resource_to_claim(node, nodes_by_id, me)
-        if res is not None:
-            return [M.claim_resource(node, res)]
 
         # head toward the best worth-it task/ice waypoint, else straight to the gate
         dest = self._best_waypoint(node, nodes_by_id, tasks, me, round_no)
@@ -376,11 +374,10 @@ class Strategy:
         for w, gain in gains.items():
             if w == node:
                 continue
-            # never detour BACKWARD: only to waypoints no farther from the gate than
-            # we already are. Backtracking (e.g. S12 -> S11 for a task) wastes the
-            # endgame and can force a costly re-process of a station behind us.
-            if self.graph.path_cost(w, gate) > base:
-                continue
+            # (backtracking is allowed: the net-gain check below already prices in
+            # the extra freshness, and re-visiting a station now re-processes
+            # safely instead of dead-locking. Restricting to forward-only was
+            # starving task collection -- our one losing component.)
             detour = self.graph.path_cost(node, w) + self.graph.path_cost(w, gate) - base
             if not math.isfinite(detour):
                 continue

@@ -110,21 +110,32 @@ class ReprocessOnRevisitTests(unittest.TestCase):
         self.assertEqual("PROCESS", s.decide(_inq(4, "S02", "IDLE", nodes))[0]["action"])
 
 
-class WaypointNoBacktrackTests(unittest.TestCase):
-    def test_skips_task_behind_us(self) -> None:
+class WaypointTests(unittest.TestCase):
+    def _line(self) -> Strategy:
         s = Strategy(1001)
         s.gate_node = "S05"
-        s.task_base = 0
         s.graph.load_edges([
             {"fromNodeId": a, "toNodeId": b, "routeType": "ROAD", "distance": 10,
              "bidirectional": True}
             for a, b in [("S01", "S02"), ("S02", "S03"), ("S03", "S04"), ("S04", "S05")]
         ])
-        task_behind = [{"taskId": "T", "taskTemplateId": "T01", "nodeId": "S01",
-                        "score": 30, "active": True, "completed": False, "failed": False,
-                        "ownerPlayerId": 0, "protectionPlayerId": 0, "expireRound": 999}]
-        # we're at S03; a task at S01 is behind us (farther from the gate) -> ignore
-        self.assertIsNone(s._best_waypoint("S03", {}, task_behind, _me("S03"), 100))
+        return s
+
+    def _task(self, node):
+        return [{"taskId": "T", "taskTemplateId": "T01", "nodeId": node, "score": 30,
+                 "active": True, "completed": False, "failed": False,
+                 "ownerPlayerId": 0, "protectionPlayerId": 0, "expireRound": 999}]
+
+    def test_detours_for_a_worthwhile_task(self) -> None:
+        s = self._line()
+        s.task_base = 0
+        # a task worth 30 (x2.5 below 90) easily beats the detour freshness cost
+        self.assertEqual("S04", s._best_waypoint("S03", {}, self._task("S04"), _me("S03"), 100))
+
+    def test_no_waypoint_once_task_target_reached(self) -> None:
+        s = self._line()
+        s.task_base = 130  # at the cap -> tasks are worth 0 -> no detour
+        self.assertIsNone(s._best_waypoint("S03", {}, self._task("S04"), _me("S03"), 100))
 
 
 class GuardHandlingTests(unittest.TestCase):
