@@ -171,6 +171,56 @@ class EconomyTaskTests(unittest.TestCase):
         acts = self.acts(inquire(2, node="A", tasks=t2))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
 
+    def _restart(self, start: dict) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        self.strategy = EconomyStrategy()
+
+    def test_mountain_walk_task_excluded(self) -> None:
+        # 慢边禁令（P4e）：去 E 要走 MOUNTAIN 边且它不在交付路径上 → 任务出局，
+        # 不再为它赶路（现网败局的 S08 山路绕行即此模式）
+        slow = {**START, "matchId": "slow-test",
+                "edges": [dict(e) for e in START["edges"]]}
+        slow["edges"][3] = {"edgeId": "E4", "fromNodeId": "B", "toNodeId": "E",
+                            "routeType": "MOUNTAIN", "distance": 4, "bidirectional": True}
+        self._restart(slow)
+        intents = self.step(inquire(10, node="A", tasks=[task("T_far", "E")]))
+        self.assertNotIn("MOVE", [a["action"] for it in intents for a in it.actions])
+
+    def test_long_road_detour_task_still_chased(self) -> None:
+        # 大路长绕行不受慢边禁令影响（帧数上限方案会误杀大路任务簇，已否决）
+        far = {**START, "matchId": "far-road-test",
+               "edges": [dict(e) for e in START["edges"]]}
+        far["edges"][3] = {"edgeId": "E4", "fromNodeId": "B", "toNodeId": "E",
+                           "routeType": "ROAD", "distance": 8, "bidirectional": True}
+        self._restart(far)
+        acts = self.acts(inquire(10, node="A", tasks=[task("T_far", "E")]))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
+
+    def test_slow_edge_on_delivery_path_not_penalized(self) -> None:
+        # 交付路径本身要走的慢边不算绕山路（换图主线只有山路时经济层不哑）
+        mt = {**START, "matchId": "mt-main-test",
+              "edges": [dict(e) for e in START["edges"]]}
+        mt["edges"][1] = {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
+                          "routeType": "MOUNTAIN", "distance": 2, "bidirectional": True}
+        self._restart(mt)
+        acts = self.acts(inquire(10, node="A", tasks=[task("T_gate", "C")]))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
+
+    def test_no_linger_when_behind_opponent(self) -> None:
+        # P4e：落后于在场对手时不蹲守——被会设卡的对手甩在咽喉后面是败局起点
+        inq = inquire(1, node="A", resources={"ICE_BOX": 2})
+        inq["players"].append({"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
+                               "currentNodeId": "C", "nextNodeId": ""})
+        self.assertEqual([], self.step(inq))
+
+    def test_lingers_when_opponent_delivered(self) -> None:
+        inq = inquire(1, node="A", resources={"ICE_BOX": 2})
+        inq["players"].append({"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
+                               "currentNodeId": "D", "delivered": True})
+        intents = self.step(inq)
+        self.assertEqual([{"action": "WAIT"}], [a for it in intents for a in it.actions])
+
     def test_lingers_when_no_candidates_and_time_ample(self) -> None:
         # 无任何候选、离截止尚早：原地 WAIT 蹲刷新（压制 delivery 的赶路）
         intents = self.step(inquire(1, node="A", resources={"ICE_BOX": 2}))

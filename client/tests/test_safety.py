@@ -42,6 +42,139 @@ def inquire(round_no: int, *, node: str = "A", state: str = "IDLE",
     }
 
 
+OPP_ID = 2002
+
+TRAP_START = {
+    "matchId": "trap-test",
+    "durationRound": 600,
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True},
+        {"nodeId": "B", "nodeType": "STATION"},
+        {"nodeId": "C", "nodeType": "FINISH", "terminal": True},
+    ],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+    "map": {"gameplay": {"roles": {"startNodeId": "A", "terminalNodeIds": ["C"]}}},
+}
+
+# B 有旁路（A—D—C）→ 不是咽喉
+BYPASS_START = {
+    **TRAP_START,
+    "matchId": "bypass-test",
+    "nodes": TRAP_START["nodes"] + [{"nodeId": "D", "nodeType": "STATION"}],
+    "edges": TRAP_START["edges"] + [
+        {"edgeId": "E3", "fromNodeId": "A", "toNodeId": "D",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+        {"edgeId": "E4", "fromNodeId": "D", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+}
+
+
+def trap_inquire(round_no: int, *, me_node: str = "A", squads: int = 0,
+                 opp_node: str = "B", opp_next: str = "", opp_ap: int = 4,
+                 opp_delivered: bool = False, nodes: list | None = None) -> dict:
+    return {
+        "round": round_no,
+        "players": [
+            {"playerId": MY_ID, "teamId": "RED", "state": "IDLE",
+             "currentNodeId": me_node, "nextNodeId": "",
+             "squadAvailable": squads},
+            {"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
+             "currentNodeId": opp_node, "nextNodeId": opp_next,
+             "guardActionPoint": opp_ap, "delivered": opp_delivered},
+        ],
+        "nodes": nodes or [],
+    }
+
+
+def enemy_guard(node_id: str, defense: int = 6) -> list[dict]:
+    return [{"nodeId": node_id,
+             "guard": {"active": True, "ownerTeamId": "BLUE", "defense": defense,
+                       "initialDefense": defense, "maxDefense": 7}}]
+
+
+class TrapGateTests(unittest.TestCase):
+    """防陷阱闸门（P4e）：现网 match_2751 r361 败因场景的最小复刻。
+
+    对手停在咽喉 B 上握着 guardAP，我方 0 小分队——上边后它设卡即 180 帧冻结
+    （半路禁折返/攻坚需停稳），必须在边外等它走人。
+    """
+
+    def load(self, start: dict, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(start)
+        state.update_inquire(inq)
+        return state
+
+    def test_holds_when_opponent_squats_choke_with_guard_points(self) -> None:
+        state = self.load(TRAP_START, trap_inquire(100))
+        self.assertTrue(safety.hold_before_choke(state, "B"))
+
+    def test_no_hold_without_opponent_guard_points(self) -> None:
+        state = self.load(TRAP_START, trap_inquire(100, opp_ap=0))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+
+    def test_no_hold_when_opponent_already_en_route(self) -> None:
+        # 对手已上边离站（半路）：设卡窗口已过，亮没亮卡都不该再蹲
+        state = self.load(TRAP_START, trap_inquire(100, opp_next="C"))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+
+    def test_no_hold_when_guard_already_visible(self) -> None:
+        # 已亮卡：停稳攻坚链接管（BREAK_GUARD 当帧结算），蹲着白等
+        state = self.load(TRAP_START, trap_inquire(100, nodes=enemy_guard("B")))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+
+    def test_no_hold_with_enough_squads_to_weaken_through(self) -> None:
+        # STATION 最大防御 6 → 6 支小分队可半路削穿，进边风险可控
+        state = self.load(TRAP_START, trap_inquire(100, squads=6))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+        state = self.load(TRAP_START, trap_inquire(100, squads=5))
+        self.assertTrue(safety.hold_before_choke(state, "B"))
+
+    def test_no_hold_when_must_rush(self) -> None:
+        # 时间账吃紧：接受风化风险也要走，保底交付
+        state = self.load(TRAP_START, trap_inquire(590))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+
+    def test_no_hold_on_non_choke_node(self) -> None:
+        # B 有旁路 → 对手不值得在此设卡，跟停会在它每个处理站后面白等
+        state = self.load(BYPASS_START, trap_inquire(100))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+
+    def test_no_hold_when_opponent_delivered(self) -> None:
+        state = self.load(TRAP_START, trap_inquire(100, opp_delivered=True))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+
+
+class AheadOfOpponentTests(unittest.TestCase):
+    def load(self, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(TRAP_START)
+        state.update_inquire(inq)
+        return state
+
+    def test_behind_when_opponent_closer_to_terminal(self) -> None:
+        state = self.load(trap_inquire(100, me_node="A", opp_node="B"))
+        self.assertFalse(safety.ahead_of_opponent(state))
+
+    def test_ahead_when_closer_than_opponent(self) -> None:
+        state = self.load(trap_inquire(100, me_node="B", opp_node="A"))
+        self.assertTrue(safety.ahead_of_opponent(state))
+
+    def test_ahead_when_opponent_delivered(self) -> None:
+        # 无在场对手 = 竞速压力不存在，蹲守只受时间账约束
+        state = self.load(trap_inquire(100, me_node="A", opp_node="B",
+                                       opp_delivered=True))
+        self.assertTrue(safety.ahead_of_opponent(state))
+
+
 class SafetyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state = GameState(MY_ID)

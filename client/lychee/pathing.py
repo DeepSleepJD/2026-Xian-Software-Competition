@@ -136,6 +136,19 @@ def choke_nodes(state: GameState, src: str, dst: str) -> set[str]:
     return out
 
 
+def guard_max_defense(state: GameState, node_id: str) -> int:
+    """节点可架设卡的最大防御值（任务书 6.1 固定表）。削穿需同值数量的小分队。"""
+    node = state.nodes.get(node_id)
+    ns = state.node_states.get(node_id)
+    if ns is not None and ns.has_obstacle:
+        return 5
+    if node and node.node_type == "KEY_PASS":
+        return 7
+    if node and node.node_type == "GATE":
+        return 4
+    return 6
+
+
 def _guard_weathering_frames(state: GameState, node_id: str, defense: int, age: int, initial: int) -> int:
     node = state.nodes.get(node_id)
     first = 45 if node and node.node_type == "KEY_PASS" and initial >= 4 else 30

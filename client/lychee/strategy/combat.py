@@ -24,7 +24,7 @@ DOCUMENT_RESOURCES = ("PASS_TOKEN", "OFFICIAL_PERMIT")
 SCOUT_MIN_PROC_FRAMES = 4
 SCOUT_ETA_MAX = 40
 SCOUT_PENDING_TIMEOUT = 8
-SQUAD_RESERVE_FOR_WEAKEN = 4
+SQUAD_RESERVE_FOR_WEAKEN = 6   # 削穿一张满防卡（防御 6）需 6 支（2 支/次削 2 点，P4e 实证）
 GUARD_GOOD_FLOOR = 90
 GUARD_SETUP_FRAMES = 4
 GUARD_GOOD_FRAME_COST = 15
@@ -413,25 +413,12 @@ class CombatStrategy(Strategy):
                 count += 1
         return count
 
-    @staticmethod
-    def _best_path_frames(state: GameState, src: str) -> int:
-        best: int | None = None
-        for terminal in CombatStrategy._terminals(state):
-            path = pathing.shortest_path(state, src, terminal)
-            if path is None:
-                continue
-            frames = pathing.path_frames(state, path)
-            if best is None or frames < best:
-                best = frames
-        return best if best is not None else 10 ** 9
-
     def _ahead_of_opponent(self, state: GameState, cur: str) -> bool:
         opponent = state.opponent
+        # 对手缺席/已交付/已退赛时 safety 侧视同"领先"，但设卡拦不到人 → False
         if opponent.delivered or opponent.retired or not opponent.current_node_id:
             return False
-        my_frames = self._best_path_frames(state, cur)
-        opp_frames = self._best_path_frames(state, opponent.current_node_id)
-        return my_frames + GUARD_SETUP_FRAMES < opp_frames
+        return safety.ahead_of_opponent(state, GUARD_SETUP_FRAMES)
 
     def _is_opponent_choke(self, state: GameState, cur: str) -> bool:
         opponent = state.opponent
@@ -444,15 +431,7 @@ class CombatStrategy(Strategy):
 
     @staticmethod
     def _guard_max_defense(state: GameState, node_id: str) -> int:
-        node = state.nodes.get(node_id)
-        ns = state.node_states.get(node_id)
-        if ns is not None and ns.has_obstacle:
-            return 5
-        if node and node.node_type == "KEY_PASS":
-            return 7
-        if node and node.node_type == "GATE":
-            return 4
-        return 6
+        return pathing.guard_max_defense(state, node_id)
 
     @staticmethod
     def _guard_base_cost(state: GameState, node_id: str) -> int:

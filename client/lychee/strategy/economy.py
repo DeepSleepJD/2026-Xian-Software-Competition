@@ -38,6 +38,13 @@ TASK_SCORE_GOAL = 130         # 拿满即闭嘴：里程碑 60/90/110 → +15/+3
 ICE_BOX_VALUE = 18.0          # +10 鲜度 ≈ +18 分（策略文档定量）
 DETOUR_COST_PER_FRAME = 0.12  # 绕路 1 帧的点数成本：移动鲜度损耗 ~0.055/帧 ×
                               # 鲜度边际价值 ~1.8 分 + 风险余量（时间本身不值钱，洞察#3）
+SLOW_ROUTE_COEF_LIMIT = 1500  # 经济目标不走慢边（P4e）：MOUNTAIN(1780)/BRANCH(1550)
+                              # 级别的边只为任务/资源去走是净亏（现网败局实证：S08
+                              # 山路绕行 +22 帧 + 雾天再慢 10%，换 30 分任务还落后于
+                              # 会设卡的对手）；交付路径本身要走的慢边不受此限（换图
+                              # 主线只有山路时经济层不哑）。帧数上限方案已否决——
+                              # 它把"大路任务簇"（对水路基线呈绕行，实测配冰鉴净赚
+                              # 34 分）一起误杀，见任务归档 2026-07-03 归因实验
 TARGET_STICKINESS = 2.0       # 换目标需净值优势超过此值（防止停靠间目标抖动）
 TARGET_SWITCH_RATIO = 0.20    # 已承诺目标存在时，新目标需额外领先 20%
 BACKTRACK_MARGIN = 2.0        # 刚到站即原路折返需额外覆盖一条边成本
@@ -283,7 +290,9 @@ class EconomyStrategy(Strategy):
             # 无候选：离终局截止尚早就原地蹲守刷新（任务只在刷新后才可见）。
             # 只为未拿到的里程碑档（<110）蹲；110 后边际最多 +10，
             # 抵不过蹲守的用时分流失（~0.117/帧）
-            if me.task_score < 110 and self._can_linger(state, cur):
+            # P4e：落后于在场对手时不蹲——被会设卡的对手甩在咽喉后面是败局起点
+            if me.task_score < 110 and safety.ahead_of_opponent(state) \
+                    and self._can_linger(state, cur):
                 return Intent(kind="economy", priority=PRIORITY_ECONOMY,
                               actions=[{"action": "WAIT"}], note="蹲守任务刷新")
             return None
@@ -297,6 +306,10 @@ class EconomyStrategy(Strategy):
             return None
         path = pathing.shortest_path(state, cur, spot)
         if path and len(path) >= 2:
+            # 防陷阱闸门（P4e）：经济赶路与主线走位同受约束，否则高优先级
+            # MOVE 会把 delivery 侧的等待直接顶掉
+            if safety.hold_before_choke(state, path[1]):
+                return None
             return Intent(kind="economy", priority=PRIORITY_ECONOMY,
                           actions=[{"action": "MOVE", "targetNodeId": path[1]}],
                           note=f"赶路→{target.note}")
@@ -311,7 +324,8 @@ class EconomyStrategy(Strategy):
         base_frames = from_cur.get(anchor, (0.0, _INF))[1]
         deadline = state.duration_round - ENDGAME_MARGIN
 
-        # 第一遍：可行性过滤（到点最近停靠点、过期、终局截止、净值>0）
+        # 第一遍：可行性过滤（到点最近停靠点、过期、终局截止、慢边、净值>0）
+        allowed_slow = self._delivery_slow_edges(state, cur, anchor)
         feasible: list[tuple[_Target, str, int, int]] = []   # (cand, spot, to, done)
         for cand in self._candidates(state, cur):
             if state.round < self._backoff.get(cand.key, 0):
@@ -326,6 +340,8 @@ class EconomyStrategy(Strategy):
             done_round = state.round + to_frames + cand.proc_frames
             if cand.expire_round > 0 and done_round > cand.expire_round:
                 continue
+            if self._walks_slow_route(state, cur, spot, anchor, allowed_slow):
+                continue   # 只为经济目标走山路/支线级慢边 → 弃（P4e）
             feasible.append((cand, spot, to_frames, done_round))
         if not feasible:
             return None, ""
@@ -377,6 +393,35 @@ class EconomyStrategy(Strategy):
             if best[0] < current[0] + threshold:
                 best = current
         return best[2], best[3]
+
+    @staticmethod
+    def _path_slow_edges(state: GameState, path: list[str] | None) -> set[str]:
+        """一条路径上耗时系数超限（MOUNTAIN/BRANCH 级）的边 id 集合。"""
+        out: set[str] = set()
+        if not path:
+            return out
+        for a, b in zip(path, path[1:]):
+            for nxt, edge in state.neighbors(a):
+                if nxt == b:
+                    coef = pathing.ROUTE_COST_COEF.get(
+                        edge.route_type, pathing._UNKNOWN_COEF)
+                    if coef > SLOW_ROUTE_COEF_LIMIT:
+                        out.add(edge.edge_id)
+                    break
+        return out
+
+    def _delivery_slow_edges(self, state: GameState, cur: str, anchor: str) -> set[str]:
+        """交付路径自身要走的慢边（经济候选走这些边不算额外绕山路）。"""
+        return self._path_slow_edges(state, pathing.shortest_path(state, cur, anchor))
+
+    def _walks_slow_route(self, state: GameState, cur: str, spot: str,
+                          anchor: str, allowed_slow: set[str]) -> bool:
+        """去停靠点或从停靠点回终点需要走交付路径之外的慢边则为 True。"""
+        for src, dst in ((cur, spot), (spot, anchor)):
+            slow = self._path_slow_edges(state, pathing.shortest_path(state, src, dst))
+            if slow - allowed_slow:
+                return True
+        return False
 
     def _can_linger(self, state: GameState, cur: str) -> bool:
         """蹲守安全判定：现在动身仍能在截止前送达，且不欠本站固定处理。"""

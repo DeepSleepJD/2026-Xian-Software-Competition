@@ -15,7 +15,7 @@
 
 from .. import pathing
 from ..state import GameState
-from . import Intent, Strategy
+from . import Intent, Strategy, safety
 
 PRIORITY_DELIVERY = 100
 # MOVE 连续被拒此数后，临时绕开该节点重新寻路（持续 AVOID_ROUNDS 帧）
@@ -146,7 +146,12 @@ class DeliveryStrategy(Strategy):
                 cost = pathing.path_cost(state, path)
                 if best is None or cost < best_cost:
                     best, best_cost = path, cost
-        return best[1] if best else ""
+        if best is None:
+            return ""
+        # 防陷阱闸门（P4e）：对手蹲在咽喉上且可设卡时不进边，原地等它走人
+        if safety.hold_before_choke(state, best[1]):
+            return ""
+        return best[1]
 
     def _intent(self, action: dict, note: str) -> Intent:
         return Intent(kind="delivery", priority=PRIORITY_DELIVERY, actions=[action], note=note)

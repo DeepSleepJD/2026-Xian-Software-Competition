@@ -96,6 +96,22 @@ class DeliveryStateMachineTests(unittest.TestCase):
         self.assertEqual([], self.step(inquire(1, node="D", verified=True, good_fruit=0)))
         self.assertEqual([], self.step(inquire(2, node="D", verified=True, freshness=0.0)))
 
+    def _trap_inquire(self, round_no: int, *, opp_node: str, opp_next: str = "",
+                      opp_ap: int = 4) -> dict:
+        inq = inquire(round_no, node="A")
+        inq["players"][0]["squadAvailable"] = 0
+        inq["players"].append({"playerId": 2002, "teamId": "BLUE", "state": "IDLE",
+                               "currentNodeId": opp_node, "nextNodeId": opp_next,
+                               "guardActionPoint": opp_ap})
+        return inq
+
+    def test_holds_move_while_opponent_squats_choke(self) -> None:
+        # 防陷阱闸门（P4e）：对手停在咽喉 B 且可设卡、我方无小分队 → 本帧不进边
+        self.assertEqual([], self.step(self._trap_inquire(20, opp_node="B")))
+        # 对手离站上边（B→C 半路）→ 恢复移动
+        acts = self.step(self._trap_inquire(21, opp_node="B", opp_next="C"))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
+
     def test_delivered_goes_quiet(self) -> None:
         inq = inquire(1, node="D", verified=True)
         inq["players"][0]["delivered"] = True

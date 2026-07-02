@@ -344,6 +344,17 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(10, node="A", squad_available=4, opp_node="C"))
         self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
 
+    def test_squad_scout_reserve_covers_full_weaken(self) -> None:
+        # P4e：保留量 6 = 削穿一张满防卡（防御 6）的兵力；剩 6 支不派侦察，7 支可派
+        self.state = GameState(MY_ID)
+        self.state.update_start(SCOUT_START)
+        self.strategy = CombatStrategy()
+        acts = self.actions(inquire(10, node="A", squad_available=6, opp_node="C"))
+        self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
+        self.strategy = CombatStrategy()
+        acts = self.actions(inquire(11, node="A", squad_available=7, opp_node="C"))
+        self.assertIn("SQUAD_SCOUT", [a["action"] for a in acts])
+
     def test_squad_weaken_wins_over_scout(self) -> None:
         self.state = GameState(MY_ID)
         self.state.update_start(SCOUT_START)
