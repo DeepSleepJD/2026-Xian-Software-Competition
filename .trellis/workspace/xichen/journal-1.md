@@ -72,3 +72,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 3: P4c resource and card fixes
+
+**Date**: 2026-07-02
+**Task**: P4c resource and card fixes
+**Branch**: `xichen`
+
+### Summary
+
+Implemented P4c resource valuation, squad scout markers, window card ordering, INTEL gate use, and regression coverage; demo seeds 20260618 and 12345 both scored 774.
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4be31b8` | (see git log) |
+| `6c46529` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
