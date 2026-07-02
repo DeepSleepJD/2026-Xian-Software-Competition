@@ -27,15 +27,23 @@ HIGH_VALUE = 90  # priority at/above which we'll spend a good fruit (XIAN_GONG)
 
 
 def active_contest(
-    player_id: int, contests: list[dict[str, Any]]
+    player_id: int, contests: list[dict[str, Any]], round_no: Optional[int] = None
 ) -> Optional[dict[str, Any]]:
-    """The most valuable unresolved window this player is a party to, or None."""
-    mine = [
-        c
-        for c in contests
-        if not c.get("resolved")
-        and player_id in (c.get("redPlayerId"), c.get("bluePlayerId"))
-    ]
+    """The most valuable still-playable window this player is a party to, or None.
+
+    A window is playable only while it is unresolved and within its deadline;
+    playing on an already-ended window is what triggers a server error / retire,
+    so we exclude those here (and the caller also de-dups per tap)."""
+    mine = []
+    for c in contests:
+        if c.get("resolved"):
+            continue
+        if player_id not in (c.get("redPlayerId"), c.get("bluePlayerId")):
+            continue
+        deadline = c.get("deadlineRound")
+        if round_no is not None and deadline is not None and round_no > deadline:
+            continue  # window already ended
+        mine.append(c)
     if not mine:
         return None
     mine.sort(key=lambda c: CONTEST_PRIORITY.get(c.get("contestType"), 10), reverse=True)

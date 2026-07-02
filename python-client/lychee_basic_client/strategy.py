@@ -51,6 +51,9 @@ class Strategy:
         self._last_move_target: Optional[str] = None
         # obstacle nodes we've already sent a squad to clear (avoid re-dispatch)
         self._squad_clear_sent: set[str] = set()
+        # (contestId, roundIndex) pairs we've already played -> never double-play a
+        # tap or replay an ended window (that can server-error us into a retire)
+        self._contest_played: set[tuple] = set()
 
     # ---- setup from the start message ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -115,10 +118,16 @@ class Strategy:
         """Main-car / window action for this frame."""
         # play any window we're a party to first -- otherwise we abstain and lose
         # the contested object. Must precede the busy check so a forced-pass
-        # attacker (state FORCED_PASSING) still plays its PASS window.
-        contest = active_contest(self.player_id, contests)
+        # attacker (state FORCED_PASSING) still plays its PASS window. Play at most
+        # once per tap (contestId, roundIndex): replaying a tap / an ended window
+        # is what server-errors us into a retire.
+        contest = active_contest(self.player_id, contests, round_no)
         if contest is not None:
-            return [M.window_card(contest["contestId"], pick_card(me, contest))]
+            tap = (contest.get("contestId"), contest.get("roundIndex"))
+            if tap not in self._contest_played:
+                self._contest_played.add(tap)
+                return [M.window_card(contest["contestId"], pick_card(me, contest))]
+            # already played this tap -> fall through (BUSY state -> heartbeat)
 
         # travelling on an edge: keep pushing toward the current target end.
         # NB: WAITING while parked on a node is NOT travelling -> fall through.

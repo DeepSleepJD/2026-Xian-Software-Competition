@@ -41,6 +41,27 @@ class SquadPreClearTests(unittest.TestCase):
         self.assertIsNone(s._squad_action("S01", nodes, {"squadAvailable": 8}, "NORMAL"))
 
 
+class ContestDedupTests(unittest.TestCase):
+    def test_plays_card_once_per_tap(self) -> None:
+        s = Strategy(1001)
+        s.gate_node = "S14"
+        me = {"playerId": 1001, "state": "CONTESTING", "guardActionPoint": 2, "resources": {}}
+        contest = {
+            "contestId": "C1", "contestType": "TASK", "roundIndex": 1,
+            "redPlayerId": 1001, "bluePlayerId": 2002, "resolved": False,
+            "deadlineRound": 200,
+        }
+        args = ("CONTESTING", "S07", "NORMAL", 100, [], [contest], {})
+        first = s._main_action(me, *args)
+        self.assertEqual("WINDOW_CARD", first[0]["action"])
+        # same tap again -> do NOT replay (would risk a server error / retire)
+        self.assertEqual([], s._main_action(me, *args))
+        # next tap -> play again
+        contest["roundIndex"] = 2
+        second = s._main_action(me, *args)
+        self.assertEqual("WINDOW_CARD", second[0]["action"])
+
+
 class GuardHandlingTests(unittest.TestCase):
     def _diamond(self) -> Strategy:
         # S01 -> S02 -> S04  and  S01 -> S03 -> S04  (two ways to the gate S04)

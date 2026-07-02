@@ -27,6 +27,13 @@ class ContestTests(unittest.TestCase):
         contests = [_contest("GATE", red=3003, blue=4004)]
         self.assertIsNone(active_contest(1001, contests))
 
+    def test_active_contest_excludes_ended_window_past_deadline(self) -> None:
+        c = _contest("TASK")
+        c["deadlineRound"] = 120
+        # within deadline -> playable; past deadline -> excluded (would server-error)
+        self.assertIsNotNone(active_contest(1001, [c], round_no=118))
+        self.assertIsNone(active_contest(1001, [c], round_no=121))
+
     def test_pick_card_spends_guard_point_first(self) -> None:
         me = {"guardActionPoint": 2, "resources": {"PASS_TOKEN": 1}}
         self.assertEqual("BING_ZHENG", pick_card(me, _contest("TASK")))
