@@ -26,7 +26,7 @@ from math import ceil, floor
 
 from .. import pathing
 from ..state import GameState
-from . import Intent, Strategy
+from . import Intent, Strategy, safety
 
 PRIORITY_ICE_USE = 120
 PRIORITY_HORSE_USE = 119
@@ -214,7 +214,9 @@ class EconomyStrategy(Strategy):
         if intel is not None:
             intents.append(intel)
 
-        eco = self._propose_economy(state, cur)
+        # 送达优先（P4d 兜底）：时间账吃紧时任务/冰鉴候选与 WAIT 蹲守全停；
+        # 冰鉴/马匹/情报使用保留（保交付有效性 + 助攻直奔终点）
+        eco = None if safety.must_rush(state) else self._propose_economy(state, cur)
         if eco is not None:
             intents.append(eco)
             # 冰鉴上边预判只看本帧真会走的边：economy 出 MOVE 用其目标，

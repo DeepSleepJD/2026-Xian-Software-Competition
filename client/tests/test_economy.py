@@ -277,6 +277,18 @@ class EconomyIceBoxTests(unittest.TestCase):
         self.assertEqual([{"action": "CLAIM_RESOURCE", "targetNodeId": "B",
                            "resourceType": "ICE_BOX"}], acts)
 
+    def test_must_rush_silences_candidates_and_wait(self) -> None:
+        # P4d 送达优先：A 到终点 17 帧，525+17+60 ≥ 600 触发全局硬闸。
+        # 对照：经济层自身候选账（done≈543 ≤ 560）本会接受该任务，硬闸必须先行
+        self.assertEqual([], self.acts(inquire(525, node="A", tasks=[task("T_1", "B")])))
+
+    def test_must_rush_keeps_ice_use(self) -> None:
+        # 硬闸只停候选/蹲守；冰鉴使用保交付有效性，保留
+        acts = self.acts(inquire(525, node="A", freshness=81.5,
+                                 resources={"ICE_BOX": 1}, tasks=[task("T_1", "B")]))
+        self.assertIn({"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}, acts)
+        self.assertNotIn("MOVE", [a["action"] for a in acts])
+
     def test_uses_ice_box_at_threshold(self) -> None:
         # freshness 81.5 ≤ 80+2：停靠即用；优先级 120 压过任务
         intents = self.step(inquire(1, node="A", freshness=81.5,

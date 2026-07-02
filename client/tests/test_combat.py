@@ -36,7 +36,7 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
             good: int = 98, bad: int = 2, freshness: float = 85.0,
             guard_points: int = 4, contests: list | None = None,
             nodes: list | None = None, phase: str = "NORMAL",
-            next_node: str = "", squad_available: int = 8,
+            next_node: str = "", move_dir: str = "", squad_available: int = 8,
             squad_in_flight: int = 0, opp_node: str = "S10",
             resources: dict | None = None, events: list | None = None) -> dict:
     return {
@@ -44,6 +44,7 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
         "phase": phase,
         "players": [{"playerId": MY_ID, "teamId": "RED", "state": state,
                      "currentNodeId": node, "nextNodeId": next_node,
+                     "moveDirection": move_dir,
                      "goodFruit": good, "badFruit": bad,
                      "freshness": freshness, "guardActionPoint": guard_points,
                      "squadAvailable": squad_available,
@@ -61,6 +62,10 @@ def guard_s10(defense: int = 6) -> list[dict]:
     return [{"nodeId": "S10", "guard": {"active": True, "ownerTeamId": "BLUE",
                                          "defense": defense, "initialDefense": defense,
                                          "maxDefense": 7}}]
+
+
+def obstacle_s10() -> list[dict]:
+    return [{"nodeId": "S10", "hasObstacle": True, "obstacleType": "LANDSLIDE"}]
 
 
 def friendly_guard(node_id: str) -> dict:
@@ -166,6 +171,43 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(200, node="S10", opp_node="S09", good=91))
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 
+    def test_break_guard_blocked_when_paused_mid_edge(self) -> None:
+        # P4d 死锁根因①：半路被守卫暂停（WAITING+PAUSED+nextNodeId 保留）不是可攻坚状态，
+        # 发 BREAK_GUARD 必被判 MOVING_ACTION_FORBIDDEN（任务书 8.2）
+        acts = self.actions(inquire(320, state="WAITING", next_node="S10",
+                                    move_dir="PAUSED", nodes=guard_s10()))
+        self.assertNotIn("BREAK_GUARD", [a["action"] for a in acts])
+
+    def test_break_guard_blocked_mid_edge_without_pause_flag(self) -> None:
+        # nextNodeId 非空即在边上，即使字段变体缺 PAUSED 标记也不得攻坚
+        acts = self.actions(inquire(320, state="WAITING", next_node="S10",
+                                    nodes=guard_s10()))
+        self.assertNotIn("BREAK_GUARD", [a["action"] for a in acts])
+
+    def test_break_guard_still_fires_when_docked_waiting(self) -> None:
+        # 防回归锚点：真停靠节点（nextNodeId 空、非 PAUSED）的 WAITING 仍可攻坚
+        acts = self.actions(inquire(320, state="WAITING", nodes=guard_s10()))
+        self.assertIn({"action": "BREAK_GUARD", "targetNodeId": "S10",
+                       "goodFruit": 0, "badFruit": 2}, acts)
+
+    def test_squad_weaken_keeps_dispatching_when_paused(self) -> None:
+        # P4d 死锁根因②：被暂停成 WAITING 后削卡不能熄火——它是唯一快速清卡手段
+        acts = self.actions(inquire(320, state="WAITING", next_node="S10",
+                                    move_dir="PAUSED", nodes=guard_s10()))
+        self.assertIn({"action": "SQUAD_WEAKEN", "targetNodeId": "S10"}, acts)
+
+    def test_squad_weaken_paused_stops_when_enough_in_flight(self) -> None:
+        acts = self.actions(inquire(320, state="WAITING", next_node="S10",
+                                    move_dir="PAUSED", nodes=guard_s10(),
+                                    squad_in_flight=3))
+        self.assertNotIn("SQUAD_WEAKEN", [a["action"] for a in acts])
+
+    def test_squad_weaken_paused_respects_squad_floor(self) -> None:
+        acts = self.actions(inquire(320, state="WAITING", next_node="S10",
+                                    move_dir="PAUSED", nodes=guard_s10(),
+                                    squad_available=1))
+        self.assertNotIn("SQUAD_WEAKEN", [a["action"] for a in acts])
+
     def test_squad_weakens_next_node_guard_while_moving(self) -> None:
         acts = self.actions(inquire(320, state="MOVING", next_node="S10", nodes=guard_s10()))
         self.assertIn({"action": "SQUAD_WEAKEN", "targetNodeId": "S10"}, acts)
@@ -174,6 +216,41 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(320, state="MOVING", next_node="S10",
                                     nodes=guard_s10(), squad_in_flight=3))
         self.assertNotIn("SQUAD_WEAKEN", [a["action"] for a in acts])
+
+    def test_clears_obstacle_on_terminal_path_next_hop(self) -> None:
+        # P4d 实测：咽喉道路障碍无人清 = MOVE 永拒 = 卡死未送达（任务书 2.4.4）
+        intents = self.intents(inquire(100, nodes=obstacle_s10()))
+        clear = [it for it in intents if it.kind == "combat.clear"][0]
+        self.assertEqual(PRIORITY_COMBAT_MAIN, clear.priority)
+        self.assertEqual({"action": "CLEAR", "targetNodeId": "S10"}, clear.actions[0])
+
+    def test_clear_beats_delivery_move_in_arbiter(self) -> None:
+        intents = self.intents(inquire(100, nodes=obstacle_s10()))
+        intents.append(Intent(kind="delivery", priority=100,
+                              actions=[{"action": "MOVE", "targetNodeId": "S10"}]))
+        actions = merge_intents(intents)
+        self.assertIn({"action": "CLEAR", "targetNodeId": "S10"}, actions)
+        self.assertNotIn({"action": "MOVE", "targetNodeId": "S10"}, actions)
+
+    def test_no_clear_when_mid_edge(self) -> None:
+        # 清障是主车队停靠动作，半路（含被暂停）不得提交
+        acts = self.actions(inquire(100, state="WAITING", next_node="S10",
+                                    move_dir="PAUSED", nodes=obstacle_s10()))
+        self.assertNotIn("CLEAR", [a["action"] for a in acts])
+
+    def test_no_clear_without_obstacle(self) -> None:
+        acts = self.actions(inquire(100))
+        self.assertNotIn("CLEAR", [a["action"] for a in acts])
+
+    def test_no_set_guard_when_must_rush(self) -> None:
+        # P4d 送达优先：S10 到终点 3 帧，590+3+60 ≥ 600，设卡（纯刷分）让路
+        acts = self.actions(inquire(590, node="S10", opp_node="S09"))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
+
+    def test_break_guard_unaffected_by_must_rush(self) -> None:
+        # 攻坚打的是终点路径上的卡，是送达的一部分，不受送达优先约束
+        acts = self.actions(inquire(550, nodes=guard_s10()))
+        self.assertIn("BREAK_GUARD", [a["action"] for a in acts])
 
     def test_plays_bing_zheng_first_for_relevant_window(self) -> None:
         contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",

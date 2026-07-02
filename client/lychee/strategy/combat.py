@@ -10,7 +10,7 @@ from math import ceil
 
 from .. import pathing
 from ..state import Contest, GameState
-from . import Intent, Strategy
+from . import Intent, Strategy, safety
 
 PRIORITY_COMBAT_MAIN = 130
 PRIORITY_SET_GUARD = 129
@@ -48,6 +48,10 @@ class CombatStrategy(Strategy):
         intents: list[Intent] = []
         main = self._propose_break_guard(state)
         if main is None:
+            main = self._propose_clear_obstacle(state)
+        if main is None and not safety.must_rush(state):
+            # 送达优先：时间账吃紧时设卡（4 帧架设+果子）纯刷分，让路；
+            # 攻坚/削卡/清障/探路保留——只处理终点路径上的阻挡，是送达的一部分
             main = self._propose_set_guard(state)
         if main is not None:
             intents.append(main)
@@ -69,6 +73,11 @@ class CombatStrategy(Strategy):
         if me.current_process is not None:
             return None
         if state.my_state() not in _STATIONARY_STATES:
+            return None
+        # 任务书 8.2：半路视同 MOVING，攻坚非法。被守卫拦停时服务器置
+        # WAITING+PAUSED 且 nextNodeId 保留（P4d 死锁根因①），不能当停稳；
+        # nextNodeId 非空即在边上，PAUSED 兜底字段组合变体
+        if me.next_node_id or me.move_direction == "PAUSED":
             return None
         cur = me.current_node_id
         if not cur:
@@ -126,6 +135,32 @@ class CombatStrategy(Strategy):
             action["rushTactic"] = "BREAK_ORDER"
         return action
 
+    def _propose_clear_obstacle(self, state: GameState) -> Intent | None:
+        """主车队清障（任务书 2.4.4/5.2 动作表）：交付路径下一跳被道路障碍挡住时
+        花 6 帧读条 + 1 好果清掉。障碍开局生成、不清不消（P4d 实测：咽喉障碍无人清
+        = MOVE 永拒 = 永久卡死未送达）。小分队清障（2 支）不用——人手全留给削卡，
+        它是半路被守卫暂停时唯一的快速清卡手段。"""
+        me = state.me
+        if me.current_process is not None:
+            return None
+        if state.my_state() not in _STATIONARY_STATES:
+            return None
+        if me.next_node_id or me.move_direction == "PAUSED":
+            return None
+        cur = me.current_node_id
+        if not cur or state.my_good < 1:
+            return None
+        path = self._terminal_path(state, cur)
+        if not path or len(path) < 2:
+            return None
+        target = path[1]
+        ns = state.node_states.get(target)
+        if ns is None or not ns.has_obstacle:
+            return None
+        action = {"action": "CLEAR", "targetNodeId": target}
+        return Intent(kind="combat.clear", priority=PRIORITY_COMBAT_MAIN,
+                      actions=[action], note=f"清障@{target}")
+
     def _propose_set_guard(self, state: GameState) -> Intent | None:
         me = state.me
         if state.phase != "NORMAL" or me.verified:
@@ -158,7 +193,11 @@ class CombatStrategy(Strategy):
 
     def _propose_squad_weaken(self, state: GameState) -> Intent | None:
         me = state.me
-        if me.state != "MOVING" or not me.next_node_id:
+        # 被守卫拦停（WAITING+PAUSED）时削卡是唯一快速清卡手段，只认 MOVING
+        # 会导致只剩干等风化（P4d 死锁根因②）
+        en_route = bool(me.next_node_id) and (
+            me.state == "MOVING" or me.move_direction == "PAUSED")
+        if not en_route:
             return None
         guard = state.enemy_guard_at(me.next_node_id)
         if guard is None or me.squad_available < 2:

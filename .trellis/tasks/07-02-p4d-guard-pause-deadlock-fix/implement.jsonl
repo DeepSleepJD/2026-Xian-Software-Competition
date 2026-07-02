@@ -1,0 +1,5 @@
+{"file": "looog/1", "reason": "败因证据日志：半路暂停三字段（WAITING/PAUSED/nextNodeId）、134 帧 MOVING_ACTION_FORBIDDEN、190 帧冻结的原始出处"}
+{"file": "docs/P4-对抗层改动清单.md", "reason": "P4 对抗层总改动清单：败因证据、规则依据（任务书 8.2/6.3.1）、优先级框架"}
+{"file": "docs/P4c-资源利用与出牌修正实现文档.md", "reason": "上一轮 P4c 实现文档：探路预标记/出牌成本顺位等已合入行为，避免本轮改动冲突"}
+{"file": "docs/客户端架构设计.md", "reason": "分层与 GameState/Intent/arbiter 契约边界：本任务不得越界的依据"}
+{"file": "docs/比赛分析与取胜策略.md", "reason": "得分结构与帧预算定量：RUSH_SAFETY_MARGIN 取值与送达优先权衡的基准"}

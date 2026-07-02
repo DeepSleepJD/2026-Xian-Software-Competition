@@ -1,0 +1,2 @@
+{"file": "docs/客户端架构设计.md", "reason": "验收对照：策略层只读 GameState 只产 Intent、不碰 runtime/arbiter 契约"}
+{"file": "docs/P4-对抗层改动清单.md", "reason": "验收对照：修复项与败因/规则依据一一对应，验证方案（设卡对手局 + demo 回归局）"}
