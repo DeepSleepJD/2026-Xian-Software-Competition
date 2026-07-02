@@ -44,6 +44,14 @@ py -3 -m lychee_basic_client.analyze .\rec\<对局>_1001_<时间>.jsonl
 
 注意：对手侧的逐帧对比只在本地 `client-debug` 全可见性记录里完整；正式赛对手私有逐帧数据不公开，但对我方自身的归因始终成立。
 
+### 卡死诊断（`inspect_stuck.py`）
+
+当总报告显示"整局未交付"时，用它定位卡在哪、为什么（例如被敌方设卡挡住）。它截取**第一段连续被拒动作附近的十几帧**，打印我方车状态、发送的动作、被拒原因(含 errorCode)、当前/目标节点字段，以及全场 `GUARD_SET` 事件——输出很小，适合内网导出：
+
+```powershell
+py -3 -m lychee_basic_client.inspect_stuck battle_rounds.jsonl -o stuck.txt
+```
+
 ## 运行环境
 
 - Windows：Windows 10/11，安装 Python 后在 PowerShell 或 CMD 中运行。
