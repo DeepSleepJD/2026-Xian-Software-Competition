@@ -29,7 +29,8 @@ from . import Intent, Strategy
 
 PRIORITY_ICE_USE = 120
 PRIORITY_ECONOMY = 110
-TASK_SCORE_GOAL = 90          # 拿满即闭嘴（60/90/110 里程碑，90 是 P2 目标）
+TASK_SCORE_GOAL = 110         # 拿满即闭嘴（里程碑 60/90/110 → +15/+35/+50，无 130 档；
+                              # 皇榜分封顶 180=raw130+50，P3 先冲 110 档验证）
                               # 注意 inquire.taskScore 是原始任务分，里程碑奖励结算时才补发
 ICE_BOX_VALUE = 18.0          # +10 鲜度 ≈ +18 分（策略文档定量）
 DETOUR_COST_PER_FRAME = 0.12  # 绕路 1 帧的点数成本：移动鲜度损耗 ~0.055/帧 ×
