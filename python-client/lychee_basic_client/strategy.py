@@ -374,10 +374,13 @@ class Strategy:
         for w, gain in gains.items():
             if w == node:
                 continue
-            # (backtracking is allowed: the net-gain check below already prices in
-            # the extra freshness, and re-visiting a station now re-processes
-            # safely instead of dead-locking. Restricting to forward-only was
-            # starving task collection -- our one losing component.)
+            # forward-only: never detour to a waypoint farther from the gate than we
+            # already are. Back-tracking to farm a behind-us task is at best
+            # break-even near the task-score cap (its freshness cost ~= the capped
+            # marginal task points) and at worst a pathological far side-trip that
+            # lets the opponent run ahead. We instead grab on-route/expiring tasks.
+            if self.graph.path_cost(w, gate) > base:
+                continue
             detour = self.graph.path_cost(node, w) + self.graph.path_cost(w, gate) - base
             if not math.isfinite(detour):
                 continue
