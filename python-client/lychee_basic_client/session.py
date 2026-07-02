@@ -3,6 +3,7 @@ import socket
 import sys
 from typing import Any, Optional
 
+from .battle_logger import BattleLogger
 from .config import Config
 from .framing import read_frame, write_frame
 from .messages import action_message, heartbeat_action, ready_message, registration_message
@@ -15,6 +16,7 @@ class ClientSession:
         self._config = config
         self._match_id = ""
         self._strategy = MovementStrategy(config.player_id)
+        self._battle_logger = BattleLogger(config.player_id)
 
     def run(self) -> int:
         self._send_registration()
@@ -63,11 +65,12 @@ class ClientSession:
         actions = self._strategy.choose_action(data)
         if actions:
             print(f"inquire round={round_no} -> {actions[0]['action']}")
-            write_frame(
-                self._sock,
-                action_message(self._match_id, round_no, self._config.player_id, actions),
-            )
+            message = action_message(self._match_id, round_no, self._config.player_id, actions)
+            self._battle_logger.log_round(data, message["msg_data"])
+            write_frame(self._sock, message)
             return
 
         print(f"inquire round={round_no} -> heartbeat")
-        write_frame(self._sock, heartbeat_action(self._match_id, round_no, self._config.player_id))
+        message = heartbeat_action(self._match_id, round_no, self._config.player_id)
+        self._battle_logger.log_round(data, message["msg_data"])
+        write_frame(self._sock, message)
