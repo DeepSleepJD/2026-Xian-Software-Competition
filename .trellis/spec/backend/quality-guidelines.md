@@ -66,6 +66,35 @@ class Intent:
 - New resource type: add claim behavior, active-use behavior if any, and rejection/backoff tests for active use.
 - New pathing cost factor: add no-effect baseline and affected-route tests.
 
+### Contract: Choke Trap Hold Gate
+
+**Scope**: `client/lychee/strategy/safety.py`, callers in `delivery.py` and `economy.py`.
+
+**Signature**:
+
+```python
+def hold_before_choke(state: GameState, next_node: str) -> bool:
+    ...
+```
+
+**Contract**:
+- Return `True` only to suppress a `MOVE` into `next_node`; callers should simply emit no move for that frame.
+- The gate must be disabled when `must_rush(state)` is true, when an enemy guard is already visible at `next_node`, or when `state.me.squad_available >= pathing.guard_max_defense(state, next_node)`.
+- The target must be a choke node on the current route to any terminal (`pathing.choke_nodes(state, cur, terminal)`); do not hard-code map node IDs such as `S10` or `S11`.
+- Treat the opponent as a guard threat when it has `guardActionPoint >= 1` and either:
+  - it is already stopped on `next_node`, or
+  - it is moving toward `next_node` and `opponent_remaining_edge_frames + GUARD_SETUP_FRAMES <= my_edge_frames_to(next_node)`.
+
+**Good/Base/Bad Cases**:
+- Good: holding at `S10` when the opponent is already ahead on `S10 -> S11`, has guard points, and can arrive plus finish the 4-frame guard setup before us.
+- Base: not holding when the opponent is moving away from `next_node`; the guard window for that node has passed.
+- Bad: checking only `opponent.currentNodeId == next_node`; that misses the real double-guard failure mode where the opponent is still en route but will finish setup before our arrival.
+
+**Tests Required**:
+- Positive regression for a moving opponent that will reach the choke first and finish setup before us.
+- Negative regression for a moving opponent whose arrival plus setup is too late.
+- Negative regressions for no guard points, visible guard, enough squads, must-rush, non-choke, and delivered opponent.
+
 ### Lychee Resource And Tempo Contracts
 
 **Scope**: `client/lychee/strategy/economy.py`, `client/lychee/strategy/combat.py`, and `client/lychee/state.py`.

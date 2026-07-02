@@ -14,6 +14,7 @@ from math import ceil
 from .. import pathing
 from ..state import GameState
 
+GUARD_SETUP_FRAMES = 4
 RUSH_SAFETY_MARGIN = 60   # 帧。覆盖削卡等待+验核读条+处理中断重来+暂停损耗+抖动；
                           # 比经济层候选级 ENDGAME_MARGIN=40 更保守（全局最后防线），
                           # P5 自对弈可调；置 0 即近似退化为无兜底
@@ -85,6 +86,39 @@ def ahead_of_opponent(state: GameState, margin: int = 0) -> bool:
         _best_frames_from(state, opp.current_node_id)
 
 
+def _edge_frames_between(state: GameState, src: str, dst: str) -> int:
+    for node_id, edge in state.neighbors(src):
+        if node_id == dst:
+            return pathing.edge_frames_for_state(state, edge)
+    return _INF
+
+
+def _remaining_edge_frames(state: GameState, player) -> int:
+    if not player.current_node_id or not player.next_node_id:
+        return _INF
+    remaining = max(0, player.edge_total_ms - player.edge_progress_ms)
+    if remaining > 0:
+        return ceil(remaining / pathing.BASE_MOVE_PER_FRAME)
+    return _edge_frames_between(state, player.current_node_id, player.next_node_id)
+
+
+def _can_opponent_set_guard_before_arrival(state: GameState, next_node: str) -> bool:
+    opp = state.opponent
+    if opp is None or opp.delivered or opp.retired:
+        return False
+    if opp.guard_action_point < 1:
+        return False
+    if opp.current_node_id == next_node and not opp.next_node_id:
+        return True
+    if opp.next_node_id != next_node:
+        return False
+    my_eta = _edge_frames_between(state, state.me.current_node_id, next_node)
+    if my_eta >= _INF:
+        return False
+    opp_eta = _remaining_edge_frames(state, opp)
+    return opp_eta + GUARD_SETUP_FRAMES <= my_eta
+
+
 def hold_before_choke(state: GameState, next_node: str) -> bool:
     """防陷阱闸门（P4e）：True = 本帧别提交进入 next_node 的 MOVE，原地等。
 
@@ -100,13 +134,8 @@ def hold_before_choke(state: GameState, next_node: str) -> bool:
         return False
     if must_rush(state):                 # 时间账吃紧：接受风化风险也要走（保底交付）
         return False
-    opp = state.opponent
-    if opp is None or opp.delivered or opp.retired:
-        return False
-    if opp.current_node_id != next_node or opp.next_node_id:
-        return False                     # 对手不是正停在该节点
-    if opp.guard_action_point < 1:
-        return False
+    if not _can_opponent_set_guard_before_arrival(state, next_node):
+        return False                     # 对手不能抢先在下一跳完成设卡
     if state.enemy_guard_at(next_node) is not None:
         return False                     # 已亮卡：停稳攻坚链接管，蹲着反而白等
     if state.me.squad_available >= pathing.guard_max_defense(state, next_node):

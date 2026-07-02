@@ -26,7 +26,6 @@ SCOUT_ETA_MAX = 40
 SCOUT_PENDING_TIMEOUT = 8
 SQUAD_RESERVE_FOR_WEAKEN = 6   # 削穿一张满防卡（防御 6）需 6 支（2 支/次削 2 点，P4e 实证）
 GUARD_GOOD_FLOOR = 90
-GUARD_SETUP_FRAMES = 4
 GUARD_GOOD_FRAME_COST = 15
 GUARD_MIN_NET_FRAMES = 30
 
@@ -184,7 +183,7 @@ class CombatStrategy(Strategy):
         if defense < 4:
             return None
         delay = self._guard_weathering_frames(state, cur, defense)
-        net = delay - GUARD_SETUP_FRAMES - good_cost * GUARD_GOOD_FRAME_COST
+        net = delay - safety.GUARD_SETUP_FRAMES - good_cost * GUARD_GOOD_FRAME_COST
         if net < GUARD_MIN_NET_FRAMES:
             return None
         action = {"action": "SET_GUARD", "targetNodeId": cur, "extraGoodFruit": extra}
@@ -418,7 +417,7 @@ class CombatStrategy(Strategy):
         # 对手缺席/已交付/已退赛时 safety 侧视同"领先"，但设卡拦不到人 → False
         if opponent.delivered or opponent.retired or not opponent.current_node_id:
             return False
-        return safety.ahead_of_opponent(state, GUARD_SETUP_FRAMES)
+        return safety.ahead_of_opponent(state, safety.GUARD_SETUP_FRAMES)
 
     def _is_opponent_choke(self, state: GameState, cur: str) -> bool:
         opponent = state.opponent

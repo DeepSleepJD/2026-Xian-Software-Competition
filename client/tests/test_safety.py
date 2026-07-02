@@ -76,18 +76,33 @@ BYPASS_START = {
     ],
 }
 
+# A→B 是长边，用来复刻“对手正在同一咽喉边上领先，先到后还能设卡”的现网形态。
+LONG_TRAP_START = {
+    **TRAP_START,
+    "matchId": "long-trap-test",
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+         "routeType": "ROAD", "distance": 10, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+}
+
 
 def trap_inquire(round_no: int, *, me_node: str = "A", squads: int = 0,
                  opp_node: str = "B", opp_next: str = "", opp_ap: int = 4,
-                 opp_delivered: bool = False, nodes: list | None = None) -> dict:
+                 opp_delivered: bool = False, nodes: list | None = None,
+                 opp_state: str = "IDLE", opp_progress_ms: int = 0,
+                 opp_total_ms: int = 0) -> dict:
     return {
         "round": round_no,
         "players": [
             {"playerId": MY_ID, "teamId": "RED", "state": "IDLE",
              "currentNodeId": me_node, "nextNodeId": "",
              "squadAvailable": squads},
-            {"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
+            {"playerId": OPP_ID, "teamId": "BLUE", "state": opp_state,
              "currentNodeId": opp_node, "nextNodeId": opp_next,
+             "edgeProgressMs": opp_progress_ms, "edgeTotalMs": opp_total_ms,
              "guardActionPoint": opp_ap, "delivered": opp_delivered},
         ],
         "nodes": nodes or [],
@@ -124,6 +139,21 @@ class TrapGateTests(unittest.TestCase):
     def test_no_hold_when_opponent_already_en_route(self) -> None:
         # 对手已上边离站（半路）：设卡窗口已过，亮没亮卡都不该再蹲
         state = self.load(TRAP_START, trap_inquire(100, opp_next="C"))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+
+    def test_holds_when_opponent_will_reach_choke_first(self) -> None:
+        # P4f：对手虽还没停在 B，但正驶向 B 且能先到+完成 4 帧设卡；
+        # 此时我方进边会在半路撞卡，必须等在 A，亮卡后停稳攻坚。
+        state = self.load(LONG_TRAP_START, trap_inquire(
+            100, opp_node="A", opp_next="B", opp_state="MOVING",
+            opp_progress_ms=4000, opp_total_ms=8000))
+        self.assertTrue(safety.hold_before_choke(state, "B"))
+
+    def test_no_hold_when_opponent_cannot_finish_guard_before_us(self) -> None:
+        # 对手也在去 B，但剩余到站+设卡读条晚于我方到站，继续走不会半路冻住。
+        state = self.load(LONG_TRAP_START, trap_inquire(
+            100, opp_node="A", opp_next="B", opp_state="MOVING",
+            opp_progress_ms=0, opp_total_ms=15000))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
     def test_no_hold_when_guard_already_visible(self) -> None:
