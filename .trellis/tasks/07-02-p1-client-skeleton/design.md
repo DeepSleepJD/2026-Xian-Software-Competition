@@ -18,6 +18,14 @@
 - **测试数据源**：`refs/debug-kit-v1/start消息.json`、`inquire消息.json` 作为 protocol/state 单测夹具；recorder 录制的真实对局帧作为回归夹具。
 - **start.sh**：直接 `exec python3 main.py "$@"`（比赛环境 Python 3.12.9 可用）；本地 Windows 验证走 run_match.py 的 `--client-cmd`，不依赖 start.sh。
 
+## 契约冻结记录
+
+- **2026-07-02 GameState/Intent 契约冻结**（负责人 xichen 确认，M2 交付 commit e4fb2c8）。
+  - GameState：静态层（roles/nodes/edges/resource_specs/process_nodes/task_candidates/route_task_buckets/阵营识别）+ 运行时层（round/phase/me/opponent/node_states/weather/tasks/bounties/contests/events/action_results/score_preview）+ 派生查询（my_events/my_action_results/my_contests/neighbors）。
+  - Intent：kind/priority/actions/note；arbiter 按优先级仲裁 + 动作类别同帧上限。
+  - 逃生舱：Contest.raw / Event.payload 保留原始 dict，扩展不破契约。
+  - 自此改动 state.py/strategy/__init__.py/arbiter.py 的公开接口需三人同步。
+
 ## 兼容与回滚
 
 - `client/` 是全新目录，不触碰 refs/tools/docs，回滚 = 删目录，零风险。

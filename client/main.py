@@ -12,7 +12,7 @@ from lychee import VERSION
 from lychee.net import Connection
 from lychee.recorder import Recorder
 from lychee.runtime import Runtime
-from lychee.strategy import NoopStrategy
+from lychee.strategy.delivery import DeliveryStrategy
 
 DEFAULT_PLAYER_NAME = "yiqihongchen"
 
@@ -39,7 +39,7 @@ def main(argv: list[str]) -> int:
             player_id=args.player_id,
             player_name=player_name,
             version=VERSION,
-            strategies=[NoopStrategy()],
+            strategies=[DeliveryStrategy()],
             recorder=Recorder.from_env(args.player_id),
         )
         return runtime.run()
