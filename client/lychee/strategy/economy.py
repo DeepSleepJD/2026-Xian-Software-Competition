@@ -22,13 +22,14 @@
   离终局截止尚早时原地 WAIT（协议合法主车队动作，不清移动进度）等刷新
 """
 
-from math import floor
+from math import ceil, floor
 
 from .. import pathing
 from ..state import GameState
 from . import Intent, Strategy
 
 PRIORITY_ICE_USE = 120
+PRIORITY_HORSE_USE = 119
 PRIORITY_ECONOMY = 110
 TASK_SCORE_GOAL = 130         # 拿满即闭嘴：里程碑 60/90/110 → +15/+35/+50（无 130 档），
                               # 皇榜分封顶 180 = raw 130 + 50，超过 130 边际为零
@@ -43,9 +44,33 @@ ICE_BOX_MAX_HOLD = 2          # 库存到量后不再追领（本图第 3 个在
                               # 实账往返~118帧鲜度+用时亏损 > 冰鉴收益，正确放弃）
 RESOURCE_CLAIM_FRAMES = 2     # 实测资源领取读条帧数（估值用，非规则常量）
 ICE_USE_MARGIN = 2.0          # freshness ≤ 阈值+2 即用
+HOT_ICE_USE_MARGIN = 5.0      # 酷暑/临近酷暑时更早保鲜，避免连续跨十位阈值
 ENDGAME_MARGIN = 40           # 目标完成帧 + 回终点帧 ≤ 总帧数 − 此余量
                               # （回程按终点算，途经宫门的验核读条已计入路径成本）
 _INF = 10 ** 9
+
+HORSE_MOVE_PER_FRAME = {"FAST_HORSE": 1200, "SHORT_HORSE": 1150}
+HORSE_DURATION = {"FAST_HORSE": 20, "SHORT_HORSE": 14}
+HORSE_USE_MIN_SAVED_FRAMES = 2
+HORSE_RESOURCES = ("FAST_HORSE", "SHORT_HORSE")
+RESOURCE_CLAIM_CAPS = {
+    "ICE_BOX": ICE_BOX_MAX_HOLD,
+    "FAST_HORSE": 1,
+    "SHORT_HORSE": 1,
+    "PASS_TOKEN": 1,
+    "OFFICIAL_PERMIT": 1,
+    "INTEL": 1,
+    "BOAT_RIGHT": 1,
+}
+RESOURCE_BASE_VALUES = {
+    "ICE_BOX": ICE_BOX_VALUE,
+    "FAST_HORSE": 8.0,
+    "SHORT_HORSE": 6.0,
+    "PASS_TOKEN": 2.5,
+    "OFFICIAL_PERMIT": 2.5,
+    "INTEL": 3.0,
+    "BOAT_RIGHT": 1.0,
+}
 
 
 def _task_points(raw: int) -> int:
@@ -142,6 +167,7 @@ class EconomyStrategy(Strategy):
         self._cur_target_key = ""
         self._last_stationary_node = ""
         self._previous_stationary_node = ""
+        self._pending_use_resource = ""
 
     def propose(self, state: GameState) -> list[Intent]:
         me = state.me
@@ -154,6 +180,9 @@ class EconomyStrategy(Strategy):
         # 读条/移动/休整中：闭嘴让帧推进（打断读条 = 进度清零，任务书 4.3）
         if me.current_process is not None:
             return []
+        if me.state == "MOVING" or me.next_node_id:
+            horse = self._propose_horse_use(state, me.current_node_id, me.next_node_id)
+            return [horse] if horse is not None and me.state == "MOVING" else []
         if me.state in ("MOVING", "RESTING") or me.next_node_id:
             return []
         cur = me.current_node_id
@@ -178,6 +207,9 @@ class EconomyStrategy(Strategy):
         ice = self._propose_ice_use(state, cur, planned_next)
         if ice is not None:
             intents.append(ice)
+        horse = self._propose_horse_use(state, cur, planned_next)
+        if horse is not None:
+            intents.append(horse)
         return intents
 
     # -- 反馈 --
@@ -206,7 +238,9 @@ class EconomyStrategy(Strategy):
                         self._backoff[self._cur_target_key] = state.round + BACKOFF_ROUNDS
                         self._move_rejects = 0
             elif r.action == "USE_RESOURCE" and not r.accepted:
-                self._backoff["USE:ICE_BOX"] = state.round + 20
+                resource = self._pending_use_resource or "ICE_BOX"
+                self._backoff[f"USE:{resource}"] = state.round + 20
+                self._pending_use_resource = ""
 
     # -- 任务/资源贪心 --
 
@@ -372,16 +406,23 @@ class EconomyStrategy(Strategy):
                 expire_round=t.expire_round, note=f"任务{t.task_id}@{t.node_id}",
                 raw_score=int(t.score)))
 
-        if me.resources.get("ICE_BOX", 0) < ICE_BOX_MAX_HOLD:
-            for node_id, ns in state.node_states.items():
-                if ns.resource_stock.get("ICE_BOX", 0) < 1:
+        for node_id, ns in state.node_states.items():
+            for resource_type, stock in ns.resource_stock.items():
+                if stock < 1:
+                    continue
+                cap = RESOURCE_CLAIM_CAPS.get(resource_type)
+                if cap is not None and me.resources.get(resource_type, 0) >= cap:
+                    continue
+                value = RESOURCE_BASE_VALUES.get(resource_type)
+                if value is None:
                     continue
                 out.append(_Target(
-                    key=f"RES:{node_id}:ICE_BOX", value=ICE_BOX_VALUE,
-                    proc_frames=RESOURCE_CLAIM_FRAMES, claim_nodes=[node_id],
+                    key=f"RES:{node_id}:{resource_type}", value=value,
+                    proc_frames=self._resource_claim_round(state, node_id, resource_type),
+                    claim_nodes=[node_id],
                     action={"action": "CLAIM_RESOURCE", "targetNodeId": node_id,
-                            "resourceType": "ICE_BOX"},
-                    expire_round=0, note=f"冰鉴@{node_id}"))
+                            "resourceType": resource_type},
+                    expire_round=0, note=f"资源{resource_type}@{node_id}"))
         return out
 
     # -- 冰鉴使用 --
@@ -394,21 +435,42 @@ class EconomyStrategy(Strategy):
             return None
         f = me.freshness
         threshold = min(floor(f / 10) * 10, 90)   # 下一个会被跌破的十位阈值
-        trigger = f <= threshold + ICE_USE_MARGIN
+        margin = HOT_ICE_USE_MARGIN if self._hot_weather_near(state) else ICE_USE_MARGIN
+        trigger = f <= threshold + margin
         if not trigger and planned_next:
             # 出发上长边前预判：途中跨阈值则提前用（跌破一次 = 1 好果转坏）
             for nxt, edge in state.neighbors(cur):
                 if nxt == planned_next:
-                    frames = pathing.edge_frames(edge.distance, edge.route_type)
+                    frames = pathing.edge_frames_for_state(state, edge)
                     loss = frames * pathing.ROUTE_FRESHNESS.get(
                         edge.route_type, pathing._UNKNOWN_FRESHNESS)
                     trigger = f - loss < threshold
                     break
         if not trigger:
             return None
+        self._pending_use_resource = "ICE_BOX"
         return Intent(kind="economy", priority=PRIORITY_ICE_USE,
                       actions=[{"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}],
                       note=f"冰鉴保鲜@{f:.1f}")
+
+    def _propose_horse_use(self, state: GameState, cur: str, planned_next: str) -> Intent | None:
+        if not planned_next:
+            return None
+        if any(b.type in ("FAST_HORSE", "SHORT_HORSE", "RUSH_SPEED") and b.remaining_round > 0
+               for b in state.me.buffs):
+            return None
+        for resource_type in HORSE_RESOURCES:
+            if state.me.resources.get(resource_type, 0) < 1:
+                continue
+            if state.round < self._backoff.get(f"USE:{resource_type}", 0):
+                continue
+            if self._horse_saved_frames(state, cur, planned_next, resource_type) < HORSE_USE_MIN_SAVED_FRAMES:
+                continue
+            self._pending_use_resource = resource_type
+            return Intent(kind="economy.horse", priority=PRIORITY_HORSE_USE,
+                          actions=[{"action": "USE_RESOURCE", "resourceType": resource_type}],
+                          note=f"启用{resource_type}")
+        return None
 
     # -- 辅助 --
 
@@ -433,3 +495,36 @@ class EconomyStrategy(Strategy):
             return ""
         p = pathing.shortest_path(state, cur, terminal)
         return p[1] if p and len(p) >= 2 else ""
+
+    @staticmethod
+    def _resource_claim_round(state: GameState, node_id: str, resource_type: str) -> int:
+        for spec in state.resource_specs:
+            if spec.node_id == node_id and spec.resource_type == resource_type:
+                return spec.claim_round or RESOURCE_CLAIM_FRAMES
+        return RESOURCE_CLAIM_FRAMES
+
+    @staticmethod
+    def _hot_weather_near(state: GameState) -> bool:
+        if any(w.type == "HOT" for w in state.weather_active):
+            return True
+        return any(w.type == "HOT" and 0 <= w.start_round - state.round <= 30
+                   for w in state.weather_forecast)
+
+    def _horse_saved_frames(
+            self, state: GameState, cur: str, planned_next: str, resource_type: str) -> int:
+        move_per_frame = HORSE_MOVE_PER_FRAME[resource_type]
+        if state.me.state == "MOVING":
+            remaining = max(0, state.me.edge_total_ms - state.me.edge_progress_ms)
+            if remaining <= 0:
+                return 0
+            accelerated = max(1, ceil(remaining / move_per_frame))
+            base = max(1, ceil(remaining / pathing.BASE_MOVE_PER_FRAME))
+            return max(0, min(HORSE_DURATION[resource_type], base) - accelerated)
+
+        for nxt, edge in state.neighbors(cur):
+            if nxt != planned_next:
+                continue
+            base = pathing.edge_frames_for_state(state, edge)
+            accelerated = pathing.edge_frames_for_state(state, edge, move_per_frame)
+            return max(0, base - accelerated)
+        return 0

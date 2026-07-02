@@ -59,17 +59,20 @@ def inquire(round_no: int, *, node: str = "A", state: str = "IDLE", phase: str =
             verified: bool = False, process: dict | None = None, next_node: str | None = None,
             action_results: list | None = None, tasks: list | None = None,
             nodes: list | None = None, resources: dict | None = None,
-            task_score: int = 0, freshness: float = 100.0) -> dict:
+            task_score: int = 0, freshness: float = 100.0,
+            buffs: list | None = None, weather: dict | None = None) -> dict:
     return {
         "round": round_no, "phase": phase,
         "players": [{"playerId": MY_ID, "teamId": "RED", "state": state,
                      "currentNodeId": node, "nextNodeId": next_node,
                      "currentProcess": process, "verified": verified,
                      "goodFruit": 90, "freshness": freshness,
-                     "resources": resources or {}, "taskScore": task_score}],
+                     "resources": resources or {}, "taskScore": task_score,
+                     "buffs": buffs or []}],
         "tasks": tasks or [],
         "nodes": nodes or [],
         "actionResults": action_results or [],
+        "weather": weather or {},
     }
 
 
@@ -320,6 +323,81 @@ class EconomyIceBoxTests(unittest.TestCase):
         acts = self.acts(inquire(1, node="A", phase="RUSH", freshness=81.5,
                                  resources={"ICE_BOX": 1}, task_score=90))
         self.assertEqual([{"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}], acts)
+
+    def test_hot_weather_uses_ice_box_earlier(self) -> None:
+        weather = {"active": [{"weatherId": "W1", "type": "HOT", "region": "ALL",
+                               "remainRound": 20}]}
+        acts = self.acts(inquire(1, node="A", freshness=84.0,
+                                 resources={"ICE_BOX": 1}, weather=weather))
+        self.assertIn({"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}, acts)
+
+
+class EconomyGeneralResourceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(START)
+        self.strategy = EconomyStrategy()
+
+    def acts(self, inq: dict) -> list[dict]:
+        self.state.update_inquire(inq)
+        return [a for it in self.strategy.propose(self.state) for a in it.actions]
+
+    def test_claims_generalized_resources_at_current_node(self) -> None:
+        for resource_type in ("SHORT_HORSE", "FAST_HORSE", "PASS_TOKEN",
+                              "OFFICIAL_PERMIT", "INTEL"):
+            with self.subTest(resource_type=resource_type):
+                self.setUp()
+                nodes = [{"nodeId": "B", "resourceStock": {resource_type: 1}}]
+                acts = self.acts(inquire(1, node="B", nodes=nodes,
+                                         task_score=TASK_SCORE_GOAL))
+                self.assertEqual([{"action": "CLAIM_RESOURCE", "targetNodeId": "B",
+                                   "resourceType": resource_type}], acts)
+
+    def test_document_resources_are_not_actively_used(self) -> None:
+        acts = self.acts(inquire(1, node="A",
+                                 resources={"PASS_TOKEN": 1, "OFFICIAL_PERMIT": 1},
+                                 task_score=TASK_SCORE_GOAL))
+        self.assertNotIn("USE_RESOURCE", [a["action"] for a in acts])
+
+    def test_uses_fast_horse_before_long_edge(self) -> None:
+        start = {**START, "edges": [
+            {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B", "routeType": "ROAD",
+             "distance": 50, "bidirectional": True},
+            {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C", "routeType": "ROAD",
+             "distance": 2, "bidirectional": True},
+            {"edgeId": "E3", "fromNodeId": "C", "toNodeId": "D", "routeType": "ROAD",
+             "distance": 2, "bidirectional": True},
+        ]}
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        acts = self.acts(inquire(1, node="A", resources={"FAST_HORSE": 1},
+                                 task_score=TASK_SCORE_GOAL))
+        self.assertIn({"action": "USE_RESOURCE", "resourceType": "FAST_HORSE"}, acts)
+
+    def test_horse_use_backs_off_after_rejection(self) -> None:
+        self.test_uses_fast_horse_before_long_edge()
+        rej = [{"round": 1, "playerId": MY_ID, "action": "USE_RESOURCE",
+                "accepted": False, "result": "ACTION_REJECTED",
+                "errorCode": "HORSE_BUFF_CONFLICT"}]
+        acts = self.acts(inquire(2, node="A", resources={"FAST_HORSE": 1},
+                                 task_score=TASK_SCORE_GOAL, action_results=rej))
+        self.assertNotIn({"action": "USE_RESOURCE", "resourceType": "FAST_HORSE"}, acts)
+
+    def test_does_not_use_horse_when_rush_speed_active(self) -> None:
+        start = {**START, "edges": [
+            {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B", "routeType": "ROAD",
+             "distance": 50, "bidirectional": True},
+            {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C", "routeType": "ROAD",
+             "distance": 2, "bidirectional": True},
+            {"edgeId": "E3", "fromNodeId": "C", "toNodeId": "D", "routeType": "ROAD",
+             "distance": 2, "bidirectional": True},
+        ]}
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        acts = self.acts(inquire(1, node="A", resources={"FAST_HORSE": 1},
+                                 task_score=TASK_SCORE_GOAL,
+                                 buffs=[{"type": "RUSH_SPEED", "remainingRound": 5}]))
+        self.assertNotIn({"action": "USE_RESOURCE", "resourceType": "FAST_HORSE"}, acts)
 
 
 if __name__ == "__main__":

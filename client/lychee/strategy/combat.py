@@ -13,11 +13,16 @@ from ..state import Contest, GameState
 from . import Intent, Strategy
 
 PRIORITY_COMBAT_MAIN = 130
+PRIORITY_SET_GUARD = 129
 PRIORITY_SQUAD_WEAKEN = 128
 PRIORITY_WINDOW_CARD = 125
 
 _STATIONARY_STATES = {"IDLE", "WAITING"}
 _KEY_CONTEST_SCORES = {"GATE": 50, "PASS": 45, "DOCK": 40}
+GUARD_GOOD_FLOOR = 90
+GUARD_SETUP_FRAMES = 4
+GUARD_GOOD_FRAME_COST = 15
+GUARD_MIN_NET_FRAMES = 30
 
 
 class CombatStrategy(Strategy):
@@ -27,6 +32,8 @@ class CombatStrategy(Strategy):
 
         intents: list[Intent] = []
         main = self._propose_break_guard(state)
+        if main is None:
+            main = self._propose_set_guard(state)
         if main is not None:
             intents.append(main)
 
@@ -102,6 +109,36 @@ class CombatStrategy(Strategy):
             action["rushTactic"] = "BREAK_ORDER"
         return action
 
+    def _propose_set_guard(self, state: GameState) -> Intent | None:
+        me = state.me
+        if state.phase != "NORMAL" or me.verified:
+            return None
+        if me.current_process is not None or me.state != "IDLE":
+            return None
+        cur = me.current_node_id
+        if not cur or self._is_terminal(state, cur) or self._has_active_guard(state, cur):
+            return None
+        node = state.nodes.get(cur)
+        if node is None or node.node_type not in ("KEY_PASS", "PASS"):
+            return None
+        if self._friendly_guard_count(state) >= 2:
+            return None
+        if not self._ahead_of_opponent(state, cur):
+            return None
+        if not self._is_opponent_choke(state, cur):
+            return None
+
+        extra, defense, good_cost = self._guard_investment(state, cur)
+        if defense < 4:
+            return None
+        delay = self._guard_weathering_frames(state, cur, defense)
+        net = delay - GUARD_SETUP_FRAMES - good_cost * GUARD_GOOD_FRAME_COST
+        if net < GUARD_MIN_NET_FRAMES:
+            return None
+        action = {"action": "SET_GUARD", "targetNodeId": cur, "extraGoodFruit": extra}
+        return Intent(kind="combat.guard", priority=PRIORITY_SET_GUARD,
+                      actions=[action], note=f"设卡@{cur}")
+
     def _propose_squad_weaken(self, state: GameState) -> Intent | None:
         me = state.me
         if me.state != "MOVING" or not me.next_node_id:
@@ -165,3 +202,93 @@ class CombatStrategy(Strategy):
         terminals = state.roles.terminal_node_ids or \
             [n.node_id for n in state.nodes.values() if n.is_terminal]
         return any(node_id in pathing.choke_nodes(state, cur, terminal) for terminal in terminals)
+
+    @staticmethod
+    def _terminals(state: GameState) -> list[str]:
+        return state.roles.terminal_node_ids or \
+            [n.node_id for n in state.nodes.values() if n.is_terminal]
+
+    @staticmethod
+    def _is_terminal(state: GameState, node_id: str) -> bool:
+        node = state.nodes.get(node_id)
+        return bool(node and node.is_terminal) or node_id in CombatStrategy._terminals(state)
+
+    @staticmethod
+    def _has_active_guard(state: GameState, node_id: str) -> bool:
+        ns = state.node_states.get(node_id)
+        return bool(ns and ns.guard and ns.guard.active and ns.guard.defense > 0)
+
+    @staticmethod
+    def _friendly_guard_count(state: GameState) -> int:
+        my_team = state.my_team_id or state.me.team_id
+        count = 0
+        for ns in state.node_states.values():
+            guard = ns.guard
+            if guard and guard.active and guard.defense > 0 and guard.owner_team_id == my_team:
+                count += 1
+        return count
+
+    @staticmethod
+    def _best_path_frames(state: GameState, src: str) -> int:
+        best: int | None = None
+        for terminal in CombatStrategy._terminals(state):
+            path = pathing.shortest_path(state, src, terminal)
+            if path is None:
+                continue
+            frames = pathing.path_frames(state, path)
+            if best is None or frames < best:
+                best = frames
+        return best if best is not None else 10 ** 9
+
+    def _ahead_of_opponent(self, state: GameState, cur: str) -> bool:
+        opponent = state.opponent
+        if opponent.delivered or opponent.retired or not opponent.current_node_id:
+            return False
+        my_frames = self._best_path_frames(state, cur)
+        opp_frames = self._best_path_frames(state, opponent.current_node_id)
+        return my_frames + GUARD_SETUP_FRAMES < opp_frames
+
+    def _is_opponent_choke(self, state: GameState, cur: str) -> bool:
+        opponent = state.opponent
+        if not opponent.current_node_id:
+            return False
+        for terminal in self._terminals(state):
+            if cur in pathing.choke_nodes(state, opponent.current_node_id, terminal):
+                return True
+        return False
+
+    @staticmethod
+    def _guard_max_defense(state: GameState, node_id: str) -> int:
+        node = state.nodes.get(node_id)
+        ns = state.node_states.get(node_id)
+        if ns is not None and ns.has_obstacle:
+            return 5
+        if node and node.node_type == "KEY_PASS":
+            return 7
+        if node and node.node_type == "GATE":
+            return 4
+        return 6
+
+    @staticmethod
+    def _guard_base_cost(state: GameState, node_id: str) -> int:
+        node = state.nodes.get(node_id)
+        if node and node.node_type in ("KEY_PASS", "GATE"):
+            return 1
+        return 0
+
+    def _guard_investment(self, state: GameState, node_id: str) -> tuple[int, int, int]:
+        max_defense = self._guard_max_defense(state, node_id)
+        base_cost = self._guard_base_cost(state, node_id)
+        for extra in (2, 1, 0):
+            good_cost = base_cost + extra
+            if state.my_good - good_cost < GUARD_GOOD_FLOOR:
+                continue
+            defense = min(max_defense, 2 + extra * 2)
+            return extra, defense, good_cost
+        return 0, 0, 0
+
+    @staticmethod
+    def _guard_weathering_frames(state: GameState, node_id: str, defense: int) -> int:
+        node = state.nodes.get(node_id)
+        first = 45 if node and node.node_type == "KEY_PASS" and defense >= 4 else 30
+        return first + max(0, defense - 1) * 30

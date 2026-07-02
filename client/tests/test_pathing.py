@@ -83,6 +83,40 @@ class ShortestPathTests(unittest.TestCase):
         })
         self.assertEqual(base + 1, pathing.path_frames(guarded, base_path))
 
+    def test_hot_weather_increases_freshness_cost_without_slowing_road(self) -> None:
+        base_fresh, base_frames = pathing.path_cost(self.state, ["S09", "S10"])
+        hot = make_state()
+        hot.update_inquire({"round": 100, "weather": {
+            "active": [{"weatherId": "W1", "type": "HOT", "region": "ALL",
+                        "remainRound": 20}]}})
+        fresh, frames = pathing.path_cost(hot, ["S09", "S10"])
+        self.assertEqual(base_frames, frames)
+        self.assertGreater(fresh, base_fresh)
+
+    def test_heavy_rain_slows_water_edges(self) -> None:
+        base = pathing.path_frames(self.state, ["S04", "S05"])
+        rainy = make_state()
+        rainy.update_inquire({"round": 100, "weather": {
+            "active": [{"weatherId": "W2", "type": "HEAVY_RAIN", "region": "WATER",
+                        "remainRound": 20}]}})
+        self.assertGreater(pathing.path_frames(rainy, ["S04", "S05"]), base)
+
+    def test_mountain_fog_slows_mountain_edges(self) -> None:
+        base = pathing.path_frames(self.state, ["S06", "S08"])
+        foggy = make_state()
+        foggy.update_inquire({"round": 100, "weather": {
+            "active": [{"weatherId": "W3", "type": "MOUNTAIN_FOG", "region": "MOUNTAIN",
+                        "remainRound": 20}]}})
+        self.assertGreater(pathing.path_frames(foggy, ["S06", "S08"]), base)
+
+    def test_forecast_weather_penalizes_imminent_matching_edge(self) -> None:
+        base = pathing.path_frames(self.state, ["S04", "S05"])
+        rainy = make_state()
+        rainy.update_inquire({"round": 100, "weather": {
+            "forecast": [{"weatherId": "W4", "type": "HEAVY_RAIN", "region": "WATER",
+                          "startRound": 120, "durationRound": 60}]}})
+        self.assertGreater(pathing.path_frames(rainy, ["S04", "S05"]), base)
+
 
 if __name__ == "__main__":
     unittest.main()

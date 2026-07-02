@@ -10,9 +10,9 @@
 """
 
 import heapq
-from math import ceil
+from math import ceil, floor
 
-from .state import GameState
+from .state import Edge, GameState, ProcessNode
 
 # 路线耗时系数：每 1 点路线距离所需移动量（任务书 2.3.2 固定表）
 ROUTE_COST_COEF = {"ROAD": 1380, "WATER": 1250, "MOUNTAIN": 1780, "BRANCH": 1550}
@@ -22,6 +22,10 @@ ROUTE_FRESHNESS = {"ROAD": 0.055, "WATER": 0.045, "MOUNTAIN": 0.07, "BRANCH": 0.
 _UNKNOWN_FRESHNESS = 0.07
 STATIONARY_FRESHNESS = 0.05     # 停靠/处理/验核等状态每帧损耗
 BASE_MOVE_PER_FRAME = 1000
+WEATHER_FORECAST_LOOKAHEAD = 30
+WEATHER_MOVE_MULTIPLIER = {"HEAVY_RAIN": ("WATER", 1350), "MOUNTAIN_FOG": ("MOUNTAIN", 1100)}
+WEATHER_FRESHNESS_MULTIPLIER = {"HOT": ("ALL", 1.5), "HEAVY_RAIN": ("WATER", 1.3)}
+RAIN_PROCESS_TYPES = {"BOARD", "WATER_TRANSFER"}
 
 
 def edge_frames(distance: int, route_type: str, move_per_frame: int = BASE_MOVE_PER_FRAME) -> int:
@@ -29,6 +33,74 @@ def edge_frames(distance: int, route_type: str, move_per_frame: int = BASE_MOVE_
     coef = ROUTE_COST_COEF.get(route_type, _UNKNOWN_COEF)
     need = ceil(distance * coef)
     return ceil(need / max(move_per_frame, 1))
+
+
+def _weather_events(state: GameState) -> list:
+    events = list(state.weather_active)
+    for w in state.weather_forecast:
+        if 0 <= w.start_round - state.round <= WEATHER_FORECAST_LOOKAHEAD:
+            events.append(w)
+    return events
+
+
+def _weather_matches(weather_type: str, region: str, route_type: str) -> bool:
+    if weather_type == "HOT":
+        return True
+    if weather_type == "HEAVY_RAIN":
+        return route_type == "WATER" or region == "WATER"
+    if weather_type == "MOUNTAIN_FOG":
+        return route_type == "MOUNTAIN" or region == "MOUNTAIN"
+    return False
+
+
+def _weather_move_multiplier(state: GameState, route_type: str) -> int:
+    multiplier = 1000
+    for w in _weather_events(state):
+        expected = WEATHER_MOVE_MULTIPLIER.get(w.type)
+        if expected is None:
+            continue
+        affected_route, value = expected
+        if route_type == affected_route and _weather_matches(w.type, w.region, route_type):
+            multiplier = max(multiplier, value)
+    return multiplier
+
+
+def _weather_freshness_multiplier(state: GameState, route_type: str) -> float:
+    multiplier = 1.0
+    for w in _weather_events(state):
+        expected = WEATHER_FRESHNESS_MULTIPLIER.get(w.type)
+        if expected is None:
+            continue
+        affected_region, value = expected
+        if affected_region == "ALL" or (
+                route_type == affected_region and _weather_matches(w.type, w.region, route_type)):
+            multiplier = max(multiplier, value)
+    return multiplier
+
+
+def _stationary_freshness_multiplier(state: GameState, proc: ProcessNode | None = None) -> float:
+    multiplier = 1.0
+    for w in _weather_events(state):
+        if w.type == "HOT":
+            multiplier = max(multiplier, 1.5)
+        elif w.type == "HEAVY_RAIN" and proc and proc.process_type in RAIN_PROCESS_TYPES:
+            multiplier = max(multiplier, 1.3)
+    return multiplier
+
+
+def _process_weather_extra_frames(state: GameState, proc: ProcessNode) -> int:
+    for w in _weather_events(state):
+        if w.type == "HEAVY_RAIN" and proc.process_type in RAIN_PROCESS_TYPES:
+            return 4
+    return 0
+
+
+def edge_frames_for_state(
+        state: GameState, edge: Edge, move_per_frame: int = BASE_MOVE_PER_FRAME) -> int:
+    """State-aware edge frames, including active or imminent weather."""
+    weather = _weather_move_multiplier(state, edge.route_type)
+    effective_move = floor(max(move_per_frame, 1) * 1000 / max(weather, 1))
+    return edge_frames(edge.distance, edge.route_type, max(effective_move, 1))
 
 
 def _reachable_without(state: GameState, src: str, dst: str, blocked: str) -> bool:
@@ -92,16 +164,18 @@ def _guard_penalty_frames(state: GameState, to_node: str) -> int:
 
 def _step_cost(state: GameState, edge, to_node: str) -> tuple[float, int]:
     """走一条边并（如需）完成目标站固定处理的 (鲜度损耗, 帧数)。"""
-    frames = edge_frames(edge.distance, edge.route_type)
-    fresh = frames * ROUTE_FRESHNESS.get(edge.route_type, _UNKNOWN_FRESHNESS)
+    frames = edge_frames_for_state(state, edge)
+    fresh = frames * ROUTE_FRESHNESS.get(
+        edge.route_type, _UNKNOWN_FRESHNESS) * _weather_freshness_multiplier(state, edge.route_type)
     guard_frames = _guard_penalty_frames(state, to_node)
     if guard_frames:
         frames += guard_frames
-        fresh += guard_frames * STATIONARY_FRESHNESS
+        fresh += guard_frames * STATIONARY_FRESHNESS * _stationary_freshness_multiplier(state)
     proc = state.process_nodes.get(to_node)
     if proc:
-        frames += proc.process_round
-        fresh += proc.process_round * STATIONARY_FRESHNESS
+        proc_frames = proc.process_round + _process_weather_extra_frames(state, proc)
+        frames += proc_frames
+        fresh += proc_frames * STATIONARY_FRESHNESS * _stationary_freshness_multiplier(state, proc)
     return fresh, frames
 
 

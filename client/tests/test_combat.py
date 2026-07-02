@@ -5,7 +5,7 @@ import unittest
 from lychee.arbiter import merge_intents
 from lychee.state import GameState
 from lychee.strategy import Intent
-from lychee.strategy.combat import CombatStrategy, PRIORITY_COMBAT_MAIN
+from lychee.strategy.combat import CombatStrategy, PRIORITY_COMBAT_MAIN, PRIORITY_SET_GUARD
 
 MY_ID = 1001
 OPP_ID = 2002
@@ -22,7 +22,7 @@ START = {
     ],
     "edges": [
         {"edgeId": "E1", "fromNodeId": "S09", "toNodeId": "S10",
-         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+         "routeType": "ROAD", "distance": 30, "bidirectional": True},
         {"edgeId": "E2", "fromNodeId": "S10", "toNodeId": "S15",
          "routeType": "ROAD", "distance": 2, "bidirectional": True},
     ],
@@ -35,7 +35,7 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
             guard_points: int = 4, contests: list | None = None,
             nodes: list | None = None, phase: str = "NORMAL",
             next_node: str = "", squad_available: int = 8,
-            squad_in_flight: int = 0) -> dict:
+            squad_in_flight: int = 0, opp_node: str = "S10") -> dict:
     return {
         "round": round_no,
         "phase": phase,
@@ -46,7 +46,7 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
                      "squadAvailable": squad_available,
                      "squadInFlight": squad_in_flight},
                     {"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
-                     "currentNodeId": "S10"}],
+                     "currentNodeId": opp_node}],
         "nodes": nodes or [],
         "contests": contests or [],
     }
@@ -56,6 +56,12 @@ def guard_s10(defense: int = 6) -> list[dict]:
     return [{"nodeId": "S10", "guard": {"active": True, "ownerTeamId": "BLUE",
                                          "defense": defense, "initialDefense": defense,
                                          "maxDefense": 7}}]
+
+
+def friendly_guard(node_id: str) -> dict:
+    return {"nodeId": node_id, "guard": {"active": True, "ownerTeamId": "RED",
+                                         "defense": 6, "initialDefense": 6,
+                                         "maxDefense": 7}}
 
 
 class CombatStrategyTests(unittest.TestCase):
@@ -94,6 +100,35 @@ class CombatStrategyTests(unittest.TestCase):
     def test_no_ammo_does_not_emit_high_priority_wait(self) -> None:
         acts = self.actions(inquire(320, nodes=guard_s10(), good=0, bad=0))
         self.assertEqual([], [a for a in acts if a["action"] in ("BREAK_GUARD", "WAIT")])
+
+    def test_sets_guard_on_opponent_choke_when_ahead(self) -> None:
+        intents = self.intents(inquire(200, node="S10", opp_node="S09"))
+        guard = [it for it in intents if it.kind == "combat.guard"][0]
+        self.assertEqual(PRIORITY_SET_GUARD, guard.priority)
+        self.assertEqual({"action": "SET_GUARD", "targetNodeId": "S10",
+                          "extraGoodFruit": 2}, guard.actions[0])
+
+    def test_does_not_set_guard_at_terminal(self) -> None:
+        acts = self.actions(inquire(200, node="S15", opp_node="S09"))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
+
+    def test_does_not_set_guard_when_not_ahead(self) -> None:
+        acts = self.actions(inquire(200, node="S10", opp_node="S10"))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
+
+    def test_does_not_set_guard_when_two_friendly_guards_active(self) -> None:
+        nodes = [friendly_guard("S09"), friendly_guard("S15")]
+        acts = self.actions(inquire(200, node="S10", opp_node="S09", nodes=nodes))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
+
+    def test_does_not_set_guard_over_existing_guard(self) -> None:
+        acts = self.actions(inquire(200, node="S10", opp_node="S09",
+                                    nodes=[friendly_guard("S10")]))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
+
+    def test_does_not_set_guard_below_good_fruit_floor(self) -> None:
+        acts = self.actions(inquire(200, node="S10", opp_node="S09", good=91))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 
     def test_squad_weakens_next_node_guard_while_moving(self) -> None:
         acts = self.actions(inquire(320, state="MOVING", next_node="S10", nodes=guard_s10()))
