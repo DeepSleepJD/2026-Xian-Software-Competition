@@ -52,7 +52,10 @@ def _my_id(rows: list[dict[str, Any]]) -> Optional[int]:
 
 
 # error codes that mean we're actually stuck (vs a benign transient reject)
-BLOCKING_CODES = {"MOVE_BLOCKED_BY_GUARD", "MOVING_ACTION_FORBIDDEN", "TARGET_NOT_REACHABLE"}
+BLOCKING_CODES = {
+    "MOVE_BLOCKED_BY_GUARD", "MOVING_ACTION_FORBIDDEN", "TARGET_NOT_REACHABLE",
+    "PROCESS_REQUIRED",
+}
 
 
 def _my_rejects(inq: dict[str, Any], me_id: Optional[int]) -> list[dict[str, Any]]:

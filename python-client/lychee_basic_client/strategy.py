@@ -188,12 +188,22 @@ class Strategy:
             return []  # wait for the rush phase to open the gate
 
         # mandatory fixed-process node not confirmed done -> keep PROCESSing.
-        # We mark it done ONLY on the server's PROCESS_COMPLETE event (see
-        # _account_process); a process interrupted by a contest returns us to IDLE
-        # unfinished, and re-issuing PROCESS is correct -- marking it done on the
-        # mere sight of a PROCESSING state would leave us unable to MOVE
-        # (PROCESS_REQUIRED) and dead-locked.
-        if node in self.graph.process_rounds and node not in self.processed:
+        # Detect a process station from the LIVE node state (processRound > 0) so
+        # this works even if the map puts a process point somewhere the opening
+        # processNodes list didn't (map variability). We mark it done ONLY on the
+        # server's PROCESS_COMPLETE event (see _account_process); a process
+        # interrupted by a contest returns us to IDLE unfinished and re-issuing
+        # PROCESS is correct -- marking it done on the mere sight of a PROCESSING
+        # state (or moving off early) leaves us unable to MOVE (PROCESS_REQUIRED)
+        # and dead-locked.
+        needs_process = (
+            node not in (self.gate_node, self.terminal_node)
+            and (
+                nodes_by_id.get(node, {}).get("processRound", 0) > 0
+                or node in self.graph.process_rounds
+            )
+        )
+        if needs_process and node not in self.processed:
             return [M.process()]
 
         # opportunistic: grab an on-route imperial task at this node
