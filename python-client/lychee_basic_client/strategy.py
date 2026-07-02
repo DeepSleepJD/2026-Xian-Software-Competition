@@ -170,8 +170,13 @@ class Strategy:
             return []
         tgt = nodes_by_id.get(nxt, {})
         if tgt.get("hasObstacle"):
-            # forced pass through a pure road obstacle: only a time tax, keeps
-            # our good fruit (a scoring asset) intact vs CLEAR which spends one.
+            # FORCED_PASS a pure road obstacle: it creates NO contest window
+            # (task book 5.4.1), so it can't be dragged into a draw-retry loop
+            # the way CLEAR can when the opponent contests the same obstacle.
+            # It only costs an 8-frame time tax (refunded if the obstacle is
+            # cleared mid-pass) and keeps our good fruit. The rare
+            # FORCED_PASS_REPEAT on two obstacles in a row is a harmless
+            # business reject (no penalty) that self-resolves.
             return [M.forced_pass(nxt)]
         return [M.move(nxt)]
 

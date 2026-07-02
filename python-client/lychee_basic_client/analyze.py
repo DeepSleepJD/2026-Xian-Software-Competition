@@ -206,6 +206,43 @@ def analyze_file(path: str) -> dict[str, Any]:
             "buffs": sorted(b for b in buffs_seen if b),
         }
 
+    # --- L3: attribute lost / wasted points to concrete events ---
+    def event_attribution(pid: int) -> dict[str, Any]:
+        res = {
+            "goodfruit_conv": 0,       # GOOD_TO_BAD: good fruit turned bad
+            "forced_tax_frames": 0,    # net forced-pass time tax (after refunds)
+            "residual_tax_frames": 0,  # obstacle clear-residual tax we paid
+            "rejects": Counter(),      # rejected actions by error code
+            "task_expire": 0,          # tasks that expired in the match (missed)
+            "contest_lost": 0,         # windows we did not win
+        }
+        for rec in rounds:
+            for e in rec.get("events", []):
+                t = e.get("type")
+                pl = e.get("payload") or {}
+                who = pl.get("playerId")
+                if t == "GOOD_TO_BAD" and who == pid:
+                    res["goodfruit_conv"] += 1
+                elif t == "FORCED_PASS_START" and who == pid:
+                    res["forced_tax_frames"] += int(pl.get("timeTax", 0))
+                elif t == "FORCED_PASS_RECALCULATE" and who == pid:
+                    # obstacle cleared mid-pass refunds tax: total round dropped
+                    refund = int(pl.get("oldTotalRound", 0)) - int(pl.get("newTotalRound", 0))
+                    if refund > 0:
+                        res["forced_tax_frames"] -= refund
+                elif t == "OBSTACLE_RESIDUAL_TAX" and who == pid:
+                    res["residual_tax_frames"] += int(pl.get("extraRound", 0))
+                elif t == "ACTION_REJECTED" and who == pid:
+                    res["rejects"][pl.get("errorCode") or "?"] += 1
+                elif t == "TASK_EXPIRE":
+                    res["task_expire"] += 1
+                elif t and ("CONTEST" in t or "WINDOW" in t):
+                    winner = pl.get("winnerPlayerId")
+                    if winner is not None and winner != pid:
+                        res["contest_lost"] += 1
+        res["forced_tax_frames"] = max(0, res["forced_tax_frames"])
+        return res
+
     # score-gap timeline (opp.total - my.total) and worst round
     gap_series: list[tuple[int, float]] = []
     for rec in rounds:
@@ -238,6 +275,7 @@ def analyze_file(path: str) -> dict[str, Any]:
         "breakdown": {my_id: frame_breakdown(my_id), opp_id: frame_breakdown(opp_id)},
         "fresh_checkpoints": fresh_checkpoints,
         "fresh_worst_window": worst_window,
+        "events": {my_id: event_attribution(my_id), opp_id: event_attribution(opp_id)},
     }
 
 
@@ -336,6 +374,19 @@ def format_report(a: dict[str, Any]) -> str:
         out.append(f"    这段我方在: 路线[{rm or '-'}]  天气[{w}]  增益[{bf}]")
     else:
         out.append("  (双方同时在途的帧不足，无法定位窗口)")
+    out.append("")
+
+    # --- L3: event attribution ---
+    ev = a["events"].get(my, {})
+    out.append("== L3 丢分/浪费事件归因(我方) ==")
+    gf = ev.get("goodfruit_conv", 0)
+    out.append(f"  好果转坏: {gf} 次  → 约 -{gf * 1.8:.1f} 分(好果数量分)")
+    out.append(f"  强制通行时间税(净): {ev.get('forced_tax_frames', 0)} 帧  → 纯浪费")
+    out.append(f"  清障残留税: {ev.get('residual_tax_frames', 0)} 帧  → 纯浪费")
+    rj = ev.get("rejects") or {}
+    out.append(f"  被拒动作: {dict(rj) or '无'}  → 浪费帧/潜在违规")
+    out.append(f"  任务过期(全场): {ev.get('task_expire', 0)} 个  → 错失的任务分机会")
+    out.append(f"  窗口败北: {ev.get('contest_lost', 0)} 次")
     out.append("")
 
     # conclusion: biggest losing components
