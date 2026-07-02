@@ -49,6 +49,8 @@ class Strategy:
         # nodes an enemy guard is blocking us from entering (detected reactively)
         self._guard_blocked: set[str] = set()
         self._last_move_target: Optional[str] = None
+        # obstacle nodes we've already sent a squad to clear (avoid re-dispatch)
+        self._squad_clear_sent: set[str] = set()
 
     # ---- setup from the start message ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -91,6 +93,26 @@ class Strategy:
         if me.get("delivered") or me.get("retired"):
             return []
 
+        main = self._main_action(me, state, node, phase, round_no, tasks, contests, nodes_by_id)
+        # a squad action is a separate category, so it can ride alongside the main
+        # action: use it to pre-clear an upcoming road obstacle so the main car
+        # never has to FORCED_PASS (saves the time tax and dodges the consecutive-
+        # obstacle FORCED_PASS_REPEAT dead-lock). Squads are otherwise unused.
+        squad = self._squad_action(node, nodes_by_id, me, phase)
+        return main + ([squad] if squad else [])
+
+    def _main_action(
+        self,
+        me: dict[str, Any],
+        state: str,
+        node: str,
+        phase: str,
+        round_no: int,
+        tasks: list[dict[str, Any]],
+        contests: list[dict[str, Any]],
+        nodes_by_id: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        """Main-car / window action for this frame."""
         # play any window we're a party to first -- otherwise we abstain and lose
         # the contested object. Must precede the busy check so a forced-pass
         # attacker (state FORCED_PASSING) still plays its PASS window.
@@ -191,6 +213,24 @@ class Strategy:
             ):
                 self._counted_tasks.add(tid)
                 self.task_base += int(t.get("score", 0))
+
+    def _squad_action(
+        self, node: str, nodes_by_id: dict[str, Any], me: dict[str, Any], phase: str
+    ) -> Optional[dict[str, Any]]:
+        """Send a squad to pre-clear the nearest not-yet-handled road obstacle on
+        our path to the gate. SQUAD_CLEAR costs 2 members, lands after a delay and
+        (unlike main-car CLEAR) opens no contest window, so it's a safe way to make
+        the obstacle gone before the main car gets there. New squads are barred once
+        the rush phase starts."""
+        if phase != "NORMAL" or me.get("squadAvailable", 0) < 2:
+            return None
+        for w in self.graph.shortest_path(node, self.gate_node) or []:
+            if w == node or w in self._squad_clear_sent:
+                continue
+            if nodes_by_id.get(w, {}).get("hasObstacle"):
+                self._squad_clear_sent.add(w)
+                return M.squad_clear(w)
+        return None
 
     def _task_claimable(self, t: dict[str, Any], me: dict[str, Any], round_no: int) -> bool:
         """Whether task instance t is one we could go and complete (ignoring where we

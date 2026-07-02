@@ -106,3 +106,8 @@ def window_card(contest_id: str, card: str) -> dict[str, Any]:
 def rush_protect() -> dict[str, Any]:
     """护果令: 30 frames of x0.2 freshness loss (rush tactic, once per match)."""
     return {"action": "RUSH_PROTECT"}
+
+
+def squad_clear(target_node_id: str) -> dict[str, Any]:
+    """小分队清障: delayed remote obstacle clear (2 squad members, no window)."""
+    return {"action": "SQUAD_CLEAR", "targetNodeId": target_node_id}
