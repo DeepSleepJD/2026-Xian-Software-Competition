@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lychee-basic-python-client"
+version = "0.1.0"
+description = "Minimal Lychee arena Python contestant client"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+lychee-basic-python-client = "lychee_basic_client.cli:main"
+
+[tool.setuptools]
+py-modules = ["basic_client"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lychee_basic_client*"]
