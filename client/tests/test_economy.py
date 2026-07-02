@@ -10,8 +10,8 @@ import unittest
 
 from lychee.state import GameState
 from lychee.strategy.economy import (
-    EconomyStrategy, PRIORITY_ECONOMY, PRIORITY_ICE_USE, TASK_SCORE_GOAL,
-    _use_resource_action,
+    CONTEST_DISCOUNT, EconomyStrategy, PRIORITY_ECONOMY, PRIORITY_ICE_USE,
+    TASK_SCORE_GOAL, _Target, _use_resource_action,
 )
 
 MY_ID = 1001
@@ -54,6 +54,22 @@ def task(task_id: str, node: str, *, score: int = 30, proc: int = 3, expire: int
             "refreshRound": 1, "expireRound": expire, "active": active,
             "completed": completed, "failed": False,
             "ownerPlayerId": owner, "protectionPlayerId": protect}
+
+
+def opp_player(node: str, *, state: str = "IDLE", next_node: str = "",
+               process: dict | None = None, task_score: int = 0,
+               delivered: bool = False, verified: bool = False) -> dict:
+    return {"playerId": OPP_ID, "teamId": "BLUE", "state": state,
+            "currentNodeId": node, "nextNodeId": next_node,
+            "currentProcess": process, "taskScore": task_score,
+            "delivered": delivered, "verified": verified}
+
+
+def feas(key: str, spot: str, to_frames: int, *, raw: int = 30) -> tuple:
+    """构造 _pick_target 口径的 feasible 元组（_contest_factors 白盒测试用）。"""
+    return (_Target(key=key, value=30.0, proc_frames=3, claim_nodes=[spot],
+                    action={}, expire_round=0, note="", raw_score=raw),
+            spot, to_frames, 0)
 
 
 def inquire(round_no: int, *, node: str = "A", state: str = "IDLE", phase: str = "NORMAL",
@@ -527,6 +543,119 @@ class EconomyGeneralResourceTests(unittest.TestCase):
                                  task_score=TASK_SCORE_GOAL,
                                  buffs=[{"type": "RUSH_SPEED", "remainingRound": 5}]))
         self.assertNotIn({"action": "USE_RESOURCE", "resourceType": "FAST_HORSE"}, acts)
+
+
+class EconomyContestTests(unittest.TestCase):
+    """竞争建模三件套（B2）：地图帧数备忘 A→B=5(含B处理2)、A→E=11、E→B=8。"""
+
+    def setUp(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(START)
+        self.strategy = EconomyStrategy()
+
+    def step(self, inq: dict) -> list:
+        self.state.update_inquire(inq)
+        return self.strategy.propose(self.state)
+
+    def acts(self, inq: dict) -> list[dict]:
+        return [a for it in self.step(inq) for a in it.actions]
+
+    def factors(self, inq: dict, feasible: list[tuple]) -> dict[str, float]:
+        self.state.update_inquire(inq)
+        return self.strategy._contest_factors(self.state, feasible)
+
+    # -- B2a 锁定检测 --
+
+    def test_opponent_processing_task_excluded(self) -> None:
+        # 对手读条中的任务当帧出局，不再赶去吃 OBJECT_BUSY（且落后对手不蹲守 → 静默）
+        inq = inquire(1, node="A", tasks=[task("T_1", "B")])
+        inq["players"].append(opp_player("B", state="PROCESSING",
+            process={"action": "CLAIM_TASK", "objectKey": "TASK:T_1",
+                     "taskId": "T_1", "remainRound": 2}))
+        self.assertEqual([], self.step(inq))
+
+    def test_opponent_processing_other_task_not_harmed(self) -> None:
+        # 对手在 E 读 T_e：只有 T_e 出局，B 的 T_1 照常追
+        inq = inquire(1, node="A", tasks=[task("T_1", "B"), task("T_e", "E")])
+        inq["players"].append(opp_player("E", state="PROCESSING",
+            process={"action": "CLAIM_TASK", "objectKey": "TASK:T_e",
+                     "taskId": "T_e", "remainRound": 2}))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], self.acts(inq))
+
+    def test_opponent_claiming_resource_excluded(self) -> None:
+        inq = inquire(1, node="A", nodes=[{"nodeId": "B", "resourceStock": {"ICE_BOX": 1}}])
+        inq["players"].append(opp_player("B", state="PROCESSING",
+            process={"action": "CLAIM_RESOURCE", "resourceType": "ICE_BOX",
+                     "targetNodeId": "B", "remainRound": 1}))
+        self.assertEqual([], self.step(inq))
+
+    def test_opponent_claiming_resource_elsewhere_not_harmed(self) -> None:
+        # 对手在 E 领同款资源：目标节点不同，B 的冰鉴候选不误伤
+        inq = inquire(1, node="A", nodes=[{"nodeId": "B", "resourceStock": {"ICE_BOX": 1}}])
+        inq["players"].append(opp_player("E", state="PROCESSING",
+            process={"action": "CLAIM_RESOURCE", "resourceType": "ICE_BOX",
+                     "targetNodeId": "E", "remainRound": 1}))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], self.acts(inq))
+
+    # -- B2b 竞争折扣（黑盒行为） --
+
+    def test_opponent_closer_and_heading_excludes(self) -> None:
+        # 对手半路 B→E（ETA 6+3 < 我方 11）且下一跳即候选点：硬出局
+        inq = inquire(1, node="A", tasks=[task("T_e", "E")])
+        inq["players"].append(opp_player("B", state="MOVING", next_node="E"))
+        self.assertEqual([], self.step(inq))
+
+    def test_opponent_camped_on_spot_only_discounts(self) -> None:
+        # 对手蹲在 E（更近）但没朝向实证（停靠）：打折后净值仍正 → 照追
+        inq = inquire(1, node="A", tasks=[task("T_e", "E")])
+        inq["players"].append(opp_player("E"))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], self.acts(inq))
+
+    # -- B2b/B2c 折扣系数（白盒） --
+
+    def test_factor_unchanged_without_opponent_or_when_farther(self) -> None:
+        # 无对手在场：全 1.0（估值与改动前完全一致）
+        self.assertEqual({"T_x": 1.0}, self.factors(inquire(1), [feas("T_x", "E", 11)]))
+        # 对手在 E（到 B 8 帧）比我方（5 帧）远：同样 1.0
+        inq = inquire(2, node="A")
+        inq["players"].append(opp_player("E"))
+        self.assertEqual({"T_x": 1.0}, self.factors(inq, [feas("T_x", "B", 5)]))
+
+    def test_factor_discount_when_only_closer(self) -> None:
+        inq = inquire(1, node="A")
+        inq["players"].append(opp_player("E"))
+        self.assertEqual({"T_x": CONTEST_DISCOUNT},
+                         self.factors(inq, [feas("T_x", "E", 11)]))
+
+    def test_factor_excludes_when_clearly_closer_and_heading(self) -> None:
+        inq = inquire(1, node="A")
+        inq["players"].append(opp_player("B", state="MOVING", next_node="E"))
+        self.assertEqual({"T_x": 0.0}, self.factors(inq, [feas("T_x", "E", 11)]))
+
+    def test_factor_heading_within_margin_only_discounts(self) -> None:
+        # 对手 ETA 6 vs 我方 8：更近但不"明显"（6+3 ≥ 8）→ 有朝向也只打折
+        inq = inquire(1, node="A")
+        inq["players"].append(opp_player("B", state="MOVING", next_node="E"))
+        self.assertEqual({"T_x": CONTEST_DISCOUNT},
+                         self.factors(inq, [feas("T_x", "E", 8)]))
+
+    def test_factor_task_lifted_when_opponent_capped_resource_kept(self) -> None:
+        # B2c：对手任务 raw 封顶 → 任务候选不折；资源仍先到先得 → 折扣保留
+        inq = inquire(1, node="A")
+        inq["players"].append(opp_player("E", task_score=TASK_SCORE_GOAL))
+        got = self.factors(inq, [feas("T_x", "E", 11, raw=30),
+                                 feas("RES:E:ICE_BOX", "E", 11, raw=0)])
+        self.assertEqual({"T_x": 1.0, "RES:E:ICE_BOX": CONTEST_DISCOUNT}, got)
+
+    def test_factor_all_lifted_when_opponent_finished(self) -> None:
+        # B2c：对手已交付/已验核 → 不构成竞争，任务/资源折扣全解除
+        cands = [feas("T_x", "E", 11, raw=30), feas("RES:E:ICE_BOX", "E", 11, raw=0)]
+        inq = inquire(1, node="A")
+        inq["players"].append(opp_player("E", delivered=True))
+        self.assertEqual({"T_x": 1.0, "RES:E:ICE_BOX": 1.0}, self.factors(inq, cands))
+        inq2 = inquire(2, node="A")
+        inq2["players"].append(opp_player("E", verified=True))
+        self.assertEqual({"T_x": 1.0, "RES:E:ICE_BOX": 1.0}, self.factors(inq2, cands))
 
 
 if __name__ == "__main__":

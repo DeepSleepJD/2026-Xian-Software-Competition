@@ -40,7 +40,36 @@ demo 图（seed 20260618/12345）是**水路最优**，跑不出山路回归。�
 - 方案 b：扫 seed 找山路最优的地图变体喂 run_match。
 - 优先 a（确定、可回归），b 作对局级验证补充。
 
+## Phase B2 — 竞争建模三件套（B1 暂缓后的主攻方向，2026-07-03 用户定夺）
+
+背景：B1 复盘重判败因 = 同路任务被对手抢走（跑到才吃 OBJECT_BUSY 白跑）+ 对手更快 +
+对手用冰鉴。三件套针对第一项，全部落在 economy 候选估值处（`_candidates`/`_pick_target`），
+不动仲裁阶梯。任务和可认领资源（冰鉴等）同为先到先得，三件套对两者一视同仁。
+
+### B2a 锁定检测（硬信号）
+对手 `state == "PROCESSING"` 且 `current_process.task_id` / `resource_type`+`target_node_id`
+命中候选 → 该候选当帧出局。不再等 CLAIM 被拒（OBJECT_BUSY）反馈才 backoff。
+
+### B2b 竞争折扣（软信号）
+每帧最多算一次 `opp_costs = all_costs(state, 对手位置)`（对手 MOVING 时按
+next_node + 剩余边帧折算，参考 `safety._remaining_edge_frames`）。对每个候选停靠点 spot：
+- **出局**：对手 ETA 明显更近（`opp_eta + MARGIN < my_to_frames`）**且**正朝它去
+  （opp.next_node_id 在其到 spot 的最短路方向上）——强信号，抢不过；
+- **打折**：对手仅 ETA 更近、无朝向信号 → 净值 × `CONTEST_DISCOUNT`（0.5 起步）。
+不确定时宁可折扣、不硬出局——对手一次只能处理一个目标，全面出局会饿死经济层。
+
+### B2c 折扣解除
+对手满足任一：task raw ≥ 130（封顶不再抢任务，仅解除任务候选的折扣，资源候选折扣保留）/
+delivered / retired / verified → B2b 失效；B2a 锁定检测始终保留。
+
+### B2 风险
+- demo 也抢任务，折扣会改变 vs demo 行为——demo 双种子回归是硬闸门。
+- 折扣过猛 → 放弃太多候选 → raw 反降。单测必须覆盖"对手在远处时估值完全不变"。
+- 同路争夺场景对局层暂不可复现（陪练无破卡/绕障，见 implement.md B1 复盘），
+  本轮以单测 + 三方回归闸门（demo/racer/guard 不掉分）验收，对局级实证留给鲁棒陪练后续。
+
 ## 风险 / 回滚
 - 每个改动独立 commit（里程碑粒度），run_match 对局验证后再推进下一个。
 - A2 若使 demo 掉分，检查是否 demo 依赖设卡得分（预期不依赖）。
 - Phase B 若 demo 翻车，回退到字典序（保留原函数或 flag）。
+- B1 路线成本模型已被 755:737 实验推翻，暂缓（见 implement.md）；勿在 B2 中夹带路线改动。

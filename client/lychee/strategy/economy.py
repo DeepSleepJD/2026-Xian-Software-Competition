@@ -45,6 +45,11 @@ SLOW_ROUTE_COEF_LIMIT = 1500  # 经济目标不走慢边（P4e）：MOUNTAIN(178
                               # 主线只有山路时经济层不哑）。帧数上限方案已否决——
                               # 它把"大路任务簇"（对水路基线呈绕行，实测配冰鉴净赚
                               # 34 分）一起误杀，见任务归档 2026-07-03 归因实验
+CONTEST_DISCOUNT = 0.5        # 竞争折扣（B2b）：对手到候选点 ETA 更近但无朝向实证时
+                              # 净值打对折——宁可折扣不硬出局，对手一次只能处理一个
+                              # 目标，全面出局会饿死经济层
+CONTEST_ETA_MARGIN = 3        # 帧。硬出局要求对手"明显"更近（ETA+此值仍先到）：
+                              # ETA 是估计值（天气/守卫/暂停噪声），弱优势只降权不放弃
 TARGET_STICKINESS = 2.0       # 换目标需净值优势超过此值（防止停靠间目标抖动）
 TARGET_SWITCH_RATIO = 0.20    # 已承诺目标存在时，新目标需额外领先 20%
 BACKTRACK_MARGIN = 2.0        # 刚到站即原路折返需额外覆盖一条边成本
@@ -346,6 +351,12 @@ class EconomyStrategy(Strategy):
         if not feasible:
             return None, ""
 
+        # 竞争建模（B2b/B2c）：被对手明显抢先的候选出局，弱信号打折（B2a 在 _candidates）
+        contest = self._contest_factors(state, feasible)
+        feasible = [item for item in feasible if contest[item[0].key] > 0.0]
+        if not feasible:
+            return None, ""
+
         from_spot = {spot: pathing.all_costs(state, spot)
                      for spot in {s for _, s, _, _ in feasible}}
 
@@ -360,7 +371,7 @@ class EconomyStrategy(Strategy):
             back = from_spot[spot].get(anchor, (0.0, _INF))[1]
             if done_round + back > deadline:
                 continue
-            net = net_of(cand, to_frames, back)
+            net = net_of(cand, to_frames, back) * contest[cand.key]
             if net <= 0:
                 continue
             # 一步前瞻：做完本目标后最优跟进目标的净值也计入。
@@ -377,8 +388,8 @@ class EconomyStrategy(Strategy):
                 if done2 + back2 > deadline:
                     continue
                 cost2 = max(0, to2 + c2.proc_frames + back2 - back)
-                follow = max(follow, c2.marginal_value(raw + cand.raw_score)
-                             - cost2 * DETOUR_COST_PER_FRAME)
+                follow = max(follow, (c2.marginal_value(raw + cand.raw_score)
+                                      - cost2 * DETOUR_COST_PER_FRAME) * contest[c2.key])
             plan = net + follow
             if self._is_immediate_backtrack(state, cur, spot):
                 plan -= self._backtrack_penalty(state, cur)
@@ -393,6 +404,66 @@ class EconomyStrategy(Strategy):
             if best[0] < current[0] + threshold:
                 best = current
         return best[2], best[3]
+
+    # -- 竞争建模（B2）：任务/资源先到先得，被对手抢先的候选别白跑 --
+
+    def _contest_factors(self, state: GameState,
+                         feasible: list[tuple[_Target, str, int, int]]) -> dict[str, float]:
+        """B2b/B2c 竞争折扣系数：候选 key → 1.0 不变 / CONTEST_DISCOUNT 打折 / 0.0 出局。
+
+        ETA 只是估计：仅"明显更近 + 正朝它去"双信号才硬出局，只有 ETA 优势时打折
+        （现网 1349 的 OBJECT_BUSY 白跑即此模式）。B2c 解除：对手任务分封顶后不再
+        抢任务（任务候选不折，资源候选照折）；已交付/退赛/验核完的对手不构成竞争。
+        """
+        factors = {cand.key: 1.0 for cand, _, _, _ in feasible}
+        opp = state.opponent
+        if opp is None or opp.delivered or opp.retired or opp.verified:
+            return factors
+        if not opp.current_node_id:
+            return factors      # 对手不在场：估值完全不变
+        opp_task_capped = opp.task_score >= TASK_SCORE_GOAL
+        if opp.next_node_id:    # 半路：从下一节点起算 + 剩余边帧
+            origin = opp.next_node_id
+            extra = safety.remaining_edge_frames(state, opp)
+            if extra >= _INF:
+                extra = 0
+        else:
+            origin, extra = opp.current_node_id, 0
+        opp_costs = pathing.all_costs(state, origin)    # 每帧最多算一次
+        for cand, spot, to_frames, _ in feasible:
+            if opp_task_capped and cand.raw_score > 0:
+                continue        # B2c：对手任务 raw 封顶，不再与我争任务
+            frames = opp_costs.get(spot, (0.0, _INF))[1]
+            if frames >= _INF:
+                continue
+            opp_eta = extra + frames
+            if opp_eta >= to_frames:
+                continue        # 对手不更近：估值完全不变
+            if opp_eta + CONTEST_ETA_MARGIN < to_frames and \
+                    self._opponent_heading_to(state, spot):
+                factors[cand.key] = 0.0
+            else:
+                factors[cand.key] = CONTEST_DISCOUNT
+        return factors
+
+    @staticmethod
+    def _opponent_heading_to(state: GameState, spot: str) -> bool:
+        """对手下一跳是否落在其到 spot 的最短路方向上（B2b 朝向实证）。"""
+        opp = state.opponent
+        if not opp.next_node_id:
+            return False
+        if opp.next_node_id == spot:
+            return True
+        path = pathing.shortest_path(state, opp.current_node_id, spot)
+        return bool(path and len(path) >= 2 and path[1] == opp.next_node_id)
+
+    @staticmethod
+    def _opponent_lock(state: GameState):
+        """对手读条中的目标（B2a 硬信号）；无读条/不在场返回 None。"""
+        opp = state.opponent
+        if opp is None or opp.state != "PROCESSING":
+            return None
+        return opp.current_process
 
     @staticmethod
     def _path_slow_edges(state: GameState, path: list[str] | None) -> set[str]:
@@ -452,6 +523,7 @@ class EconomyStrategy(Strategy):
     def _candidates(self, state: GameState, cur: str) -> list[_Target]:
         me = state.me
         out: list[_Target] = []
+        lock = self._opponent_lock(state)
         hard_required_resources = self._required_resources_on_delivery_path(state, cur)
         for t in state.tasks if me.task_score < TASK_SCORE_GOAL else []:
             if not t.active or t.completed or t.failed or not t.node_id:
@@ -460,6 +532,8 @@ class EconomyStrategy(Strategy):
                 continue
             if t.protection_player_id not in (0, state.player_id):
                 continue
+            if lock is not None and lock.task_id and lock.task_id == t.task_id:
+                continue   # B2a：对手读条中必然先到手，不等 OBJECT_BUSY 反馈
             tpl = state.task_templates.get(t.task_template_id)
             if tpl and any(me.resources.get(rt, 0) < 1 for rt in tpl.required_resource_types):
                 continue   # 消耗型任务（如 T06 耗马）没有本钱不接
@@ -489,6 +563,9 @@ class EconomyStrategy(Strategy):
             for resource_type, stock in ns.resource_stock.items():
                 if stock < 1:
                     continue
+                if lock is not None and lock.resource_type == resource_type \
+                        and lock.target_node_id == node_id:
+                    continue   # B2a：对手正在该点领取同款资源
                 cap = RESOURCE_CLAIM_CAPS.get(resource_type)
                 if cap is not None and me.resources.get(resource_type, 0) >= cap:
                     continue

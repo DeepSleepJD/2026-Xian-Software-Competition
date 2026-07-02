@@ -93,7 +93,8 @@ def _edge_frames_between(state: GameState, src: str, dst: str) -> int:
     return _INF
 
 
-def _remaining_edge_frames(state: GameState, player) -> int:
+def remaining_edge_frames(state: GameState, player) -> int:
+    """半路玩家走完当前边还需的帧数；不在边上返回大数（economy 竞争折扣共用）。"""
     if not player.current_node_id or not player.next_node_id:
         return _INF
     remaining = max(0, player.edge_total_ms - player.edge_progress_ms)
@@ -115,7 +116,7 @@ def _can_opponent_set_guard_before_arrival(state: GameState, next_node: str) -> 
     my_eta = _edge_frames_between(state, state.me.current_node_id, next_node)
     if my_eta >= _INF:
         return False
-    opp_eta = _remaining_edge_frames(state, opp)
+    opp_eta = remaining_edge_frames(state, opp)
     return opp_eta + GUARD_SETUP_FRAMES <= my_eta
 
 
