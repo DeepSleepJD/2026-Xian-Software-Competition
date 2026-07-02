@@ -1,6 +1,6 @@
 import unittest
 
-from lychee_basic_client.messages import heartbeat_action, move_action
+from lychee_basic_client.messages import action_message, heartbeat_action, move_action
 
 
 class MessageTests(unittest.TestCase):
@@ -35,6 +35,20 @@ class MessageTests(unittest.TestCase):
                 },
             },
             move_action("match-1", 7, 1006, "S10"),
+        )
+
+    def test_action_message_preserves_protocol_action_fields(self) -> None:
+        self.assertEqual(
+            {
+                "msg_name": "action",
+                "msg_data": {
+                    "matchId": "match-1",
+                    "round": 7,
+                    "playerId": 1006,
+                    "actions": [{"action": "PROCESS", "targetNodeId": "S02"}],
+                },
+            },
+            action_message("match-1", 7, 1006, [{"action": "PROCESS", "targetNodeId": "S02"}]),
         )
 
 

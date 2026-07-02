@@ -5,7 +5,8 @@ from typing import Any, Optional
 
 from .config import Config
 from .framing import read_frame, write_frame
-from .messages import heartbeat_action, ready_message, registration_message
+from .messages import action_message, heartbeat_action, ready_message, registration_message
+from .strategy import MovementStrategy
 
 
 class ClientSession:
@@ -13,6 +14,7 @@ class ClientSession:
         self._sock = sock
         self._config = config
         self._match_id = ""
+        self._strategy = MovementStrategy(config.player_id)
 
     def run(self) -> int:
         self._send_registration()
@@ -52,10 +54,20 @@ class ClientSession:
     def _handle_start(self, data: dict[str, Any]) -> None:
         self._match_id = data["matchId"]
         round_no = data["round"]
+        self._strategy.update_start(data)
         print(f"start match={self._match_id} round={round_no}")
         write_frame(self._sock, ready_message(self._match_id, round_no, self._config.player_id))
 
     def _handle_inquire(self, data: dict[str, Any]) -> None:
         round_no = data["round"]
+        actions = self._strategy.choose_action(data)
+        if actions:
+            print(f"inquire round={round_no} -> {actions[0]['action']}")
+            write_frame(
+                self._sock,
+                action_message(self._match_id, round_no, self._config.player_id, actions),
+            )
+            return
+
         print(f"inquire round={round_no} -> heartbeat")
         write_frame(self._sock, heartbeat_action(self._match_id, round_no, self._config.player_id))
