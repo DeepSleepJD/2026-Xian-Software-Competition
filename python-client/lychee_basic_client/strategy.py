@@ -46,9 +46,9 @@ class Strategy:
         self.task_base = 0                       # sum of scores of tasks we completed
         self._counted_tasks: set[str] = set()    # taskIds already added to task_base
         self._task_attempts: dict[str, int] = {}  # per-task claim attempts (loop guard)
-        # nodes an enemy guard is blocking us from entering (detected reactively)
+        # nodes an enemy guard is blocking us from entering (recomputed each frame
+        # from node state in decide())
         self._guard_blocked: set[str] = set()
-        self._last_move_target: Optional[str] = None
         # obstacle nodes we've already sent a squad to clear (avoid re-dispatch)
         self._squad_clear_sent: set[str] = set()
         # (contestId, roundIndex) pairs we've already played -> never double-play a
@@ -91,7 +91,13 @@ class Strategy:
         nodes_by_id = {n["nodeId"]: n for n in inquire_data.get("nodes", [])}
 
         self._account_tasks(tasks)
-        self._note_blocked_moves(inquire_data.get("actionResults", []), nodes_by_id)
+        # enemy guards blocking passage, read straight off the node state each frame
+        # (we never set guards, so any guard is the opponent's). Recomputed every
+        # frame so a weathered/broken guard automatically becomes passable again.
+        self._guard_blocked = {
+            nid for nid, n in nodes_by_id.items()
+            if n.get("effectiveCombatCount", 0) > 0 or n.get("guardBlockCount", 0) > 0
+        }
 
         if me.get("delivered") or me.get("retired"):
             return []
@@ -134,12 +140,19 @@ class Strategy:
         on_edge = state == "MOVING" or (state == "WAITING" and me.get("routeEdgeId"))
         if on_edge:
             self._saw_processing_at = None
-            self._guard_blocked.discard(node)  # we're moving, no longer blocked here
             target = me.get("nextNodeId") or self.graph.next_hop(node, self.gate_node)
-            # if the far end is an enemy guard, FORCED_PASS it (opens a PASS window
-            # our card policy plays) instead of re-issuing MOVE that just gets
-            # rejected forever -- the bug that let a gate/choke guard 0-score us.
-            return [self._step_to(target, nodes_by_id)] if target else []
+            if not target:
+                return []
+            if target in self._guard_blocked:
+                # the node we're heading into just got guarded. We can't FORCED_PASS
+                # from mid-edge (MOVING_ACTION_FORBIDDEN), so change course to another
+                # neighbour of the segment start that routes around it (rule 4.2 改道);
+                # if there's no way around (a funnel), wait for the guard to weather.
+                alt = self.graph.next_hop(node, self.gate_node, avoid=self._guard_blocked)
+                if alt and alt != target:
+                    return [self._mv(alt)]
+                return [M.wait()]
+            return [self._mv(target)]
 
         # busy finishing something server-side: don't interrupt
         if state in BUSY_STATES:
@@ -363,27 +376,7 @@ class Strategy:
         return self._mv(target)
 
     def _mv(self, target: str) -> dict[str, Any]:
-        """Emit a MOVE, remembering the target so we can detect if it's blocked."""
-        self._last_move_target = target
         return M.move(target)
-
-    def _note_blocked_moves(
-        self, action_results: list[dict[str, Any]], nodes_by_id: dict[str, Any]
-    ) -> None:
-        """If our last MOVE was rejected and the target has no obstacle, an enemy
-        guard is blocking it -> remember to FORCED_PASS it next time."""
-        tgt = self._last_move_target
-        if not tgt:
-            return
-        for r in action_results:
-            if (
-                r.get("playerId") == self.player_id
-                and r.get("action") == "MOVE"
-                and not r.get("accepted", True)
-            ):
-                if not nodes_by_id.get(tgt, {}).get("hasObstacle"):
-                    self._guard_blocked.add(tgt)
-                break
 
     def _find_me(self, players: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
         for p in players:

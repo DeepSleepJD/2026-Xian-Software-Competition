@@ -51,11 +51,19 @@ def _my_id(rows: list[dict[str, Any]]) -> Optional[int]:
     return None
 
 
+# error codes that mean we're actually stuck (vs a benign transient reject)
+BLOCKING_CODES = {"MOVE_BLOCKED_BY_GUARD", "MOVING_ACTION_FORBIDDEN", "TARGET_NOT_REACHABLE"}
+
+
 def _my_rejects(inq: dict[str, Any], me_id: Optional[int]) -> list[dict[str, Any]]:
     return [
         ar for ar in (inq.get("actionResults") or [])
         if ar.get("playerId") == me_id and not ar.get("accepted", True)
     ]
+
+
+def _has_blocking_reject(inq: dict[str, Any], me_id: Optional[int]) -> bool:
+    return any(r.get("errorCode") in BLOCKING_CODES for r in _my_rejects(inq, me_id))
 
 
 def build_report(path: str, before: int, after: int) -> str:
@@ -72,7 +80,13 @@ def build_report(path: str, before: int, after: int) -> str:
         if mep:
             seq.append((inq.get("round"), inq, mep, ca))
 
-    stuck = next((i for i, (_, inq, _, _) in enumerate(seq) if _my_rejects(inq, me_id)), None)
+    # prefer the first genuinely-blocking reject (guard / forbidden / unreachable);
+    # fall back to the first reject of any kind so benign transients don't hide it
+    stuck = next(
+        (i for i, (_, inq, _, _) in enumerate(seq) if _has_blocking_reject(inq, me_id)), None
+    )
+    if stuck is None:
+        stuck = next((i for i, (_, inq, _, _) in enumerate(seq) if _my_rejects(inq, me_id)), None)
     out.append(f"stuck_idx = {stuck}  (rounds recorded: {len(seq)})")
 
     if stuck is not None:
