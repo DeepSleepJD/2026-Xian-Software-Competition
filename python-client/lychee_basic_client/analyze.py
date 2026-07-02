@@ -85,6 +85,14 @@ def _load(
             if typ == "error":
                 continue
 
+            # BattleLogger round entry without a "type" field (older format)
+            if "inquire" in obj:
+                my_id = my_id or obj.get("playerId")
+                inq = obj.get("inquire")
+                if inq:
+                    rounds.append(inq)
+                continue
+
             if "msg" in obj:                  # format C (raw wire trace)
                 m = obj.get("msg") or {}
                 name = m.get("msg_name")
