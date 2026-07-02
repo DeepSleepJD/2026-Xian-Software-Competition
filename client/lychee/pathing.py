@@ -79,6 +79,27 @@ def shortest_path(state: GameState, src: str, dst: str,
     return None
 
 
+def all_costs(state: GameState, src: str) -> dict[str, tuple[float, int]]:
+    """单源到全图各节点的 (鲜度损耗, 帧数)。多目标估值时替代反复调 shortest_path。"""
+    dist: dict[str, tuple[float, int]] = {src: (0.0, 0)}
+    heap: list[tuple[float, int, str]] = [(0.0, 0, src)]
+    visited: set[str] = set()
+    while heap:
+        fresh, frames, node = heapq.heappop(heap)
+        if node in visited:
+            continue
+        visited.add(node)
+        for nxt, edge in state.neighbors(node):
+            if nxt in visited:
+                continue
+            step_fresh, step_frames = _step_cost(state, edge, nxt)
+            cand = (fresh + step_fresh, frames + step_frames)
+            if nxt not in dist or cand < dist[nxt]:
+                dist[nxt] = cand
+                heapq.heappush(heap, (cand[0], cand[1], nxt))
+    return dist
+
+
 def path_cost(state: GameState, path: list[str]) -> tuple[float, int]:
     """一条路径的 (估计鲜度损耗, 估计帧数)，用于多终点/多路线比较。"""
     fresh, frames = 0.0, 0

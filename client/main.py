@@ -13,6 +13,7 @@ from lychee.net import Connection
 from lychee.recorder import Recorder
 from lychee.runtime import Runtime
 from lychee.strategy.delivery import DeliveryStrategy
+from lychee.strategy.economy import EconomyStrategy
 
 DEFAULT_PLAYER_NAME = "西瓜大队"   # 报名队名（2026-07-02 负责人定）；LYCHEE_PLAYER_NAME 可覆盖
 
@@ -39,7 +40,7 @@ def main(argv: list[str]) -> int:
             player_id=args.player_id,
             player_name=player_name,
             version=VERSION,
-            strategies=[DeliveryStrategy()],
+            strategies=[DeliveryStrategy(), EconomyStrategy()],
             recorder=Recorder.from_env(args.player_id),
         )
         return runtime.run()
