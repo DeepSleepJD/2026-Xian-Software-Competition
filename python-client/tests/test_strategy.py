@@ -88,5 +88,25 @@ class BlockadeTests(unittest.TestCase):
         self.assertEqual("DELIVER", act[0]["action"])
 
 
+class OpeningContestTests(unittest.TestCase):
+    def _contest(self, ri=1):
+        return {"contestId": "C1", "contestType": "DOCK", "roundIndex": ri,
+                "redPlayerId": 1001, "bluePlayerId": 2002, "resolved": False,
+                "deadlineRound": 200}
+
+    def test_opening_contest_at_station_plays_xian_gong(self) -> None:
+        s = _line_strategy()
+        me = _me("S02", freshness=95, goodFruit=20)  # parked at a station
+        for ri in (1, 2, 3):
+            act = s._card(me, [self._contest(ri)], 50)
+            self.assertEqual("XIAN_GONG", act[0]["card"])
+
+    def test_opening_contest_not_forced_when_mid_edge(self) -> None:
+        s = _line_strategy()
+        me = _me("S02", freshness=95, goodFruit=20, routeEdgeId="E1", nextNodeId="S03")
+        act = s._card(me, [self._contest()], 50)
+        self.assertNotEqual("XIAN_GONG", act[0]["card"])  # not the opening-at-station rule
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -46,6 +46,7 @@ class Strategy:
         self._last_node: Optional[str] = None
         self._my_team: Optional[str] = None
         self._contest_played: set[tuple] = set()
+        self._first_contest_id: Optional[str] = None   # opening RPS -> all XIAN_GONG
         # opponent tracking (previous frame)
         self._opp_prev_node: Optional[str] = None
         self._opp_prev_edge: Optional[str] = None
@@ -315,7 +316,19 @@ class Strategy:
         if tap in self._contest_played:
             return []
         self._contest_played.add(tap)
-        return [M.window_card(c["contestId"], pick_card(me, c))]
+        card = pick_card(me, c)
+        # The OPENING contest on a shared route (both parked at the same station, e.g.
+        # the S02 dock) decides who processes first: lose it and the opponent gets a
+        # speed lead we can never claw back to freeze them. So on that first contest,
+        # while we're parked at a station, play XIAN_GONG every tap -- the strongest
+        # single card (beats YAN_DIE + BING_ZHENG, only loses to QIANG_XING).
+        at_station = bool(me.get("currentNodeId")) and not me.get("routeEdgeId")
+        if self._first_contest_id is None and at_station:
+            self._first_contest_id = c.get("contestId")
+        if c.get("contestId") == self._first_contest_id and at_station \
+           and me.get("freshness", 0) >= 80 and me.get("goodFruit", 0) > 0:
+            card = "XIAN_GONG"
+        return [M.window_card(c["contestId"], card)]
 
     def _needs_process(self, node, nodes_by_id) -> bool:
         if node in (self.gate_node, self.terminal_node):
