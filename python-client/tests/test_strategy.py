@@ -94,18 +94,23 @@ class OpeningContestTests(unittest.TestCase):
                 "redPlayerId": 1001, "bluePlayerId": 2002, "resolved": False,
                 "deadlineRound": 200}
 
-    def test_opening_contest_at_station_plays_xian_gong(self) -> None:
+    def test_plays_xian_gong_on_every_tap_of_every_contest(self) -> None:
         s = _line_strategy()
-        me = _me("S02", freshness=95, goodFruit=20)  # parked at a station
+        me = _me("S02", freshness=95, goodFruit=20)
+        # first contest, all three taps
         for ri in (1, 2, 3):
             act = s._card(me, [self._contest(ri)], 50)
             self.assertEqual("XIAN_GONG", act[0]["card"])
+        # a SECOND (different) contest also gets XIAN_GONG (the bug was it didn't)
+        c2 = self._contest(1); c2["contestId"] = "C2"
+        act = s._card(me, [c2], 80)
+        self.assertEqual("XIAN_GONG", act[0]["card"])
 
-    def test_opening_contest_not_forced_when_mid_edge(self) -> None:
+    def test_good_fruit_floor_stops_xian_gong(self) -> None:
         s = _line_strategy()
-        me = _me("S02", freshness=95, goodFruit=20, routeEdgeId="E1", nextNodeId="S03")
+        me = _me("S02", freshness=95, goodFruit=3)  # below the floor
         act = s._card(me, [self._contest()], 50)
-        self.assertNotEqual("XIAN_GONG", act[0]["card"])  # not the opening-at-station rule
+        self.assertNotEqual("XIAN_GONG", act[0]["card"])  # protect delivery/guard fruit
 
 
 if __name__ == "__main__":
