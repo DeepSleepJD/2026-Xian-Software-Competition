@@ -50,6 +50,7 @@ class Strategy:
         self._guarded_round: dict[str, int] = {}
         # obstacle nodes we've dispatched a squad to clear (avoid re-dispatch)
         self._squad_sent: set[str] = set()
+        self._guard_blocked: set[str] = set()   # enemy guards blocking us
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -122,9 +123,11 @@ class Strategy:
 
     # ---- blockade / phase logic ----
     def _blockade(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id):
-        """We race ahead to the gate; at every choke we pass we drop a guard behind
-        us (a guard blocks the *enemy*, never us), forcing the opponent to detour
-        the slow mountain route while we deliver. We never babysit our own guard."""
+        """Goal: WE deliver, the opponent doesn't. Race to the gate dropping a guard
+        at every choke we pass (a guard blocks the enemy, never us); the opponent's
+        squad can only break so much, so the guard chain outlasts them. Never linger:
+        tasks are grabbed ONLY where we're already stopped (a process station or the
+        pre-RUSH gate wait) -- we never make a dedicated stop for a task."""
         if state in BUSY_STATES:
             return []
 
@@ -133,18 +136,26 @@ class Strategy:
             self._guarded_round[node] = round_no
             return [M.set_guard(node, extra_good_fruit=self._guard_fruit(me))]
 
-        # at the gate but can't VERIFY until RUSH: use the wait for a nearby task
-        if node == self.gate_node and not me.get("verified") and phase != "RUSH":
-            return self._slack_task(node, tasks, me, round_no, nodes_by_id) or [M.wait()]
-
-        # if we're comfortably ahead of schedule, grab a task sitting right here
-        if self._time_slack(node, me, round_no) > 0:
-            here = self._slack_task(node, tasks, me, round_no, nodes_by_id)
+        # freebie task: only where we're stopped anyway, so it costs us no lead
+        if self._stopped_anyway(node, me, phase, nodes_by_id):
+            here = self._free_task_here(node, tasks, me)
             if here:
                 return here
 
-        # otherwise keep advancing toward the gate (through the chokes)
+        # pre-RUSH at the gate: nothing to do but wait for RUSH to verify
+        if node == self.gate_node and not me.get("verified") and phase != "RUSH":
+            return [M.wait()]
+
+        # otherwise keep advancing toward the gate (through the chokes) -- no lingering
         return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
+
+    def _stopped_anyway(self, node, me, phase, nodes_by_id) -> bool:
+        """True where we're forced to stop regardless of tasks: a mandatory process
+        station we haven't finished, or the gate before RUSH. Grabbing a task here is
+        essentially free; grabbing one anywhere else would cost us the lead."""
+        if node == self.gate_node and not me.get("verified") and phase != "RUSH":
+            return True
+        return self._needs_process(node, nodes_by_id) and node not in self.processed
 
     def _worth_guarding(self, choke, opp, nodes_by_id, me) -> bool:
         """Guard this choke if the opponent still has to cross it, we're not already
@@ -178,10 +189,6 @@ class Strategy:
                 self._squad_sent.add(nid)
                 return [M.squad_clear(nid)]
         return []
-
-    def _time_slack(self, node, me, round_no) -> float:
-        """Frames to spare before we must head for delivery (>0 means we can dawdle)."""
-        return TOTAL_ROUNDS - DELIVER_MARGIN - round_no - self._frames_to_deliver(node, me)
 
     # ---- navigation ----
     def _advance_to(self, dest, me, node, state, phase, nodes_by_id):
@@ -229,10 +236,10 @@ class Strategy:
             return [M.wait()]  # can't verify before RUSH
         return []
 
-    # ---- slack task pickup ----
-    def _slack_task(self, node, tasks, me, round_no, nodes_by_id):
-        """Claim a task right here if one is available and we have spare time; no
-        far detours while blockading (delivery safety already gates the budget)."""
+    # ---- opportunistic (free) task pickup ----
+    def _free_task_here(self, node, tasks, me):
+        """Claim a task sitting on the node we're already stopped at -- no detour,
+        no dedicated stop (called only from _stopped_anyway)."""
         for t in tasks:
             if t.get("nodeId") == node and t.get("active") and not t.get("completed") \
                and not t.get("failed") and not t.get("ownerPlayerId"):
