@@ -185,31 +185,20 @@ class DeliveryStrategy(Strategy):
         return state.roles.terminal_node_ids or \
             [n.node_id for n in state.nodes.values() if n.is_terminal]
 
-    def _should_camp(self, state: GameState, cur: str) -> bool:
-        """拦截 camp（G2）：站在我方拦截咽喉不走位，等对手 commit 上边后由 combat
-        set-on-commit 冻死他。三重释放兜住自冻：交付死线 / 对手判死 / 此处已设有效卡。"""
-        if safety.delivery_deadline_hit(state):
-            return False
-        if safety.opponent_cannot_finish(state):
-            return False
-        if safety.interception_node(state) != cur:
-            return False
-        return not self._has_active_friendly_guard(state, cur)
-
-    @staticmethod
-    def _has_active_friendly_guard(state: GameState, node_id: str) -> bool:
-        ns = state.node_states.get(node_id)
-        guard = ns.guard if ns else None
-        my_team = state.my_team_id or state.me.team_id
-        return bool(guard and guard.active and guard.defense > 0
-                    and guard.owner_team_id == my_team)
-
     def _pick_move_target(self, state: GameState, cur: str) -> str:
-        # 拦截 camp：站在拦截咽喉守株待兔，压制走位（与 hold_before_choke 语义相反——
-        # 那个是"别进对手咽喉"，这个是"守在我方拦截点"；两者都返回不走，无冲突）
-        if self._should_camp(state, cur):
-            return ""
         avoid = frozenset(n for n, until in self._avoid_until.items() if state.round < until)
+        # 激进抢点：公共可设卡节点在前方时，先把它当临时硬目标；已经站上去则不
+        # camp，交给 combat 当帧设卡，下一帧继续送达/前压。
+        rush = safety.first_common_rush_node(state)
+        if rush and rush != cur:
+            path = pathing.shortest_path(state, cur, rush, avoid)
+            if path is None and avoid:
+                path = pathing.shortest_path(state, cur, rush)
+            if path and len(path) >= 2:
+                if safety.hold_before_choke(state, path[1]):
+                    return ""
+                return path[1]
+
         best: list[str] | None = None
         best_cost: tuple[float, int] = (0.0, 0)
         for terminal in self._terminals(state):

@@ -717,6 +717,8 @@ class CombatStrategy(Strategy):
         return safety.ahead_of_opponent(state, safety.GUARD_SETUP_FRAMES)
 
     def _is_opponent_choke(self, state: GameState, cur: str) -> bool:
+        if safety.first_common_rush_node(state) == cur:
+            return True
         opponent = state.opponent
         if not opponent.current_node_id:
             return False

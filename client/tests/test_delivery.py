@@ -238,7 +238,7 @@ CAMP_START = {
 
 
 class InterceptionCampTests(unittest.TestCase):
-    """G2 camp：站在我方拦截咽喉不走位，三重释放兜住自冻。"""
+    """拦截点到达后不再长期 camp：设卡机会交给 combat，delivery 继续前压。"""
 
     def setUp(self) -> None:
         self.state = GameState(MY_ID)
@@ -267,9 +267,10 @@ class InterceptionCampTests(unittest.TestCase):
         self.state.update_inquire(inq)
         return [a for it in self.strategy.propose(self.state) for a in it.actions]
 
-    def test_camps_at_interception_node(self) -> None:
-        # 我在咽喉 B、对手在 A（我先到）、时间充裕 → 原地 camp，不发 MOVE
-        self.assertEqual([], self.step(self.camp_inquire()))
+    def test_does_not_camp_at_interception_node(self) -> None:
+        # 我在咽喉 B、对手在 A（我先到）、时间充裕 → 不再原地 camp，继续往后走
+        acts = self.step(self.camp_inquire())
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "D"}], acts)
 
     def test_deadline_releases_camp(self) -> None:
         # 交付死线（must_rush，round 540）→ 弃 camp 直冲终点

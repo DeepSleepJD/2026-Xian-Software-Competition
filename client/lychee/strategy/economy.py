@@ -245,7 +245,11 @@ class EconomyStrategy(Strategy):
         must_rush = safety.must_rush(state)
         if must_rush:
             self.current_plan = None
-        eco = None if must_rush else self._propose_economy(state, cur)
+        rush_target = None if must_rush else safety.first_common_rush_node(state)
+        if rush_target:
+            self.current_plan = None
+            self._cur_target_key = ""
+        eco = None if must_rush or rush_target else self._propose_economy(state, cur)
         if eco is not None:
             intents.append(eco)
             # 冰鉴上边预判只看本帧真会走的边：economy 出 MOVE 用其目标，
@@ -803,6 +807,10 @@ class EconomyStrategy(Strategy):
 
     def _delivery_next_hop(self, state: GameState, cur: str) -> str:
         """economy 静默期估计 delivery 下一跳（用于冰鉴上长边预判）。"""
+        rush = safety.first_common_rush_node(state)
+        if rush and rush != cur:
+            p = pathing.shortest_path(state, cur, rush)
+            return p[1] if p and len(p) >= 2 else ""
         terminal = self._nearest_terminal(state, cur)
         if not terminal:
             return ""

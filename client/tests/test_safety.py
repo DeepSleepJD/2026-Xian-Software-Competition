@@ -510,6 +510,17 @@ class InterceptionNodeTests(unittest.TestCase):
         state = self.load(INTERCEPT_BYPASS, intercept_inquire(me_node="B", opp_node="A"))
         self.assertIsNone(safety.interception_node(state))
 
+    def test_first_common_rush_node_uses_fastest_path_common_pass(self) -> None:
+        # B 有旁路所以不是拓扑割点，旧 interception_node 不认；但双方最快路都可经 B，
+        # 我方已在 B 且能先完成设卡 → 新抢点 helper 应认 B。
+        state = self.load(INTERCEPT_BYPASS, intercept_inquire(me_node="B", opp_node="A"))
+        self.assertEqual("B", safety.first_common_rush_node(state))
+
+    def test_first_common_rush_node_respects_delivery_deadline(self) -> None:
+        state = self.load(INTERCEPT_BYPASS,
+                          intercept_inquire(round_no=590, me_node="B", opp_node="A"))
+        self.assertIsNone(safety.first_common_rush_node(state))
+
     def test_already_blocking_returns_none(self) -> None:
         # 对手前方已有我方有效卡 → 一张卡已冻死他，别再滚动 camp
         state = self.load(INTERCEPT_START, intercept_inquire(

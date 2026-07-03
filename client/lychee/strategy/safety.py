@@ -382,6 +382,57 @@ def interception_node(state: GameState) -> str | None:
     return best_node
 
 
+def first_common_rush_node(state: GameState) -> str | None:
+    """我方应抢先抵达并设卡的第一个公共节点。
+
+    与旧 `interception_node` 的"对手必经割点"口径不同，这里按双方最快到同一终点
+    的路线求公共点：节点必须同时位于双方最快路径上、可设卡（KEY_PASS/PASS），且
+    我方 ETA + 设卡 4 帧不晚于对手 ETA。返回后由 economy 让路、delivery 先开过去；
+    到点后不 camp，combat 若本帧能设卡会压住 MOVE，下一帧继续前压/送达。
+    """
+    if delivery_deadline_hit(state):
+        return None
+    opp = state.opponent
+    if opp is None or opp.delivered or opp.retired:
+        return None
+    if opponent_locked(state):
+        return None
+    if not (state.me.current_node_id or state.me.next_node_id):
+        return None
+    if not (opp.current_node_id or opp.next_node_id):
+        return None
+
+    terminals = _terminals(state)
+    if not terminals:
+        return None
+    me_speed = me_move_per_frame(state)
+    opp_speed = opp_move_per_frame(state)
+    anchor = min(terminals, key=lambda t: me_eta(state, t))
+    me_total = me_eta(state, anchor)
+    opp_total = opp_eta(state, anchor)
+    if me_total >= _INF or opp_total >= _INF:
+        return None
+
+    best_node: str | None = None
+    best_opp_eta: int | None = None
+    for node_id, node in state.nodes.items():
+        if node.node_type not in _GUARD_NODE_TYPES or _friendly_guard_on(state, node_id):
+            continue
+        mt = me_eta(state, node_id)
+        ot = opp_eta(state, node_id)
+        if mt >= _INF or ot >= _INF or mt + GUARD_SETUP_FRAMES > ot:
+            continue
+        me_tail = pathing.min_frames(state, node_id, anchor, me_speed)
+        opp_tail = pathing.min_frames(state, node_id, anchor, opp_speed)
+        if me_tail >= pathing.INF_FRAMES or opp_tail >= pathing.INF_FRAMES:
+            continue
+        if mt + me_tail != me_total or ot + opp_tail != opp_total:
+            continue
+        if best_opp_eta is None or ot < best_opp_eta:
+            best_node, best_opp_eta = node_id, ot
+    return best_node
+
+
 def opponent_locked(state: GameState) -> bool:
     """对手是否被我方有效卡锁死在竞争咽喉远侧（P4m 决策#1）。
 

@@ -818,6 +818,19 @@ RACE_START = {
 }
 
 
+RUSH_START = {
+    **RACE_START,
+    "matchId": "first-common-rush-test",
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True},
+        {"nodeId": "B", "nodeType": "STATION"},
+        {"nodeId": "C", "nodeType": "KEY_PASS"},
+        {"nodeId": "D", "nodeType": "FINISH", "terminal": True},
+        {"nodeId": "E", "nodeType": "STATION"},
+    ],
+}
+
+
 def racing_opp(progress_ms: int = 17500) -> dict:
     """对手在 A→B 长边上（总 30000ms）：progress 17500 → 剩余 13 帧，
     到咽喉 C 的 ETA = 13+3 = 16，治理器截止 = +8 帧。"""
@@ -876,6 +889,22 @@ class RaceGovernorTests(unittest.TestCase):
         state = self.load(inq)
         acts = [a for it in EconomyStrategy().propose(state) for a in it.actions]
         self.assertIn({"action": "CLAIM_TASK", "taskId": "T_near"}, acts)
+
+
+class FirstCommonRushEconomyTests(unittest.TestCase):
+    def load(self, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(RUSH_START)
+        state.update_inquire(inq)
+        return state
+
+    def test_on_node_task_yields_before_first_common_rush_node(self) -> None:
+        # C 是双方最快路径公共 KEY_PASS；抢点模式下 B 脚下 30 分任务也让路，先到 C。
+        inq = inquire(100, node="B", tasks=[task("T_near", "B", score=30)])
+        inq["players"].append(racing_opp())
+        state = self.load(inq)
+        acts = [a for it in EconomyStrategy().propose(state) for a in it.actions]
+        self.assertNotIn({"action": "CLAIM_TASK", "taskId": "T_near"}, acts)
 
 
 if __name__ == "__main__":

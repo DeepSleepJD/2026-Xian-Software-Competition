@@ -70,7 +70,7 @@ class InterceptionIntegrationTests(unittest.TestCase):
         # 对手 commit 上 S09→S10 边 → 整栈合并输出在 S10 设满防卡（把他冻死半路）
         acts = self.actions(inquire(round_no=200, opp_committed=True))
         self.assertIn({"action": "SET_GUARD", "targetNodeId": "S10", "extraGoodFruit": 2}, acts)
-        # camp 生效：不发离开 S10 的 MOVE
+        # SET_GUARD 高于 delivery MOVE：本帧立卡；下一帧 delivery 继续前压
         self.assertNotIn("MOVE", [a.get("action") for a in acts])
 
     def test_rolls_guard_before_commit_when_lead_sufficient(self) -> None:
