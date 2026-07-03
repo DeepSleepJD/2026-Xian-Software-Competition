@@ -206,6 +206,39 @@ class CombatStrategyTests(unittest.TestCase):
         self.assertIn({"action": "SET_GUARD", "targetNodeId": "S10",
                        "extraGoodFruit": 2}, acts)
 
+
+    def test_waits_at_first_intersection_instead_of_taking_task_when_window_is_close(self) -> None:
+        start = {
+            "matchId": "ambush-wait-test",
+            "durationRound": 600,
+            "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                        {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+            "nodes": [
+                {"nodeId": "A", "nodeType": "START", "start": True},
+                {"nodeId": "B", "nodeType": "KEY_PASS"},
+                {"nodeId": "C", "nodeType": "FINISH", "terminal": True},
+            ],
+            "edges": [
+                {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+                 "routeType": "ROAD", "distance": 10, "bidirectional": True},
+                {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
+                 "routeType": "ROAD", "distance": 2, "bidirectional": True},
+            ],
+            "map": {"gameplay": {"roles": {"terminalNodeIds": ["C"]}}},
+        }
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        self.strategy = CombatStrategy()
+
+        intents = self.intents(inquire(100, node="B", opp_node="A"))
+        guard_wait = [it for it in intents if it.kind == "combat.guard.wait"][0]
+        self.assertEqual([{"action": "WAIT"}], guard_wait.actions)
+
+        claim = Intent(kind="economy", priority=110,
+                       actions=[{"action": "CLAIM_TASK", "taskId": "T_x"}])
+        acts = merge_intents([claim, guard_wait])
+        self.assertEqual([{"action": "WAIT"}], acts)
+
     def test_set_guard_beats_onnode_task_claim_at_block_window(self) -> None:
         claim = Intent(kind="economy", priority=110,
                        actions=[{"action": "CLAIM_TASK", "taskId": "T_x"}])

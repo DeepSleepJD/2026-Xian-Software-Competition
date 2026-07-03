@@ -211,7 +211,10 @@ class CombatStrategy(Strategy):
 
         if self._has_active_guard(state, cur):
             return None
-        if not self._opponent_has_just_left_previous_stop(state, cur, opp_eta, opp_path):
+        if not self._opponent_has_just_left_previous_stop(state, cur, opp_path):
+            if self._should_hold_guard_ambush(state, cur, opp_eta, opp_path):
+                return Intent(kind="combat.guard.wait", priority=PRIORITY_SET_GUARD,
+                              actions=[{"action": "WAIT"}], note=f"ambush wait@{cur}")
             return None
 
         extra, defense, good_cost = self._guard_investment(state, cur)
@@ -242,9 +245,12 @@ class CombatStrategy(Strategy):
                 state, opp.current_node_id, OPPONENT_FAST_MOVE_PER_FRAME)
         if not opp_path or len(opp_path) < 2:
             return None
+        my_path = self._fastest_terminal_path(state, cur)
+        if not my_path:
+            return None
+        my_intersections = set(my_path[:-1])
         my_costs = self._fastest_costs(state, cur)
         opp_elapsed = 0
-        best: tuple[int, int, int, str] | None = None
         for index, node_id in enumerate(opp_path[1:-1], start=1):
             if index == 1 and opp.next_node_id == node_id:
                 edge_frames = safety.remaining_edge_frames(state, opp)
@@ -252,48 +258,44 @@ class CombatStrategy(Strategy):
                 edge_frames = self._path_prefix_frames(state, opp_path[index - 1:index + 1],
                                                        OPPONENT_FAST_MOVE_PER_FRAME)
             opp_elapsed += edge_frames
-            if self._is_terminal(state, node_id) or self._has_active_guard(state, node_id):
+            if node_id not in my_intersections:
                 continue
+            if self._is_terminal(state, node_id) or self._has_active_guard(state, node_id):
+                return None
             node = state.nodes.get(node_id)
             if node is None or node.node_type not in ("KEY_PASS", "PASS", "GATE", "DOCK", "STATION"):
-                continue
+                return None
             my_eta = my_costs.get(node_id, _INF)
             if my_eta >= _INF:
-                continue
+                return None
             if my_eta + GUARD_INTERCEPT_LEAD > opp_elapsed:
-                continue
+                return None
             if not self._can_spend_guard_time(state, node_id, 0, my_eta):
-                continue
-            candidate = (-opp_elapsed, opp_elapsed - my_eta, -my_eta, node_id)
-            if best is None or candidate > best:
-                best = candidate
-        if best is None:
-            return None
-        _, _, neg_my_eta, target = best
-        target_index = opp_path.index(target)
-        if state.opponent.next_node_id == target and target_index == 1:
-            opp_eta = safety.remaining_edge_frames(state, state.opponent)
-        else:
-            opp_eta = self._path_prefix_frames(
-                state, opp_path[:target_index + 1], OPPONENT_FAST_MOVE_PER_FRAME)
-        return target, -neg_my_eta, opp_eta, opp_path
+                return None
+            return node_id, my_eta, opp_elapsed, opp_path
+        return None
 
     def _opponent_has_just_left_previous_stop(
+            self, state: GameState, cur: str, opp_path: list[str]) -> bool:
+        opp = state.opponent
+        if not opp.next_node_id or cur not in opp_path:
+            return False
+        target_index = opp_path.index(cur)
+        if target_index <= 0:
+            return False
+        if opp.current_node_id != opp_path[target_index - 1]:
+            return False
+        return 0 < opp.edge_progress_ms <= pathing.BASE_MOVE_PER_FRAME
+
+    def _should_hold_guard_ambush(
             self, state: GameState, cur: str, opp_eta: int, opp_path: list[str]) -> bool:
         opp = state.opponent
-        if opp.next_node_id:
-            if cur not in opp_path:
-                return False
-            target_index = opp_path.index(cur)
-            if target_index <= 0:
-                return False
-            if opp.current_node_id != opp_path[target_index - 1]:
-                return False
-            if opp.edge_progress_ms > 0:
-                return opp.edge_progress_ms <= pathing.BASE_MOVE_PER_FRAME
-            return safety.remaining_edge_frames(state, opp) + safety.GUARD_SETUP_FRAMES <= opp_eta
-        wait = max(0, opp_eta - safety.GUARD_SETUP_FRAMES)
-        return wait <= GUARD_WAIT_MAX_FRAMES
+        if opp.next_node_id or cur not in opp_path:
+            return False
+        target_index = opp_path.index(cur)
+        if target_index <= 0 or opp.current_node_id != opp_path[target_index - 1]:
+            return False
+        return max(0, opp_eta - safety.GUARD_SETUP_FRAMES) <= GUARD_WAIT_MAX_FRAMES
 
     def _can_spend_guard_time(
             self, state: GameState, guard_node: str, good_cost: int, travel_to_guard: int) -> bool:
