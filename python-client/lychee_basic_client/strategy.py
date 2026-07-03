@@ -244,16 +244,14 @@ class Strategy:
                 cap = g.get("maxDefense", g.get("initialDefense", 0))
                 if 0 < g.get("defense", 0) <= cap - 2:
                     return [M.squad_reinforce(nid)]
-        # 2) pre-clear obstacles only when NOT already ahead (else save squad for guards)
-        if self._ahead_of(node, opp):
-            return []
+        # 2) clear obstacles on our path -- REQUIRED now that we never FORCED_PASS: the
+        # main car MOVEs through only once a squad has cleared the obstacle. Dispatch to
+        # the nearest uncleared obstacle within reach (clears in parallel as we race).
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         path = self.graph.fastest_path(node, self.gate_node, obstacles=obstacles) or []
         for nid in path[1:]:
             if nid in obstacles and nid not in self._squad_sent:
-                if self.graph.path_frames(node, nid, obstacles=obstacles) > SQUAD_LOOKAHEAD:
-                    break  # too far ahead to bother clearing yet
-                self._squad_sent.add(nid)
+                self._squad_sent.add(nid)   # nearest uncleared obstacle on our path
                 return [M.squad_clear(nid)]
         return []
 
@@ -297,9 +295,10 @@ class Strategy:
         if not nxt:
             return []
         if nodes_by_id.get(nxt, {}).get("hasObstacle") or nxt in self._guard_blocked:
-            # FORCED_PASS a pure obstacle opens no window (safe); CLEAR dead-locked
-            # on this server. Obstacle-avoiding routing keeps us off chained obstacles.
-            return [M.forced_pass(nxt)]
+            # NO FORCED_PASS anymore (it chained into FORCED_PASS_REPEAT and stalled us).
+            # A squad clears the obstacle in parallel (_squad_action); we just wait a
+            # frame for it, then MOVE straight through.
+            return [M.wait()]
         return [M.move(nxt)]
 
     def _arrive(self, dest, me, phase, nodes_by_id):
