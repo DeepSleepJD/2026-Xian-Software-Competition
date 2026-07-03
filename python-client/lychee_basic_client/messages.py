@@ -113,6 +113,16 @@ def squad_clear(target_node_id: str) -> dict[str, Any]:
     return {"action": "SQUAD_CLEAR", "targetNodeId": target_node_id}
 
 
+def squad_reinforce(target_node_id: str) -> dict[str, Any]:
+    """小分队增援: +2 defense to our own guard, any distance (2 squad members)."""
+    return {"action": "SQUAD_REINFORCE", "targetNodeId": target_node_id}
+
+
+def squad_weaken(target_node_id: str) -> dict[str, Any]:
+    """小分队削卡: -2 defense to an enemy guard, any distance (2 squad members)."""
+    return {"action": "SQUAD_WEAKEN", "targetNodeId": target_node_id}
+
+
 def set_guard(target_node_id: str, extra_good_fruit: int = 0) -> dict[str, Any]:
     """设卡: build a guard on the current node (extra fruit 0-2 raises defense)."""
     return {

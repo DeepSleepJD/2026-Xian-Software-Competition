@@ -179,6 +179,14 @@ class Graph:
             path.append(prev[path[-1]])
         return path[-2]
 
+    def edge_frames(self, a: str, b: str, speed: float = 1.0) -> Optional[int]:
+        """Frames to traverse the edge a->b at the given speed, or None if no edge."""
+        for v, rt, dd in self.adj.get(a, []):
+            if v == b:
+                coef = ROUTE_COST_COEF.get(rt, 1500)
+                return max(1, math.ceil(math.ceil(dd * coef) / (BASE_MOVE_PER_FRAME * speed)))
+        return None
+
     def fastest_path(
         self, src: str, dst: str, avoid: Optional[set] = None,
         obstacles: Optional[set] = None, obstacle_penalty: int = 40,

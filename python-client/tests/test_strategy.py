@@ -53,21 +53,27 @@ class BlockadeTests(unittest.TestCase):
         # heads deeper toward the choke, not idling
         self.assertEqual("MOVE", act[0]["action"])
 
-    def test_guards_a_choke_it_passes_while_opponent_is_behind(self) -> None:
-        s = _line_strategy(gate="S04")  # chokes S02, S03 on the line
-        self.assertIn("S02", s.chokes)
-        me = _me("S02", goodFruit=20)      # standing on a choke
-        opp = _opp("S01")                   # opponent still behind it
+    def test_freezes_when_opponent_commits_onto_the_edge(self) -> None:
+        s = _line_strategy(gate="S04")  # chokes S02, S03; first intercept = S02
+        me = _me("S02", goodFruit=20)   # camped on the intercept choke
+        # opponent has committed onto S01->S02 with the whole edge still ahead
+        opp = _opp("S01", state="MOVING", nextNodeId="S02", edgeProgressPermille=0)
         act = s.decide(_inq(50, me, opp))
-        self.assertEqual("SET_GUARD", act[0]["action"])
-        self.assertEqual("S02", act[0]["targetNodeId"])
+        self.assertIn({"action": "SET_GUARD", "targetNodeId": "S02", "extraGoodFruit": 2}, act)
 
-    def test_does_not_guard_a_choke_opponent_already_passed(self) -> None:
+    def test_waits_on_choke_until_opponent_commits(self) -> None:
         s = _line_strategy(gate="S04")
         me = _me("S02", goodFruit=20)
-        opp = _opp("S03")  # opponent already past S02 -> guarding it is pointless
+        opp = _opp("S01")  # still parked, not committed -> we hold, don't set early
         act = s.decide(_inq(50, me, opp))
-        self.assertNotEqual("SET_GUARD", act[0]["action"])
+        self.assertNotIn("SET_GUARD", [a["action"] for a in act])
+
+    def test_no_freeze_when_opponent_almost_across(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S02", goodFruit=20)
+        # 99% across the edge -> not enough time for the guard to activate
+        opp = _opp("S01", state="MOVING", nextNodeId="S02", edgeProgressPermille=990)
+        self.assertFalse(s._freeze_window_open(opp, "S02"))
 
     def test_must_deliver_overrides_blocking_near_deadline(self) -> None:
         s = _line_strategy(gate="S04")
