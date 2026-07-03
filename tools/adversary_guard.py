@@ -35,6 +35,24 @@ PRIORITY_ADVERSARY_GUARD = 200
 GUARD_EXTRA_GOOD = 2   # KEY_PASS 上 defense = 2 + 2*2 = 6，同我方客户端投料档
 
 
+class DelayedStrategy(Strategy):
+    """前 N 帧压制内层策略（只发心跳）：给陪练晚 N 帧发车。
+
+    我方客户端修掉「半路派小分队掉 1 帧」后与陪练完全同步（同帧到 S02 同帧
+    PROCESS → 5.4.4 镜像互平死锁，双方 0 分）；到站差 1 帧即被规则化解。
+    陪练设卡触发是响应式的（看对手位置），延迟不影响设卡场景复现。
+    """
+
+    def __init__(self, inner: Strategy, delay: int) -> None:
+        self._inner = inner
+        self._delay = delay
+
+    def propose(self, state: GameState) -> list[Intent]:
+        if state.round <= self._delay:
+            return []
+        return self._inner.propose(state)
+
+
 class GuardTargetPicker:
     """设伏点选择：覆盖参数 > 对手最短路上第一个 KEY_PASS > 第一个中途咽喉。"""
 
@@ -180,6 +198,7 @@ def main(argv: list[str]) -> int:
     # 默认 1：忠实复现现网「单卡风化」死局。8 支小分队只够削一个 6 防守卫
     # （削 1 次耗 2 支降 2 防），默认 2 会把修好的客户端也逼进无解局
     parser.add_argument("--max-guards", type=int, default=1)
+    parser.add_argument("--depart-delay", type=int, default=1)
     args = parser.parse_args(argv)
 
     picker = GuardTargetPicker(args.guard_node)
@@ -190,8 +209,9 @@ def main(argv: list[str]) -> int:
             player_id=args.player_id,
             player_name="guard-adversary",
             version=VERSION,
-            strategies=[GuardSetter(picker, args.max_guards), ObstacleClearer(picker),
-                        CamperDelivery(picker)],
+            strategies=[DelayedStrategy(s, args.depart_delay)
+                        for s in (GuardSetter(picker, args.max_guards), ObstacleClearer(picker),
+                                  CamperDelivery(picker))],
             recorder=Recorder.from_env(args.player_id),
         )
         return runtime.run()

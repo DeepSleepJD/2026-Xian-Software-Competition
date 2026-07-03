@@ -112,7 +112,7 @@ class Runtime:
                     _log(f"round={self._state.round} 策略计算超预算，跳过剩余策略发已得意图")
                     break
                 intents.extend(strategy.propose(self._state) or [])
-            return arbiter.merge_intents(intents)
+            return arbiter.merge_intents(intents, self._state.me)
         except Exception:
             _log(f"round={self._state.round} 策略异常（已兜底空心跳）:\n{traceback.format_exc()}")
             return []

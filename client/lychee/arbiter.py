@@ -25,7 +25,7 @@ def _category(action: dict) -> str:
     return "main"
 
 
-def merge_intents(intents: list[Intent]) -> list[dict]:
+def merge_intents(intents: list[Intent], me=None) -> list[dict]:
     ordered = sorted(intents, key=lambda it: it.priority, reverse=True)
     taken: set[str] = set()
     actions: list[dict] = []
@@ -36,4 +36,21 @@ def merge_intents(intents: list[Intent]) -> list[dict]:
                 continue
             taken.add(cat)
             actions.append(action)
+    escort = _escort_move(taken, me)
+    if escort is not None:
+        actions.insert(0, escort)
     return actions
+
+
+def _escort_move(taken: set[str], me) -> dict | None:
+    """半路派小分队若不同帧捆绑 MOVE(nextNodeId)，服务器会让主车队停走 1 帧。
+
+    未文档化服务器行为（2026-07-03 日志实证）：边上单发 SQUAD_* 187/187 掉 1 tick，
+    捆绑 [MOVE, SQUAD_*] 5/5 进度连续；主+小分队同帧各 1 个合法（协议第 8 章）。
+    仅 state=MOVING 时护航：WAITING/PAUSED（守卡拦停）下 MOVE 会被拒，不添乱。
+    """
+    if me is None or "squad" not in taken or "main" in taken:
+        return None
+    if getattr(me, "state", "") != "MOVING" or not getattr(me, "next_node_id", ""):
+        return None
+    return {"action": "MOVE", "targetNodeId": me.next_node_id}

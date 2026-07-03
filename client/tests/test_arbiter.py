@@ -3,11 +3,17 @@
 import unittest
 
 from lychee.arbiter import merge_intents
+from lychee.state import PlayerState
 from lychee.strategy import Intent
 
 
 def move(target: str) -> dict:
     return {"action": "MOVE", "targetNodeId": target}
+
+
+def moving_me(state: str = "MOVING", next_node: str = "S02") -> PlayerState:
+    return PlayerState(player_id=1001, state=state, current_node_id="S01",
+                       next_node_id=next_node)
 
 
 class ArbiterTests(unittest.TestCase):
@@ -50,6 +56,46 @@ class ArbiterTests(unittest.TestCase):
 
     def test_empty_intents_yield_heartbeat(self) -> None:
         self.assertEqual([], merge_intents([]))
+
+
+class EscortMoveTests(unittest.TestCase):
+    """半路派小分队捆绑 MOVE（未文档化暂停行为的规避，见 arbiter._escort_move）。"""
+
+    SQUAD = {"action": "SQUAD_SCOUT", "targetNodeId": "S07"}
+
+    def test_squad_mid_edge_gets_escort_move_first(self) -> None:
+        actions = merge_intents([Intent(kind="c", priority=1, actions=[dict(self.SQUAD)])],
+                                me=moving_me())
+        self.assertEqual([move("S02"), self.SQUAD], actions)
+
+    def test_squad_at_node_unchanged(self) -> None:
+        me = moving_me(state="IDLE", next_node="")
+        actions = merge_intents([Intent(kind="c", priority=1, actions=[dict(self.SQUAD)])], me=me)
+        self.assertEqual([self.SQUAD], actions)
+
+    def test_squad_while_guard_paused_unchanged(self) -> None:
+        # 守卡拦停：state=WAITING + nextNodeId 保留，此时 MOVE 会被拒，不护航
+        me = moving_me(state="WAITING")
+        actions = merge_intents([Intent(kind="c", priority=1, actions=[dict(self.SQUAD)])], me=me)
+        self.assertEqual([self.SQUAD], actions)
+
+    def test_existing_main_action_blocks_escort(self) -> None:
+        # 主车队类别已占（同帧限 1）：不能再塞 MOVE，宁可吃 1 帧暂停也不非法冲突
+        intents = [
+            Intent(kind="a", priority=2, actions=[{"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}]),
+            Intent(kind="c", priority=1, actions=[dict(self.SQUAD)]),
+        ]
+        actions = merge_intents(intents, me=moving_me())
+        self.assertEqual(2, len(actions))
+        self.assertNotIn("MOVE", [a["action"] for a in actions])
+
+    def test_no_squad_no_escort_heartbeat_kept(self) -> None:
+        # 无小分队动作的空帧维持空心跳，不学对手每帧重发 MOVE
+        self.assertEqual([], merge_intents([], me=moving_me()))
+
+    def test_no_me_backward_compatible(self) -> None:
+        actions = merge_intents([Intent(kind="c", priority=1, actions=[dict(self.SQUAD)])])
+        self.assertEqual([self.SQUAD], actions)
 
 
 if __name__ == "__main__":
