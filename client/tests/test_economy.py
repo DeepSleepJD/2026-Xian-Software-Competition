@@ -4,6 +4,10 @@
     A(起点) → B(TRANSFER处理2帧) → C(宫门,VERIFY) → D(终点)
                 └—— E（岔路，无处理）
 全部 ROAD 双向，主线边 distance=2（3帧/边），B—E distance=4（6帧）。
+
+注意：基础图里 E 是死胡同支线——回头路铁律（2026-07-03）下 E 上的普通候选
+一律出局。需要"值得绕路去做"的场景改用 loop_start()（补 E—C 边成前进环路，
+去程 B—E 回程 E—C 不共边，不算回头路）。
 """
 
 import unittest
@@ -46,6 +50,21 @@ START = {
         "taskCandidates": {"T01": ["A", "B", "E"], "T04": ["E"]},
     }},
 }
+
+
+def loop_start(match_id: str, *, branch_route: str = "ROAD",
+               branch_distance: int = 4, exit_route: str = "ROAD",
+               exit_distance: int = 2) -> dict:
+    """E 变成前进环路（B→E→C）的地图变体：E 候选不再是死胡同回头路。"""
+    return {**START, "matchId": match_id,
+            "edges": [dict(e) for e in START["edges"][:3]] + [
+                {"edgeId": "E4", "fromNodeId": "B", "toNodeId": "E",
+                 "routeType": branch_route, "distance": branch_distance,
+                 "bidirectional": True},
+                {"edgeId": "E5", "fromNodeId": "E", "toNodeId": "C",
+                 "routeType": exit_route, "distance": exit_distance,
+                 "bidirectional": True},
+            ]}
 
 
 def task(task_id: str, node: str, *, score: int = 30, proc: int = 3, expire: int = 500,
@@ -199,9 +218,34 @@ class EconomyTaskTests(unittest.TestCase):
         acts = self.acts(inquire(2, node="B", tasks=[task("T_e", "E"), task("T_b", "B")]))
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_b"}], acts)
 
+    def test_backtrack_task_behind_is_never_chased(self) -> None:
+        # 回头路铁律：已推进到 B，身后 A 冒出高分任务也不回头
+        # （B→A 与 A→…→D 回程共用 A—B 边 = 必须原路折返）
+        acts = self.acts(inquire(2, node="B", tasks=[task("T_back", "A", score=50)],
+                                 action_results=[{"round": 1, "playerId": MY_ID,
+                                                  "action": "PROCESS", "accepted": True}]))
+        self.assertNotIn("MOVE", [a["action"] for a in acts])
+        self.assertNotIn("CLAIM_TASK", [a["action"] for a in acts])
+
+    def test_backtrack_dead_end_branch_task_is_never_chased(self) -> None:
+        # 死胡同支线 E（唯一通路 B—E 必然原路折返）：任务再香也不去
+        acts = self.acts(inquire(2, node="B", tasks=[task("T_e", "E", score=50)],
+                                 action_results=[{"round": 1, "playerId": MY_ID,
+                                                  "action": "PROCESS", "accepted": True}]))
+        self.assertEqual([], acts)
+
+    def test_backtrack_dead_end_ice_not_chased_even_at_zero_stock(self) -> None:
+        # 0 冰加成/慢边豁免都不豁免回头路：死胡同上的冰鉴一样放弃
+        nodes = [{"nodeId": "E", "resourceStock": {"ICE_BOX": 1}}]
+        acts = self.acts(inquire(2, node="B", nodes=nodes, task_score=TASK_SCORE_GOAL,
+                                 action_results=[{"round": 1, "playerId": MY_ID,
+                                                  "action": "PROCESS", "accepted": True}]))
+        self.assertEqual([], acts)
+
     def test_detours_for_task_when_worth(self) -> None:
-        # 只有 E 有任务：值得绕路去（任务 30 分 vs 12 帧绕路）。
+        # 前进环路上的 E 有任务：值得绕路去（任务 30 分 vs 若干帧绕路）。
         # 第 1 帧到站 B 固定处理未完成先静默，处理受理后恢复赶路
+        self._restart(loop_start("loop-detour-test"))
         self.assertEqual([], self.step(inquire(1, node="B", tasks=[task("T_e", "E")])))
         acts = self.acts(inquire(2, node="B", tasks=[task("T_e", "E")],
                                  action_results=[{"round": 1, "playerId": MY_ID,
@@ -211,6 +255,7 @@ class EconomyTaskTests(unittest.TestCase):
     def test_small_task_secured_then_far_task_chased(self) -> None:
         # 一步前瞻：脚下 15 分先落袋（读条仅 3 帧），随后仍去追绕路的 30 分。
         # （单步比值制会因小任务性价比高而永远放弃大任务，实测漏掉 90 里程碑）
+        self._restart(loop_start("loop-lookahead-test"))
         t = [task("T_here", "A", score=15), task("T_far", "E", score=30)]
         acts = self.acts(inquire(1, node="A", tasks=t))
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_here"}], acts)
@@ -226,22 +271,17 @@ class EconomyTaskTests(unittest.TestCase):
 
     def test_mountain_walk_task_excluded(self) -> None:
         # 慢边禁令（P4e）：去 E 要走 MOUNTAIN 边且它不在交付路径上 → 任务出局，
-        # 不再为它赶路（现网败局的 S08 山路绕行即此模式）
-        slow = {**START, "matchId": "slow-test",
-                "edges": [dict(e) for e in START["edges"]]}
-        slow["edges"][3] = {"edgeId": "E4", "fromNodeId": "B", "toNodeId": "E",
-                            "routeType": "MOUNTAIN", "distance": 4, "bidirectional": True}
-        self._restart(slow)
+        # 不再为它赶路（现网败局的 S08 山路绕行即此模式）。
+        # 用前进环路图：E 不是回头路，确保这里挡下它的是慢边禁令本身
+        self._restart(loop_start("slow-test", branch_route="MOUNTAIN",
+                                 exit_route="MOUNTAIN"))
         intents = self.step(inquire(10, node="A", tasks=[task("T_far", "E")]))
         self.assertNotIn("MOVE", [a["action"] for it in intents for a in it.actions])
 
     def test_long_road_detour_task_still_chased(self) -> None:
-        # 大路长绕行不受慢边禁令影响（帧数上限方案会误杀大路任务簇，已否决）
-        far = {**START, "matchId": "far-road-test",
-               "edges": [dict(e) for e in START["edges"]]}
-        far["edges"][3] = {"edgeId": "E4", "fromNodeId": "B", "toNodeId": "E",
-                           "routeType": "ROAD", "distance": 8, "bidirectional": True}
-        self._restart(far)
+        # 大路长绕行不受慢边禁令/回头路铁律影响：前进环路不共边不算折返
+        # （帧数/成本单调式判定会误杀大路任务簇，P4e 归因实验已否决）
+        self._restart(loop_start("far-road-test", branch_distance=8, exit_distance=8))
         acts = self.acts(inquire(10, node="A", tasks=[task("T_far", "E")]))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
 
@@ -270,6 +310,7 @@ class EconomyTaskTests(unittest.TestCase):
 
     def test_waits_for_station_process_before_leaving(self) -> None:
         # 停在固定处理站点 B、处理未完成：不抢 MOVE（让位 delivery 的 PROCESS）
+        self._restart(loop_start("loop-station-gate-test"))
         self.assertEqual([], self.step(inquire(1, node="B", tasks=[task("T_e", "E")])))
         # 观察到处理读条完成后：恢复赶路
         proc = {"action": "PROCESS", "targetNodeId": "B", "remainRound": 1}
@@ -475,23 +516,18 @@ class EconomyIceBoxTests(unittest.TestCase):
         self.assertIn({"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}, acts)
 
     def test_zero_stock_ice_box_exempts_slow_route_filter(self) -> None:
-        slow = {**START, "matchId": "slow-ice-test",
-                "edges": [dict(e) for e in START["edges"]]}
-        slow["edges"][3] = {"edgeId": "E4", "fromNodeId": "B", "toNodeId": "E",
-                            "routeType": "MOUNTAIN", "distance": 4, "bidirectional": True}
+        # 前进环路图（两段都 MOUNTAIN）：0 冰豁免慢边禁令、且不是回头路 → 追
         self.state = GameState(MY_ID)
-        self.state.update_start(slow)
+        self.state.update_start(loop_start("slow-ice-test", branch_route="MOUNTAIN",
+                                           exit_route="MOUNTAIN"))
         nodes = [{"nodeId": "E", "resourceStock": {"ICE_BOX": 1}}]
         acts = self.acts(inquire(1, node="A", nodes=nodes, task_score=TASK_SCORE_GOAL))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
 
     def test_held_ice_box_does_not_exempt_slow_route_filter(self) -> None:
-        slow = {**START, "matchId": "slow-held-ice-test",
-                "edges": [dict(e) for e in START["edges"]]}
-        slow["edges"][3] = {"edgeId": "E4", "fromNodeId": "B", "toNodeId": "E",
-                            "routeType": "MOUNTAIN", "distance": 4, "bidirectional": True}
         self.state = GameState(MY_ID)
-        self.state.update_start(slow)
+        self.state.update_start(loop_start("slow-held-ice-test", branch_route="MOUNTAIN",
+                                           exit_route="MOUNTAIN"))
         nodes = [{"nodeId": "E", "resourceStock": {"ICE_BOX": 1}}]
         acts = self.acts(inquire(1, node="A", nodes=nodes,
                                  resources={"ICE_BOX": 1},
@@ -687,6 +723,9 @@ class EconomyContestTests(unittest.TestCase):
 
     def test_opponent_camped_on_spot_only_discounts(self) -> None:
         # 对手蹲在 E（更近）但没朝向实证（停靠）：打折后净值仍正 → 照追
+        # （前进环路图：E 不是回头路，folded 判定不干扰折扣语义）
+        self.state = GameState(MY_ID)
+        self.state.update_start(loop_start("loop-contest-test"))
         inq = inquire(1, node="A", tasks=[task("T_e", "E")])
         inq["players"].append(opp_player("E"))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], self.acts(inq))

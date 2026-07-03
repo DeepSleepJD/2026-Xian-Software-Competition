@@ -21,6 +21,11 @@
   刷出的可达任务自然会被追到；原地 WAIT 等波只在"恰好刷在脚下"才赢，
   期望值撑不起竞速位移（局 1 白蹲 25 帧输掉 S13 走廊争夺差 18 帧）与
   自冻风险（现网两次自冻事故均源于主动 WAIT 类机制）→ 行军优先
+- 回头路铁律（2026-07-03 用户规矩）：去程与回程共用任何一条边的候选永不追
+  ——身后的任务/资源、死胡同支线都属于"必须原路折返"，一律放弃。注意判定
+  用的是折返（共边）而不是"到终点帧数不得变远"：帧数/成本单调式判定会把
+  平行前进的大路任务簇误杀（P4e 归因实验 774→740 已否决该思路）。
+  唯一豁免：交付路径硬需资源（如宫门 BOAT_RIGHT），不取则无法交付
 """
 
 from math import ceil, floor
@@ -167,7 +172,7 @@ class _Target:
 
     def __init__(self, key: str, value: float, proc_frames: int,
                  claim_nodes: list[str], action: dict, expire_round: int, note: str,
-                 raw_score: int = 0) -> None:
+                 raw_score: int = 0, delivery_critical: bool = False) -> None:
         self.key = key
         self.value = value
         self.proc_frames = proc_frames
@@ -176,6 +181,7 @@ class _Target:
         self.expire_round = expire_round
         self.note = note
         self.raw_score = raw_score      # 任务面值（进 raw 累计）；资源类为 0
+        self.delivery_critical = delivery_critical  # 交付硬需资源：豁免回头路铁律
 
     def marginal_value(self, base_raw: int) -> float:
         """在 raw 累计 base_raw 之上做本目标的真实边际分值。
@@ -343,6 +349,9 @@ class EconomyStrategy(Strategy):
                 path = pathing.shortest_path(state, cur, s)
                 if path and len(path) >= 2 and safety.hold_before_choke(state, path[1]):
                     continue
+                if not cand.delivery_critical and \
+                        self._is_backtrack_trip(state, cur, s, anchor):
+                    continue   # 回头路铁律：去程回程共边（身后/死胡同）永不追
                 if f < to_frames:
                     spot, to_frames = s, f
             if not spot or to_frames >= _INF:
@@ -393,6 +402,9 @@ class EconomyStrategy(Strategy):
                 back2 = from_spot[s2].get(anchor, (0.0, _INF))[1]
                 if done2 + back2 > deadline:
                     continue
+                if not c2.delivery_critical and \
+                        self._is_backtrack_trip(state, spot, s2, anchor):
+                    continue   # 前瞻跟进同样不走回头路
                 cost2 = max(0, to2 + c2.proc_frames + back2 - back)
                 follow = max(follow, (c2.marginal_value(raw + cand.raw_score)
                                       - cost2 * DETOUR_COST_PER_FRAME) * contest[c2.key])
@@ -476,6 +488,32 @@ class EconomyStrategy(Strategy):
         if opp is None or opp.state != "PROCESSING":
             return None
         return opp.current_process
+
+    @staticmethod
+    def _path_edges(state: GameState, path: list[str] | None) -> set[str]:
+        """一条路径经过的边 id 集合（回头路共边判定用）。"""
+        out: set[str] = set()
+        if not path:
+            return out
+        for a, b in zip(path, path[1:]):
+            for nxt, edge in state.neighbors(a):
+                if nxt == b:
+                    out.add(edge.edge_id)
+                    break
+        return out
+
+    def _is_backtrack_trip(self, state: GameState, src: str, spot: str,
+                           anchor: str) -> bool:
+        """回头路判定（2026-07-03 用户铁律）：src→spot 与 spot→anchor 的最短路
+        共用任何一条边 = 这趟必须原路折返（身后目标 / 死胡同支线）→ True。
+        平行前进的环路两程不共边，不算回头路（保住大路任务簇，P4e 教训）。"""
+        if spot == src:
+            return False
+        p1 = pathing.shortest_path(state, src, spot)
+        p2 = pathing.shortest_path(state, spot, anchor)
+        if not p1 or not p2:
+            return True    # 去不了 / 回不来：视同回头路弃掉
+        return bool(self._path_edges(state, p1) & self._path_edges(state, p2))
 
     @staticmethod
     def _path_slow_edges(state: GameState, path: list[str] | None) -> set[str]:
@@ -586,7 +624,8 @@ class EconomyStrategy(Strategy):
                     claim_nodes=[node_id],
                     action={"action": "CLAIM_RESOURCE", "targetNodeId": node_id,
                             "resourceType": resource_type},
-                    expire_round=0, note=f"资源{resource_type}@{node_id}"))
+                    expire_round=0, note=f"资源{resource_type}@{node_id}",
+                    delivery_critical=resource_type in hard_required_resources))
         return out
 
     def _resource_value(self, state: GameState, resource_type: str,

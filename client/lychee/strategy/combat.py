@@ -39,12 +39,9 @@ SCOUT_ETA_MAX = 25
 SCOUT_GATE_ETA_SLACK = 45
 SCOUT_LAND_MARGIN = 2
 SCOUT_PENDING_TIMEOUT = 16
-SQUAD_RESERVE_EARLY = 4        # 开局留两波削卡，剩余人手优先转化为探路收益
-SQUAD_RESERVE_RELAXED = 2      # 150 帧未见设卡后降低对手设卡先验
-SQUAD_RESERVE_GUARDER = 6      # 削穿一张满防卡（防御 6）需 6 支（2 支/次削 2 点）
-SQUAD_RESERVE_FOR_WEAKEN = SQUAD_RESERVE_GUARDER
-SQUAD_RELAX_ROUND = 150
-SQUAD_SPEND_ALL_ROUND = 350
+SQUAD_RESERVE_BEFORE_GATE = 6  # 用户铁律（2026-07-03）：宫门验核前永远留 ≥6 支小分队——
+                               # 削穿一张满防卡（防御 6）需 6 支（2 支/次削 2 防），
+                               # 被终点前设卡钉死比探路省帧致命；验核后设卡威胁消失
 GUARD_GOOD_FLOOR = 90
 GUARD_GOOD_FRAME_COST = 15
 GUARD_MIN_NET_FRAMES = 30
@@ -58,7 +55,6 @@ class CombatStrategy(Strategy):
         self._last_window_cards: dict[str, tuple[int, str, str]] = {}
         self._opponent_card_counts: dict[str, int] = {}
         self._opponent_card_total = 0
-        self._opponent_ever_set_guard = False
         self._economy = economy
 
     def propose(self, state: GameState) -> list[Intent]:
@@ -372,20 +368,8 @@ class CombatStrategy(Strategy):
         return self._opponent_card_counts.get("XIAN_GONG", 0) / self._opponent_card_total >= 0.60
 
     def _read_events(self, state: GameState) -> None:
-        self._observe_opponent_guard(state)
         self._read_scout_events(state)
         self._read_window_card_reveals(state)
-
-    def _observe_opponent_guard(self, state: GameState) -> None:
-        if self._opponent_ever_set_guard:
-            return
-        my_team = state.my_team_id or state.me.team_id
-        for ns in state.node_states.values():
-            guard = ns.guard
-            if guard and guard.owner_team_id and guard.owner_team_id != my_team \
-                    and (guard.active or guard.defense > 0):
-                self._opponent_ever_set_guard = True
-                return
 
     def _read_scout_events(self, state: GameState) -> None:
         for node_id, expire in list(self._scout_markers.items()):
@@ -441,14 +425,11 @@ class CombatStrategy(Strategy):
         dispatch_round = self._scout_pending.get(node_id)
         return dispatch_round is not None and dispatch_round + SCOUT_PENDING_TIMEOUT >= state.round
 
-    def _squad_reserve(self, state: GameState) -> int:
-        if self._opponent_ever_set_guard:
-            return SQUAD_RESERVE_GUARDER
-        if state.round >= SQUAD_SPEND_ALL_ROUND:
-            return 0
-        if state.round >= SQUAD_RELAX_ROUND:
-            return SQUAD_RESERVE_RELAXED
-        return SQUAD_RESERVE_EARLY
+    @staticmethod
+    def _squad_reserve(state: GameState) -> int:
+        if not state.me.verified:
+            return SQUAD_RESERVE_BEFORE_GATE
+        return 0
 
     @staticmethod
     def _squad_delay(state: GameState, cur: str, target: str) -> int:

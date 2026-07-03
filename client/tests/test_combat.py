@@ -7,8 +7,7 @@ from lychee.state import GameState
 from lychee.strategy import Intent
 from lychee.strategy.combat import (
     CombatStrategy, PRIORITY_COMBAT_MAIN, PRIORITY_SET_GUARD, PRIORITY_SQUAD_SCOUT,
-    SCOUT_PENDING_TIMEOUT, SQUAD_RESERVE_EARLY, SQUAD_RESERVE_GUARDER,
-    SQUAD_RESERVE_RELAXED,
+    SCOUT_PENDING_TIMEOUT, SQUAD_RESERVE_BEFORE_GATE,
 )
 
 MY_ID = 1001
@@ -43,7 +42,7 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
             resources: dict | None = None, events: list | None = None,
             buffs: list | None = None, tasks: list | None = None,
             task_score: int = 0, total_score: int = 0,
-            opp_total_score: int = 0) -> dict:
+            opp_total_score: int = 0, verified: bool = False) -> dict:
     return {
         "round": round_no,
         "phase": phase,
@@ -53,7 +52,7 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
                      "goodFruit": good, "badFruit": bad,
                      "freshness": freshness, "guardActionPoint": guard_points,
                      "squadAvailable": squad_available,
-                     "squadInFlight": squad_in_flight,
+                     "squadInFlight": squad_in_flight, "verified": verified,
                      "resources": resources or {}, "buffs": buffs or [],
                      "taskScore": task_score, "totalScore": total_score},
                     {"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
@@ -548,41 +547,28 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(10 + SCOUT_PENDING_TIMEOUT + 1, node="A", opp_node="C"))
         self.assertIn("SQUAD_SCOUT", [a["action"] for a in acts])
 
-    def test_squad_reserve_curve_relaxes_and_spends_down(self) -> None:
+    def test_squad_reserve_holds_six_until_gate_verified(self) -> None:
         self.state = GameState(MY_ID)
         self.state.update_start(SCOUT_START)
         self.strategy = CombatStrategy()
         self.state.update_inquire(inquire(100, node="A", opp_node="C"))
-        self.assertEqual(SQUAD_RESERVE_EARLY, self.strategy._squad_reserve(self.state))
-        self.state.update_inquire(inquire(200, node="A", opp_node="C"))
-        self.assertEqual(SQUAD_RESERVE_RELAXED, self.strategy._squad_reserve(self.state))
+        self.assertEqual(SQUAD_RESERVE_BEFORE_GATE, self.strategy._squad_reserve(self.state))
         self.state.update_inquire(inquire(360, node="A", opp_node="C"))
+        self.assertEqual(SQUAD_RESERVE_BEFORE_GATE, self.strategy._squad_reserve(self.state))
+        self.state.update_inquire(inquire(360, node="A", opp_node="C", verified=True))
         self.assertEqual(0, self.strategy._squad_reserve(self.state))
 
-    def test_squad_reserve_sticks_to_guarder_after_enemy_guard_seen(self) -> None:
+    def test_squad_scout_never_dips_below_gate_reserve(self) -> None:
         self.state = GameState(MY_ID)
         self.state.update_start(SCOUT_START)
         self.strategy = CombatStrategy()
-        nodes = [{"nodeId": "B", "guard": {"active": True, "ownerTeamId": "BLUE",
-                                            "defense": 6, "initialDefense": 6}}]
-        self.actions(inquire(100, node="A", nodes=nodes, opp_node="C"))
-        self.state.update_inquire(inquire(360, node="A", opp_node="C"))
-        self.assertEqual(SQUAD_RESERVE_GUARDER, self.strategy._squad_reserve(self.state))
-
-    def test_squad_scout_reserves_adaptive_budget(self) -> None:
-        self.state = GameState(MY_ID)
-        self.state.update_start(SCOUT_START)
-        self.strategy = CombatStrategy()
-        acts = self.actions(inquire(100, node="A", squad_available=4, opp_node="C"))
+        acts = self.actions(inquire(100, node="A", squad_available=6, opp_node="C"))
         self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
         self.strategy = CombatStrategy()
-        acts = self.actions(inquire(100, node="A", squad_available=5, opp_node="C"))
-        self.assertIn("SQUAD_SCOUT", [a["action"] for a in acts])
+        acts = self.actions(inquire(360, node="A", squad_available=5, opp_node="C"))
+        self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
         self.strategy = CombatStrategy()
-        acts = self.actions(inquire(200, node="A", squad_available=3, opp_node="C"))
-        self.assertIn("SQUAD_SCOUT", [a["action"] for a in acts])
-        self.strategy = CombatStrategy()
-        acts = self.actions(inquire(360, node="A", squad_available=1, opp_node="C"))
+        acts = self.actions(inquire(100, node="A", squad_available=7, opp_node="C"))
         self.assertIn("SQUAD_SCOUT", [a["action"] for a in acts])
 
     def test_squad_scout_guarder_reserve_covers_full_weaken(self) -> None:
