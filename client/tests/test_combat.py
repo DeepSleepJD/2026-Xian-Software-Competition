@@ -38,7 +38,10 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
             nodes: list | None = None, phase: str = "NORMAL",
             next_node: str = "", move_dir: str = "", squad_available: int = 8,
             squad_in_flight: int = 0, opp_node: str = "S10",
-            resources: dict | None = None, events: list | None = None) -> dict:
+            resources: dict | None = None, events: list | None = None,
+            buffs: list | None = None, tasks: list | None = None,
+            task_score: int = 0, total_score: int = 0,
+            opp_total_score: int = 0) -> dict:
     return {
         "round": round_no,
         "phase": phase,
@@ -49,12 +52,14 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
                      "freshness": freshness, "guardActionPoint": guard_points,
                      "squadAvailable": squad_available,
                      "squadInFlight": squad_in_flight,
-                     "resources": resources or {}},
+                     "resources": resources or {}, "buffs": buffs or [],
+                     "taskScore": task_score, "totalScore": total_score},
                     {"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
-                     "currentNodeId": opp_node}],
+                     "currentNodeId": opp_node, "totalScore": opp_total_score}],
         "nodes": nodes or [],
         "contests": contests or [],
         "events": events or [],
+        "tasks": tasks or [],
     }
 
 
@@ -66,6 +71,14 @@ def guard_s10(defense: int = 6) -> list[dict]:
 
 def obstacle_s10() -> list[dict]:
     return [{"nodeId": "S10", "hasObstacle": True, "obstacleType": "LANDSLIDE"}]
+
+
+def task(task_id: str, node: str, *, score: int = 30) -> dict:
+    return {"taskId": task_id, "taskTemplateId": "T01", "nodeId": node,
+            "processType": "PASS_NODE", "processRound": 3, "score": score,
+            "refreshRound": 1, "expireRound": 500, "active": True,
+            "completed": False, "failed": False,
+            "ownerPlayerId": 0, "protectionPlayerId": 0}
 
 
 def friendly_guard(node_id: str) -> dict:
@@ -176,6 +189,11 @@ class CombatStrategyTests(unittest.TestCase):
 
     def test_does_not_set_guard_when_not_ahead(self) -> None:
         acts = self.actions(inquire(200, node="S10", opp_node="S10"))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
+
+    def test_does_not_set_guard_when_strictly_ahead_on_score(self) -> None:
+        acts = self.actions(inquire(200, node="S10", opp_node="S09",
+                                    total_score=10, opp_total_score=0))
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 
     def test_does_not_set_guard_when_two_friendly_guards_active(self) -> None:
@@ -302,6 +320,32 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(44, contests=contests))
         self.assertNotIn("WINDOW_CARD", [a["action"] for a in acts])
 
+    def test_task_window_uses_marginal_task_value(self) -> None:
+        contests = [{"contestId": "C1", "contestType": "TASK", "taskId": "T_x",
+                     "targetNodeId": "S08", "redPlayerId": MY_ID,
+                     "bluePlayerId": OPP_ID}]
+        acts = self.actions(inquire(44, contests=contests,
+                                    tasks=[task("T_x", "S08")]))
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
+
+    def test_task_window_abstains_when_task_score_capped(self) -> None:
+        contests = [{"contestId": "C1", "contestType": "TASK", "taskId": "T_x",
+                     "targetNodeId": "S08", "redPlayerId": MY_ID,
+                     "bluePlayerId": OPP_ID}]
+        acts = self.actions(inquire(44, contests=contests,
+                                    tasks=[task("T_x", "S08")], task_score=130))
+        self.assertNotIn("WINDOW_CARD", [a["action"] for a in acts])
+
+    def test_resource_window_uses_resource_value_and_cap(self) -> None:
+        contests = [{"contestId": "C1", "contestType": "RESOURCE",
+                     "resourceType": "ICE_BOX", "redPlayerId": MY_ID,
+                     "bluePlayerId": OPP_ID}]
+        acts = self.actions(inquire(44, contests=contests))
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
+
+        acts = self.actions(inquire(45, contests=contests, resources={"ICE_BOX": 2}))
+        self.assertNotIn("WINDOW_CARD", [a["action"] for a in acts])
+
     def test_plays_yan_die_from_document_resource_without_use_resource(self) -> None:
         contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",
                      "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
@@ -329,6 +373,77 @@ class CombatStrategyTests(unittest.TestCase):
         ]
         acts = self.actions(inquire(44, contests=contests, events=reveals))
         self.assertIn({"action": "WINDOW_CARD", "contestId": "C3", "card": "XIAN_GONG"}, acts)
+
+    def test_mirror_same_card_high_id_switches_to_counter(self) -> None:
+        contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",
+                     "roundIndex": 2, "redPlayerId": 999, "bluePlayerId": MY_ID}]
+        reveals = [{"eventId": "R1", "type": "WINDOW_CARD_REVEAL", "round": 40,
+                    "payload": {"contestId": "C1", "roundIndex": 1,
+                                "redCard": "BING_ZHENG", "blueCard": "BING_ZHENG"}}]
+        acts = self.actions(inquire(44, contests=contests, events=reveals))
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "XIAN_GONG"}, acts)
+
+    def test_mirror_same_card_low_id_repeats_original(self) -> None:
+        contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",
+                     "roundIndex": 2, "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
+        reveals = [{"eventId": "R1", "type": "WINDOW_CARD_REVEAL", "round": 40,
+                    "payload": {"contestId": "C1", "roundIndex": 1,
+                                "redCard": "BING_ZHENG", "blueCard": "BING_ZHENG"}}]
+        acts = self.actions(inquire(44, contests=contests, events=reveals))
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
+
+    def test_no_mirror_reveal_keeps_default_choice(self) -> None:
+        contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",
+                     "roundIndex": 2, "redPlayerId": 999, "bluePlayerId": MY_ID}]
+        acts = self.actions(inquire(44, contests=contests))
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
+
+    def test_free_qiang_xing_is_played_when_other_cards_unavailable(self) -> None:
+        contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",
+                     "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
+        acts = self.actions(inquire(44, contests=contests, good=0, freshness=70.0,
+                                    guard_points=0,
+                                    buffs=[{"type": "FAST_HORSE", "remainingRound": 3}]))
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "QIANG_XING"}, acts)
+
+    def test_plays_qiang_xing_against_xian_gong_tendency(self) -> None:
+        contests = [{"contestId": "C3", "contestType": "PASS", "targetNodeId": "S10",
+                     "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
+        reveals = [
+            {"eventId": "R1", "type": "WINDOW_CARD_REVEAL", "round": 40,
+             "payload": {"contestId": "C1", "roundIndex": 1,
+                         "redCard": "BING_ZHENG", "blueCard": "XIAN_GONG"}},
+            {"eventId": "R2", "type": "WINDOW_CARD_REVEAL", "round": 41,
+             "payload": {"contestId": "C2", "roundIndex": 1,
+                         "redCard": "BING_ZHENG", "blueCard": "XIAN_GONG"}},
+        ]
+        acts = self.actions(inquire(44, contests=contests, events=reveals,
+                                    resources={"FAST_HORSE": 1}))
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C3", "card": "QIANG_XING"}, acts)
+
+    def test_qiang_xing_needs_buff_or_horse(self) -> None:
+        contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",
+                     "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
+        acts = self.actions(inquire(44, contests=contests, good=0, freshness=70.0,
+                                    guard_points=0))
+        self.assertNotIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "QIANG_XING"},
+                         acts)
+
+    def test_xian_gong_keeps_one_good_fruit_floor(self) -> None:
+        contests = [{"contestId": "C3", "contestType": "PASS", "targetNodeId": "S10",
+                     "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
+        reveals = [
+            {"eventId": "R1", "type": "WINDOW_CARD_REVEAL", "round": 40,
+             "payload": {"contestId": "C1", "roundIndex": 1,
+                         "redCard": "YAN_DIE", "blueCard": "BING_ZHENG"}},
+            {"eventId": "R2", "type": "WINDOW_CARD_REVEAL", "round": 41,
+             "payload": {"contestId": "C2", "roundIndex": 1,
+                         "redCard": "YAN_DIE", "blueCard": "BING_ZHENG"}},
+        ]
+        acts = self.actions(inquire(44, contests=contests, events=reveals,
+                                    good=1, guard_points=0))
+        self.assertNotIn({"action": "WINDOW_CARD", "contestId": "C3", "card": "XIAN_GONG"},
+                         acts)
 
     def test_squad_scouts_upcoming_process_node(self) -> None:
         self.state = GameState(MY_ID)

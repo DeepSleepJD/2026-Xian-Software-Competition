@@ -11,6 +11,7 @@ from math import ceil
 from .. import pathing
 from ..state import Contest, GameState
 from . import Intent, Strategy, safety
+from .economy import RESOURCE_BASE_VALUES, RESOURCE_CLAIM_CAPS, _task_points
 
 PRIORITY_COMBAT_MAIN = 130
 # 设卡让位经济动作（P4/07-03 复盘：现网两连败均在咽喉先 SET_GUARD 再抢任务，
@@ -25,6 +26,14 @@ PRIORITY_WINDOW_CARD = 125
 _STATIONARY_STATES = {"IDLE", "WAITING"}
 _KEY_CONTEST_SCORES = {"GATE": 50, "PASS": 45, "DOCK": 40}
 DOCUMENT_RESOURCES = ("PASS_TOKEN", "OFFICIAL_PERMIT")
+HORSE_RESOURCES = ("FAST_HORSE", "SHORT_HORSE")
+FREE_QIANG_XING_BUFFS = frozenset({"FAST_HORSE", "SHORT_HORSE", "RUSH_SPEED"})
+CARD_COUNTERS = {
+    "YAN_DIE": ("BING_ZHENG", "XIAN_GONG"),
+    "QIANG_XING": ("BING_ZHENG", "YAN_DIE"),
+    "XIAN_GONG": ("QIANG_XING",),
+    "BING_ZHENG": ("XIAN_GONG",),
+}
 SCOUT_MIN_PROC_FRAMES = 4
 SCOUT_ETA_MAX = 40
 SCOUT_PENDING_TIMEOUT = 8
@@ -39,6 +48,7 @@ class CombatStrategy(Strategy):
         self._scout_markers: dict[str, int] = {}
         self._scout_pending: dict[str, int] = {}
         self._seen_window_reveals: set[str] = set()
+        self._last_window_cards: dict[str, tuple[int, str, str]] = {}
         self._opponent_card_counts: dict[str, int] = {}
         self._opponent_card_total = 0
 
@@ -170,6 +180,8 @@ class CombatStrategy(Strategy):
             return None
         if me.current_process is not None or me.state != "IDLE":
             return None
+        if me.total_score > state.opponent.total_score:
+            return None     # 压低悬赏喂分概率：严格领先时不主动造可攻破悬赏
         cur = me.current_node_id
         if not cur or self._is_terminal(state, cur) or self._has_active_guard(state, cur):
             return None
@@ -249,14 +261,43 @@ class CombatStrategy(Strategy):
         return [{"action": "WINDOW_CARD", "contestId": contest.contest_id, "card": card}]
 
     def _choose_window_card(self, state: GameState, contest: Contest) -> str:
-        if self._opponent_bing_zheng_tendency():
+        if self._opponent_xian_gong_tendency():
+            order = ("QIANG_XING", "XIAN_GONG", "BING_ZHENG")
+            default = self._first_playable_card(state, contest, order)
+        elif self._opponent_bing_zheng_tendency():
             order = ("XIAN_GONG", "BING_ZHENG", "YAN_DIE")
+            default = self._first_playable_card(state, contest, order)
         else:
             order = ("BING_ZHENG", "YAN_DIE", "XIAN_GONG")
+            default = self._first_playable_card(state, contest, order)
+            if default == "ABSTAIN" and self._can_play_free_qiang_xing(state):
+                default = "QIANG_XING"
+        return self._mirror_break_card(state, contest, default)
+
+    def _first_playable_card(self, state: GameState, contest: Contest,
+                             order: tuple[str, ...]) -> str:
         for card in order:
             if self._can_play_card(state, contest, card):
                 return card
         return "ABSTAIN"
+
+    def _mirror_break_card(self, state: GameState, contest: Contest, default: str) -> str:
+        reveal = self._last_window_cards.get(contest.contest_id)
+        if reveal is None:
+            return default
+        round_index, red_card, blue_card = reveal
+        if not contest.round_index or round_index != contest.round_index - 1:
+            return default
+        if not red_card or red_card != blue_card:
+            return default
+        same_card = red_card
+        switcher = state.player_id == max(contest.red_player_id, contest.blue_player_id)
+        if not switcher:
+            return same_card if self._can_play_card(state, contest, same_card) else default
+        for card in CARD_COUNTERS.get(same_card, ()):
+            if self._can_play_card(state, contest, card):
+                return card
+        return default
 
     def _can_play_card(self, state: GameState, contest: Contest, card: str) -> bool:
         if card == "BING_ZHENG":
@@ -265,8 +306,20 @@ class CombatStrategy(Strategy):
         if card == "YAN_DIE":
             return self._document_resource_count(state) >= 1
         if card == "XIAN_GONG":
-            return state.me.freshness >= 80 and state.my_good > 0
+            return state.me.freshness >= 80 and state.my_good > 1
+        if card == "QIANG_XING":
+            if self._can_play_free_qiang_xing(state):
+                return True
+            if self._contest_score(state, contest) < 20:
+                return False
+            return any(state.me.resources.get(resource_type, 0) > 0
+                       for resource_type in HORSE_RESOURCES)
         return False
+
+    @staticmethod
+    def _can_play_free_qiang_xing(state: GameState) -> bool:
+        return any(b.type in FREE_QIANG_XING_BUFFS and b.remaining_round > 0
+                   for b in state.me.buffs)
 
     @staticmethod
     def _document_resource_count(state: GameState) -> int:
@@ -276,6 +329,11 @@ class CombatStrategy(Strategy):
         if self._opponent_card_total < 2:
             return False
         return self._opponent_card_counts.get("BING_ZHENG", 0) / self._opponent_card_total >= 0.60
+
+    def _opponent_xian_gong_tendency(self) -> bool:
+        if self._opponent_card_total < 2:
+            return False
+        return self._opponent_card_counts.get("XIAN_GONG", 0) / self._opponent_card_total >= 0.60
 
     def _read_events(self, state: GameState) -> None:
         self._read_scout_events(state)
@@ -308,6 +366,8 @@ class CombatStrategy(Strategy):
             if key in self._seen_window_reveals:
                 continue
             self._seen_window_reveals.add(key)
+            self._last_window_cards[reveal.contest_id] = (
+                reveal.round_index, reveal.red_card, reveal.blue_card)
             card = reveal.blue_card if my_team == "RED" else reveal.red_card
             if not card:
                 continue
@@ -356,15 +416,38 @@ class CombatStrategy(Strategy):
 
         return frames
 
-    def _contest_score(self, state: GameState, contest: Contest) -> int:
-        score = _KEY_CONTEST_SCORES.get(contest.contest_type, 0)
+    def _contest_score(self, state: GameState, contest: Contest) -> float:
+        score = float(_KEY_CONTEST_SCORES.get(contest.contest_type, 0))
+        if contest.contest_type == "TASK":
+            score = max(score, self._task_contest_score(state, contest.task_id))
+        elif contest.contest_type == "RESOURCE":
+            score = max(score, self._resource_contest_score(state, contest.resource_type))
         target = contest.target_node_id
         path = self._terminal_path(state, state.me.current_node_id)
-        if target and path and target in path:
+        if contest.contest_type not in ("TASK", "RESOURCE") and target and path and target in path:
             score = max(score, 30)
             if len(path) >= 2 and target == path[1]:
                 score += 10
         return score
+
+    @staticmethod
+    def _task_contest_score(state: GameState, task_id: str) -> float:
+        if not task_id:
+            return 0.0
+        task = next((t for t in state.tasks if t.task_id == task_id), None)
+        if task is None:
+            return 0.0
+        raw = state.me.task_score
+        return float(_task_points(raw + int(task.score)) - _task_points(raw))
+
+    @staticmethod
+    def _resource_contest_score(state: GameState, resource_type: str) -> float:
+        if not resource_type:
+            return 0.0
+        cap = RESOURCE_CLAIM_CAPS.get(resource_type)
+        if cap is not None and state.me.resources.get(resource_type, 0) >= cap:
+            return 0.0
+        return float(RESOURCE_BASE_VALUES.get(resource_type, 1.0))
 
     @staticmethod
     def _is_neighbor(state: GameState, cur: str, target: str) -> bool:

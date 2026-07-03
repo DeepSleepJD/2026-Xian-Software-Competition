@@ -599,7 +599,8 @@ class EconomyStrategy(Strategy):
         if resource_type in hard_required_resources:
             return True
         if resource_type in DOCUMENT_RESOURCES:
-            return bool(state.my_open_contests())
+            opp = state.opponent
+            return bool(opp.player_id and not opp.delivered and not opp.retired)
         if resource_type == "INTEL":
             # CLAIM_RESOURCE itself costs a read bar; INTEL is only worth consuming
             # when already held or hard-required by the map.

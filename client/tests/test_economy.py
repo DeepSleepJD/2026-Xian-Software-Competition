@@ -471,17 +471,28 @@ class EconomyGeneralResourceTests(unittest.TestCase):
                 self.assertEqual([{"action": "CLAIM_RESOURCE", "targetNodeId": "B",
                                    "resourceType": resource_type}], acts)
 
-    def test_document_resource_claim_requires_open_contest(self) -> None:
+    def test_document_resource_claims_with_opponent_present_without_open_contest(self) -> None:
         nodes = [{"nodeId": "B", "resourceStock": {"PASS_TOKEN": 1}}]
-        acts = self.acts(inquire(1, node="B", nodes=nodes, task_score=TASK_SCORE_GOAL))
-        self.assertNotIn("CLAIM_RESOURCE", [a["action"] for a in acts])
-
-        contest = {"contestId": "C1", "contestType": "PASS", "targetNodeId": "B",
-                   "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}
-        acts = self.acts(inquire(2, node="B", nodes=nodes, task_score=TASK_SCORE_GOAL,
-                                 contests=[contest]))
+        inq = inquire(1, node="B", nodes=nodes, task_score=TASK_SCORE_GOAL)
+        inq["players"].append(opp_player("D"))
+        acts = self.acts(inq)
         self.assertEqual([{"action": "CLAIM_RESOURCE", "targetNodeId": "B",
                            "resourceType": "PASS_TOKEN"}], acts)
+
+    def test_document_resource_not_claimed_after_opponent_delivered(self) -> None:
+        nodes = [{"nodeId": "B", "resourceStock": {"PASS_TOKEN": 1}}]
+        inq = inquire(1, node="B", nodes=nodes, task_score=TASK_SCORE_GOAL)
+        inq["players"].append(opp_player("D", delivered=True))
+        acts = self.acts(inq)
+        self.assertNotIn("CLAIM_RESOURCE", [a["action"] for a in acts])
+
+    def test_document_resource_cap_still_applies(self) -> None:
+        nodes = [{"nodeId": "B", "resourceStock": {"PASS_TOKEN": 1}}]
+        inq = inquire(1, node="B", nodes=nodes, task_score=TASK_SCORE_GOAL,
+                      resources={"PASS_TOKEN": 1})
+        inq["players"].append(opp_player("D"))
+        acts = self.acts(inq)
+        self.assertNotIn("CLAIM_RESOURCE", [a["action"] for a in acts])
 
     def test_document_resources_are_not_actively_used(self) -> None:
         acts = self.acts(inquire(1, node="A",
