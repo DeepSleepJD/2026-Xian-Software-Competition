@@ -255,85 +255,16 @@ class EconomyTaskTests(unittest.TestCase):
         acts = self.acts(inquire(10, node="A", tasks=[task("T_gate", "C")]))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
 
-    def test_lingers_when_wave_is_close_and_time_ample(self) -> None:
-        # 无任何候选，但脚下是任务候选节点且下一波临近：WAIT 蹲刷新
-        self.strategy._seen_waves.update({240, 280})
-        intents = self.step(inquire(308, node="A", resources={"ICE_BOX": 2}))
-        self.assertEqual([{"action": "WAIT"}], [a for it in intents for a in it.actions])
-        self.assertEqual(PRIORITY_ECONOMY, intents[0].priority)
+    def test_never_waits_without_candidates(self) -> None:
+        # 蹲守机制已全删（2026-07-03）：无候选时不主动 WAIT，放行 delivery 行军。
+        # 局 1 尸检：S09 白蹲 25 帧输掉 S13 刷新波争夺（差 18 帧）；行军穿走廊
+        # 时波次刷出的可达任务下次停靠自然进候选，站桩等波无期望优势
+        for rnd, node in ((246, "A"), (308, "A"), (473, "A")):
+            self.assertEqual([], self.step(inquire(
+                rnd, node=node, resources={"ICE_BOX": 2})),
+                msg=f"r{rnd}@{node} 不应产生任何提案（更不应 WAIT）")
 
-    def test_no_linger_when_wave_is_far(self) -> None:
-        # P4j 局 1 核心反例：下一波 34 帧外，行军穿走廊优先
-        self.strategy._seen_waves.update({200, 240})
-        self.assertEqual([], self.step(inquire(246, node="A", resources={"ICE_BOX": 2})))
-
-    def test_no_linger_without_wave_samples(self) -> None:
-        self.strategy._seen_waves.add(240)
-        self.assertEqual([], self.step(inquire(246, node="A", resources={"ICE_BOX": 2})))
-
-    def test_no_linger_at_non_candidate_node(self) -> None:
-        self.strategy._seen_waves.update({240, 280})
-        self.assertEqual([], self.step(inquire(308, node="C", resources={"ICE_BOX": 2})))
-
-    def test_linger_when_behind_non_guard_opponent(self) -> None:
-        # P4j 放宽：刷任务型对手没见过设卡，落后时仍可为临近波次蹲守
-        self.strategy._seen_waves.update({240, 280})
-        inq = inquire(308, node="A", resources={"ICE_BOX": 2})
-        inq["players"].append(opp_player("B"))
-        self.assertEqual([{"action": "WAIT"}],
-                         [a for it in self.step(inq) for a in it.actions])
-
-    def test_no_linger_when_behind_guard_opponent(self) -> None:
-        self.strategy._seen_waves.update({240, 280})
-        inq = inquire(308, node="A", resources={"ICE_BOX": 2},
-                      nodes=[seen_enemy_guard()])
-        inq["players"].append(opp_player("B"))
-        self.assertEqual([], self.step(inq))
-
-    def test_lingers_when_opponent_delivered_and_deficit_small(self) -> None:
-        self.strategy._seen_waves.update({400, 440})
-        inq = inquire(473, node="A", resources={"ICE_BOX": 2},
-                      task_score=105, freshness=90.0, good_fruit=99)
-        inq["players"].append(opp_player("D", delivered=True, total_score=750))
-        intents = self.step(inq)
-        self.assertEqual([{"action": "WAIT"}], [a for it in intents for a in it.actions])
-
-    def test_no_linger_when_opponent_delivered_and_we_lead_or_gap_too_large(self) -> None:
-        self.strategy._seen_waves.update({400, 440})
-        lead = inquire(473, node="A", resources={"ICE_BOX": 2},
-                       task_score=105, freshness=90.0, good_fruit=99)
-        lead["players"].append(opp_player("D", delivered=True, total_score=700))
-        self.assertEqual([], self.step(lead))
-
-        self.strategy._seen_waves.update({400, 440})
-        far = inquire(474, node="A", resources={"ICE_BOX": 2},
-                      task_score=105, freshness=90.0, good_fruit=99)
-        far["players"].append(opp_player("D", delivered=True, total_score=800))
-        self.assertEqual([], self.step(far))
-
-    def test_projected_score_matches_endgame_order_of_magnitude(self) -> None:
-        self.state.update_inquire(inquire(473, node="A", task_score=105,
-                                          freshness=90.0, good_fruit=99))
-        self.assertAlmostEqual(732, self.strategy._projected_score(self.state), delta=10)
-
-    def test_next_wave_round_uses_seen_period(self) -> None:
-        self.strategy._seen_waves.update({240, 280})
-        self.state.update_inquire(inquire(308, node="A"))
-        self.assertEqual(320, self.strategy._next_wave_round(self.state))
-        self.state.update_inquire(inquire(321, node="A"))
-        self.assertEqual(360, self.strategy._next_wave_round(self.state))
-
-    def test_next_wave_round_requires_two_samples(self) -> None:
-        self.strategy._seen_waves.add(240)
-        self.state.update_inquire(inquire(246, node="A"))
-        self.assertIsNone(self.strategy._next_wave_round(self.state))
-
-    def test_no_linger_near_deadline(self) -> None:
-        # 现在动身刚好来得及：不再蹲守，放行 delivery
-        self.strategy._seen_waves.update({520, 560})
-        self.assertEqual([], self.step(inquire(555, node="A", resources={"ICE_BOX": 2})))
-
-    def test_no_linger_at_unprocessed_station(self) -> None:
+    def test_no_wait_at_unprocessed_station(self) -> None:
         # 固定处理站点欠处理：不 WAIT（否则饿死 delivery 的 PROCESS）
         self.assertEqual([], self.step(inquire(1, node="B", resources={"ICE_BOX": 2})))
 

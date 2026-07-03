@@ -142,14 +142,6 @@ class TrapGateTests(unittest.TestCase):
         state = self.load(TRAP_START, trap_inquire(100))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
-    def test_opponent_ever_set_guard_accessor_keeps_memory(self) -> None:
-        state = self.load(TRAP_START, trap_inquire(100))
-        self.assertFalse(safety.opponent_ever_set_guard(state))
-        state.update_inquire(trap_inquire(101, nodes=seen_enemy_guard()))
-        self.assertTrue(safety.opponent_ever_set_guard(state))
-        state.update_inquire(trap_inquire(102))
-        self.assertTrue(safety.opponent_ever_set_guard(state))
-
     def test_no_hold_without_opponent_guard_points(self) -> None:
         state = self.load(TRAP_START, trap_inquire(100, opp_ap=0, nodes=seen_enemy_guard()))
         self.assertFalse(safety.hold_before_choke(state, "B"))
@@ -226,7 +218,7 @@ class AheadOfOpponentTests(unittest.TestCase):
         self.assertTrue(safety.ahead_of_opponent(state))
 
     def test_ahead_when_opponent_delivered(self) -> None:
-        # 无在场对手 = 竞速压力不存在，蹲守只受时间账约束
+        # 无在场对手 = 竞速压力不存在，行为只受时间账约束
         state = self.load(trap_inquire(100, me_node="A", opp_node="B",
                                        opp_delivered=True))
         self.assertTrue(safety.ahead_of_opponent(state))

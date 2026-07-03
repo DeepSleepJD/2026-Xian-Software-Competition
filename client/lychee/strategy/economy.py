@@ -17,9 +17,10 @@
 - 净值制：net = 分值 − 绕路帧 × 0.12（时间不值钱、鲜度值钱，洞察#3）
 - 一步前瞻：plan = net + 最优跟进目标 net。单步贪心会让顺路小绕的冰鉴
   永远输给下一个任务候选（每一站都有更大的任务在前面）
-- 蹲守：任务只在刷新后才进 feed（无法预知），刷新波持续到 ~400 帧而车队
-  ~355 帧就会路过最后的任务区、水路尾段 ~180 帧回不了头 → 无候选且
-  离终局截止尚早时原地 WAIT（协议合法主车队动作，不清移动进度）等刷新
+- 不蹲守（2026-07-03 P4j 复盘后全删）：economy 每次停靠都重扫候选，刷新波
+  刷出的可达任务自然会被追到；原地 WAIT 等波只在"恰好刷在脚下"才赢，
+  期望值撑不起竞速位移（局 1 白蹲 25 帧输掉 S13 走廊争夺差 18 帧）与
+  自冻风险（现网两次自冻事故均源于主动 WAIT 类机制）→ 行军优先
 """
 
 from math import ceil, floor
@@ -50,11 +51,6 @@ CONTEST_DISCOUNT = 0.5        # 竞争折扣（B2b）：对手到候选点 ETA �
                               # 目标，全面出局会饿死经济层
 CONTEST_ETA_MARGIN = 3        # 帧。硬出局要求对手"明显"更近（ETA+此值仍先到）：
                               # ETA 是估计值（天气/守卫/暂停噪声），弱优势只降权不放弃
-LINGER_WAVE_WINDOW = 15       # 蹲守只等临近刷新波；更远时行军穿走廊优先
-LINGER_WAVE_GRACE = 3         # 波次边界/feed 抖动余量；落空后下一波会自然超窗
-LINGER_DEFICIT_WINDOW = 45    # 对手已交付且小差额落后时，最多等约一个刷新周期
-DEFICIT_LINGER_MAX = 40       # 差额过大时不白等，立即交付锁分/保鲜
-WAVE_MIN_SAMPLES = 2          # 至少见过两个不同 refreshRound，才外推刷新周期
 TARGET_STICKINESS = 2.0       # 换目标需净值优势超过此值（防止停靠间目标抖动）
 TARGET_SWITCH_RATIO = 0.20    # 已承诺目标存在时，新目标需额外领先 20%
 BACKTRACK_MARGIN = 2.0        # 刚到站即原路折返需额外覆盖一条边成本
@@ -204,7 +200,6 @@ class EconomyStrategy(Strategy):
         self._previous_stationary_node = ""
         self._pending_use_resource = ""
         self.current_plan: tuple[str, int] | None = None
-        self._seen_waves: set[int] = set()
 
     def propose(self, state: GameState) -> list[Intent]:
         me = state.me
@@ -213,7 +208,6 @@ class EconomyStrategy(Strategy):
 
         self._gate.observe(state)
         self._read_feedback(state)
-        self._observe_waves(state)
 
         # 读条/移动/休整中：闭嘴让帧推进（打断读条 = 进度清零，任务书 4.3）
         if me.current_process is not None:
@@ -236,7 +230,7 @@ class EconomyStrategy(Strategy):
         if intel is not None:
             intents.append(intel)
 
-        # 送达优先（P4d 兜底）：时间账吃紧时任务/冰鉴候选与 WAIT 蹲守全停；
+        # 送达优先（P4d 兜底）：时间账吃紧时任务/冰鉴候选全停；
         # 冰鉴/马匹/情报使用保留（保交付有效性 + 助攻直奔终点）
         must_rush = safety.must_rush(state)
         if must_rush:
@@ -307,11 +301,8 @@ class EconomyStrategy(Strategy):
         self._cur_target_key = target.key if target else ""
         self.current_plan = (spot, target.proc_frames) if target is not None else None
         if target is None:
-            # 无候选：只在脚下可能刷任务、下一波临近或终局小差额时蹲守。
-            # 否则行军穿过任务走廊本身更优，避免 P4j 复盘中的白等。
-            if self._should_linger(state, cur):
-                return Intent(kind="economy", priority=PRIORITY_ECONOMY,
-                              actions=[{"action": "WAIT"}], note="蹲守任务刷新")
+            # 无候选：不蹲守，直接放行 delivery 行军（蹲守机制 2026-07-03 全删，
+            # 理由见模块 docstring；波次刷出的可达任务下次停靠自然进候选被追到）
             return None
         if cur in target.claim_nodes:
             self._pending_claim = target.key
@@ -519,83 +510,6 @@ class EconomyStrategy(Strategy):
         """0 冰状态下冰鉴候选解除慢边硬禁令，交给净值账裁决。"""
         return cand.key.endswith(":ICE_BOX") and \
             state.me.resources.get("ICE_BOX", 0) < 1
-
-    def _can_linger(self, state: GameState, cur: str) -> bool:
-        """蹲守安全判定：现在动身仍能在截止前送达，且不欠本站固定处理。"""
-        if not self._gate.clear(state, cur):
-            return False
-        terminal = self._nearest_terminal(state, cur)
-        if not terminal:
-            return False
-        p = pathing.shortest_path(state, cur, terminal)
-        if p is None:
-            return False
-        return state.round + pathing.path_frames(state, p) <= \
-            state.duration_round - ENDGAME_MARGIN
-
-    def _observe_waves(self, state: GameState) -> None:
-        for t in state.tasks:
-            if t.refresh_round > 0:
-                self._seen_waves.add(t.refresh_round)
-
-    def _next_wave_round(self, state: GameState) -> int | None:
-        waves = sorted(self._seen_waves)
-        if len(waves) < WAVE_MIN_SAMPLES:
-            return None
-        diffs = [b - a for a, b in zip(waves, waves[1:]) if b > a]
-        if not diffs:
-            return None
-        period = min(diffs)
-        nxt = waves[-1]
-        while nxt <= state.round:
-            nxt += period
-        return nxt
-
-    @staticmethod
-    def _is_task_candidate_node(state: GameState, node_id: str) -> bool:
-        return any(node_id in nodes for nodes in state.task_candidates.values())
-
-    def _should_linger(self, state: GameState, cur: str) -> bool:
-        me = state.me
-        if not self._can_linger(state, cur):
-            return False
-        if not self._is_task_candidate_node(state, cur):
-            return False
-        nxt = self._next_wave_round(state)
-        if nxt is None:
-            return False
-        wait = nxt - state.round
-        opp = state.opponent
-        opp_delivered = bool(opp and opp.delivered)
-
-        if opp_delivered and me.task_score < TASK_SCORE_GOAL:
-            deficit = opp.total_score - self._projected_score(state)
-            if 0 < deficit <= DEFICIT_LINGER_MAX and \
-                    wait <= LINGER_DEFICIT_WINDOW + LINGER_WAVE_GRACE:
-                return True
-            return False
-
-        if me.task_score >= 110:
-            return False
-        if wait > LINGER_WAVE_WINDOW + LINGER_WAVE_GRACE:
-            return False
-        if not (safety.ahead_of_opponent(state)
-                or not safety.opponent_ever_set_guard(state)):
-            return False
-        return True
-
-    @staticmethod
-    def _projected_score(state: GameState) -> int:
-        """按当前状态即刻动身交付的最终分保守估计（终局差额蹲守用）。"""
-        me = state.me
-        terminal_frames = safety.frames_to_terminal(state)
-        eta = state.round + terminal_frames
-        time_left = max(0, state.duration_round - eta)
-        raw = me.task_score
-        time_score = (time_left * 70 // state.duration_round) * min(raw, 90) // 90
-        fresh = max(0.0, me.freshness - terminal_frames * 0.07)
-        return (240 + _task_points(raw) + int(me.good_fruit / 100 * 180)
-                + int(fresh / 100 * 180) + time_score)
 
     def _is_immediate_backtrack(self, state: GameState, cur: str, spot: str) -> bool:
         if not self._previous_stationary_node or spot == cur:

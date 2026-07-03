@@ -1,7 +1,7 @@
 """「送达优先」全局硬约束（P4d 兜底）。
 
 判定：已用帧数 + 到终点预计帧数 + 安全余量 ≥ 总帧数（durationRound）即触发 must_rush，
-经济层候选/蹲守与对抗层设卡让路，直奔终点；攻坚/削卡/探路/用马/用冰保留（都是送达
+经济层候选与对抗层设卡让路，直奔终点；攻坚/削卡/探路/用马/用冰保留（都是送达
 的一部分，见任务 design.md 接线表）。
 
 - 到终点帧数用最短路 path_frames（已含沿途处理读条），不建模守卫——余量覆盖清卡等待。
@@ -140,13 +140,6 @@ def _observe_enemy_guard(state: GameState, mem: dict) -> None:
         if guard and guard.owner_team_id and guard.owner_team_id != my_team:
             mem["guard_ever_seen"] = True
             return
-
-
-def opponent_ever_set_guard(state: GameState) -> bool:
-    """本局是否见过对手设卡；供 economy 区分刷任务型/设卡型对手。"""
-    mem = _hold_memory(state)
-    _observe_enemy_guard(state, mem)
-    return bool(mem.get("guard_ever_seen"))
 
 
 def _hold_streak_allows(state: GameState, next_node: str, mem: dict) -> bool:
