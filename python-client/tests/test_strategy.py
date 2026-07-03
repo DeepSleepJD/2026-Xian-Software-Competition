@@ -51,14 +51,13 @@ class ContestDedupTests(unittest.TestCase):
             "redPlayerId": 1001, "bluePlayerId": 2002, "resolved": False,
             "deadlineRound": 200,
         }
-        args = ("CONTESTING", "S07", "NORMAL", 100, [], [contest], {})
-        first = s._main_action(me, *args)
+        first = s._window_card_action(me, [contest], 100)
         self.assertEqual("WINDOW_CARD", first[0]["action"])
         # same tap again -> do NOT replay (would risk a server error / retire)
-        self.assertEqual([], s._main_action(me, *args))
+        self.assertEqual([], s._window_card_action(me, [contest], 100))
         # next tap -> play again
         contest["roundIndex"] = 2
-        second = s._main_action(me, *args)
+        second = s._window_card_action(me, [contest], 100)
         self.assertEqual("WINDOW_CARD", second[0]["action"])
 
 

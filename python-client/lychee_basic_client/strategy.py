@@ -122,13 +122,29 @@ class Strategy:
         if me.get("delivered") or me.get("retired"):
             return []
 
+        # window-card is a separate action category: play it AND still take a main
+        # action the same frame (unless the main car is itself CONTESTING). Playing
+        # only the card wastes a move/process frame every tap of a 3-tap window.
+        card = self._window_card_action(me, contests, round_no)
         main = self._main_action(me, state, node, phase, round_no, tasks, contests, nodes_by_id)
-        # a squad action is a separate category, so it can ride alongside the main
-        # action: use it to pre-clear an upcoming road obstacle so the main car
-        # never has to FORCED_PASS (saves the time tax and dodges the consecutive-
-        # obstacle FORCED_PASS_REPEAT dead-lock). Squads are otherwise unused.
+        # a squad action is a separate category too: pre-clear an upcoming road
+        # obstacle so the main car never has to FORCED_PASS. Squads are otherwise unused.
         squad = self._squad_action(node, nodes_by_id, me, phase)
-        return main + ([squad] if squad else [])
+        return card + main + ([squad] if squad else [])
+
+    def _window_card_action(
+        self, me: dict[str, Any], contests: list[dict[str, Any]], round_no: int
+    ) -> list[dict[str, Any]]:
+        """A WINDOW_CARD for a real window we're a party to, at most once per tap
+        (replaying a tap / a suppressed window server-errors us into a retire)."""
+        contest = active_contest(self.player_id, contests, round_no)
+        if contest is None:
+            return []
+        tap = (contest.get("contestId"), contest.get("roundIndex"))
+        if tap in self._contest_played:
+            return []
+        self._contest_played.add(tap)
+        return [M.window_card(contest["contestId"], pick_card(me, contest))]
 
     def _main_action(
         self,
@@ -141,20 +157,8 @@ class Strategy:
         contests: list[dict[str, Any]],
         nodes_by_id: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """Main-car / window action for this frame."""
-        # play any window we're a party to first -- otherwise we abstain and lose
-        # the contested object. Must precede the busy check so a forced-pass
-        # attacker (state FORCED_PASSING) still plays its PASS window. Play at most
-        # once per tap (contestId, roundIndex): replaying a tap / an ended window
-        # is what server-errors us into a retire.
-        contest = active_contest(self.player_id, contests, round_no)
-        if contest is not None:
-            tap = (contest.get("contestId"), contest.get("roundIndex"))
-            if tap not in self._contest_played:
-                self._contest_played.add(tap)
-                return [M.window_card(contest["contestId"], pick_card(me, contest))]
-            # already played this tap -> fall through (BUSY state -> heartbeat)
-
+        """Main-car action for this frame (the window card is handled separately in
+        decide so it can ride alongside this)."""
         # travelling on an edge: keep pushing toward the current target end.
         # NB: WAITING while parked on a node is NOT travelling -> fall through.
         on_edge = self._is_travelling(me, state, node)
@@ -424,8 +428,8 @@ class Strategy:
         the only way through (opens a PASS window our card policy plays), else MOVE.
 
         (BREAK_GUARD would be faster for a strong guard, but the server currently
-        rejects our attack as an invalid action -- under investigation via the
-        sparring harness; forced pass at least never errors.)"""
+        rejects our attack frame as INVALID_JSON -- under investigation via the
+        sparring harness; forced pass never errors.)"""
         tgt = nodes_by_id.get(target, {})
         if tgt.get("hasObstacle"):
             return M.forced_pass(target)

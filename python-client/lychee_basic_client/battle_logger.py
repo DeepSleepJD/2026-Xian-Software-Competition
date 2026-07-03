@@ -6,12 +6,15 @@ from typing import Any
 
 
 DEFAULT_LOG_PATH = Path(__file__).resolve().parents[1] / "battle_rounds.jsonl"
+_LOG_DIR = DEFAULT_LOG_PATH.parent
 
 
 class BattleLogger:
-    def __init__(self, player_id: int, log_path: Path = DEFAULT_LOG_PATH) -> None:
+    def __init__(self, player_id: int, log_path: Path = None) -> None:
         self._player_id = player_id
-        self._log_path = log_path
+        # per-player filename so two clients on one box (e.g. the sparring harness)
+        # don't fight over the same file and stall each other into a timeout.
+        self._log_path = log_path or (_LOG_DIR / f"battle_rounds_{player_id}.jsonl")
         self._enabled = True
 
     @property
