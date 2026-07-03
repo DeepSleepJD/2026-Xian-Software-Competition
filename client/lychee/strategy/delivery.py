@@ -140,7 +140,30 @@ class DeliveryStrategy(Strategy):
         return state.roles.terminal_node_ids or \
             [n.node_id for n in state.nodes.values() if n.is_terminal]
 
+    def _should_camp(self, state: GameState, cur: str) -> bool:
+        """拦截 camp（G2）：站在我方拦截咽喉不走位，等对手 commit 上边后由 combat
+        set-on-commit 冻死他。三重释放兜住自冻：交付死线 / 对手判死 / 此处已设有效卡。"""
+        if safety.delivery_deadline_hit(state):
+            return False
+        if safety.opponent_cannot_finish(state):
+            return False
+        if safety.interception_node(state) != cur:
+            return False
+        return not self._has_active_friendly_guard(state, cur)
+
+    @staticmethod
+    def _has_active_friendly_guard(state: GameState, node_id: str) -> bool:
+        ns = state.node_states.get(node_id)
+        guard = ns.guard if ns else None
+        my_team = state.my_team_id or state.me.team_id
+        return bool(guard and guard.active and guard.defense > 0
+                    and guard.owner_team_id == my_team)
+
     def _pick_move_target(self, state: GameState, cur: str) -> str:
+        # 拦截 camp：站在拦截咽喉守株待兔，压制走位（与 hold_before_choke 语义相反——
+        # 那个是"别进对手咽喉"，这个是"守在我方拦截点"；两者都返回不走，无冲突）
+        if self._should_camp(state, cur):
+            return ""
         avoid = frozenset(n for n, until in self._avoid_until.items() if state.round < until)
         best: list[str] | None = None
         best_cost: tuple[float, int] = (0.0, 0)

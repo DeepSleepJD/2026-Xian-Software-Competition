@@ -259,5 +259,280 @@ class SafetyTests(unittest.TestCase):
         self.assertTrue(safety.must_rush(self.load(inquire(10, node=""))))
 
 
+# 拦截层死线测试地图：A —(ROAD d=2, 3帧)— B(KEY_PASS, 咽喉) — C(终点)
+DEADLINE_START = {
+    "matchId": "deadline-test",
+    "durationRound": 600,
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True},
+        {"nodeId": "B", "nodeType": "KEY_PASS"},
+        {"nodeId": "C", "nodeType": "FINISH", "terminal": True},
+    ],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+    "map": {"gameplay": {"roles": {"startNodeId": "A", "terminalNodeIds": ["C"]}}},
+}
+
+
+def deadline_inquire(round_no: int, *, me_node: str = "A", me_good: int = 50,
+                     me_fresh: float = 90.0, opp_node: str = "A",
+                     opp_delivered: bool = False, opp_retired: bool = False,
+                     opp_present: bool = True, opp_buffs: list | None = None,
+                     opp_resources: dict | None = None,
+                     nodes: list | None = None) -> dict:
+    players = [{"playerId": MY_ID, "teamId": "RED", "state": "IDLE",
+                "currentNodeId": me_node, "goodFruit": me_good, "freshness": me_fresh}]
+    if opp_present:
+        players.append({"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
+                        "currentNodeId": opp_node, "freshness": 90.0,
+                        "delivered": opp_delivered, "retired": opp_retired,
+                        "buffs": opp_buffs or [], "resources": opp_resources or {}})
+    return {"round": round_no, "players": players, "nodes": nodes or []}
+
+
+def my_guard(node_id: str, defense: int = 6) -> list[dict]:
+    return [{"nodeId": node_id,
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": defense,
+                       "initialDefense": defense, "maxDefense": 7}}]
+
+
+class OpponentCannotFinishTests(unittest.TestCase):
+    def load(self, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(DEADLINE_START)
+        state.update_inquire(inq)
+        return state
+
+    def test_healthy_opponent_can_finish(self) -> None:
+        self.assertFalse(safety.opponent_cannot_finish(self.load(deadline_inquire(100))))
+
+    def test_near_deadline_opponent_cannot_finish(self) -> None:
+        # A→C 干净行程 6 帧 + 余量 20 = 26；round 595 → 595+26 > 600
+        self.assertTrue(safety.opponent_cannot_finish(self.load(deadline_inquire(595))))
+
+    def test_delivered_opponent_is_not_cannot_finish(self) -> None:
+        self.assertFalse(safety.opponent_cannot_finish(
+            self.load(deadline_inquire(100, opp_node="C", opp_delivered=True))))
+
+    def test_retired_opponent_cannot_finish(self) -> None:
+        self.assertTrue(safety.opponent_cannot_finish(
+            self.load(deadline_inquire(100, opp_retired=True))))
+
+    def test_absent_opponent_cannot_finish(self) -> None:
+        self.assertTrue(safety.opponent_cannot_finish(
+            self.load(deadline_inquire(100, opp_present=False))))
+
+    def test_my_guard_tax_pushes_opponent_over_deadline(self) -> None:
+        # round 560：无卡 560+6+20=586<600 能完赛；我方在咽喉 B 满防卡 tax=min(50,15+30)=45
+        # → 560+6+45+20=631>600 判死
+        base = self.load(deadline_inquire(560))
+        self.assertFalse(safety.opponent_cannot_finish(base))
+        taxed = self.load(deadline_inquire(560, nodes=my_guard("B", 6)))
+        self.assertTrue(safety.opponent_cannot_finish(taxed))
+
+
+class OppMovePerFrameTests(unittest.TestCase):
+    def load(self, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(DEADLINE_START)
+        state.update_inquire(inq)
+        return state
+
+    def test_base_speed_without_buffs(self) -> None:
+        self.assertEqual(1000, safety.opp_move_per_frame(self.load(deadline_inquire(100))))
+
+    def test_fast_horse_buff(self) -> None:
+        state = self.load(deadline_inquire(
+            100, opp_buffs=[{"type": "FAST_HORSE", "remainingRound": 5}]))
+        self.assertEqual(1200, safety.opp_move_per_frame(state))
+
+    def test_held_short_horse_resource(self) -> None:
+        state = self.load(deadline_inquire(100, opp_resources={"SHORT_HORSE": 1}))
+        self.assertEqual(1150, safety.opp_move_per_frame(state))
+
+    def test_rush_buff(self) -> None:
+        state = self.load(deadline_inquire(
+            100, opp_buffs=[{"type": "RUSH_SPEED", "remainingRound": 5}]))
+        self.assertEqual(1300, safety.opp_move_per_frame(state))
+
+
+class FreshnessDeadlineTests(unittest.TestCase):
+    def load(self, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(DEADLINE_START)
+        state.update_inquire(inq)
+        return state
+
+    def test_healthy_no_deadline(self) -> None:
+        state = self.load(deadline_inquire(100, me_good=50, me_fresh=90.0))
+        self.assertFalse(safety.freshness_deadline_hit(state))
+
+    def test_low_good_hits_deadline(self) -> None:
+        state = self.load(deadline_inquire(100, me_good=1, me_fresh=90.0))
+        self.assertTrue(safety.freshness_deadline_hit(state))
+
+    def test_low_freshness_hits_deadline(self) -> None:
+        state = self.load(deadline_inquire(100, me_good=50, me_fresh=3.0))
+        self.assertTrue(safety.freshness_deadline_hit(state))
+
+    def test_delivery_deadline_combines_rush_and_freshness(self) -> None:
+        # 健康 + 时间充裕 → 不触发
+        self.assertFalse(safety.delivery_deadline_hit(
+            self.load(deadline_inquire(100, me_good=50, me_fresh=90.0))))
+        # must_rush 触发（round 595）
+        self.assertTrue(safety.delivery_deadline_hit(
+            self.load(deadline_inquire(595, me_good=50, me_fresh=90.0))))
+        # 鲜度线触发（好果 1）
+        self.assertTrue(safety.delivery_deadline_hit(
+            self.load(deadline_inquire(100, me_good=1, me_fresh=90.0))))
+
+
+# 拦截控制器测试图：A —(ROAD d=10, 14帧)— B(KEY_PASS 咽喉) — C(终点)
+# 进入 B 的边够长（14>GUARD_SETUP 4），可表达"我先到咽喉+对手上边冻结窗口"
+INTERCEPT_START = {
+    "matchId": "intercept-test",
+    "durationRound": 600,
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True},
+        {"nodeId": "B", "nodeType": "KEY_PASS"},
+        {"nodeId": "C", "nodeType": "FINISH", "terminal": True},
+    ],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+         "routeType": "ROAD", "distance": 10, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+    "map": {"gameplay": {"roles": {"startNodeId": "A", "terminalNodeIds": ["C"]}}},
+}
+
+# B 有旁路 A—D—C → 不是咽喉
+INTERCEPT_BYPASS = {
+    **INTERCEPT_START,
+    "matchId": "intercept-bypass",
+    "nodes": INTERCEPT_START["nodes"] + [{"nodeId": "D", "nodeType": "STATION"}],
+    "edges": INTERCEPT_START["edges"] + [
+        {"edgeId": "E3", "fromNodeId": "A", "toNodeId": "D",
+         "routeType": "ROAD", "distance": 10, "bidirectional": True},
+        {"edgeId": "E4", "fromNodeId": "D", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+}
+
+
+def intercept_inquire(round_no: int = 200, *, me_node: str = "A", me_next: str = "",
+                      opp_node: str = "A", opp_next: str = "", opp_state: str = "IDLE",
+                      opp_progress_ms: int = 0, opp_total_ms: int = 0,
+                      me_buffs: list | None = None, opp_resources: dict | None = None,
+                      nodes: list | None = None) -> dict:
+    return {
+        "round": round_no,
+        "players": [
+            {"playerId": MY_ID, "teamId": "RED", "state": "IDLE",
+             "currentNodeId": me_node, "nextNodeId": me_next, "goodFruit": 50,
+             "freshness": 90.0, "buffs": me_buffs or []},
+            {"playerId": OPP_ID, "teamId": "BLUE", "state": opp_state,
+             "currentNodeId": opp_node, "nextNodeId": opp_next,
+             "edgeProgressMs": opp_progress_ms, "edgeTotalMs": opp_total_ms,
+             "resources": opp_resources or {}},
+        ],
+        "nodes": nodes or [],
+    }
+
+
+def friendly_guard_node(node_id: str, defense: int = 6) -> list[dict]:
+    return [{"nodeId": node_id,
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": defense,
+                       "initialDefense": defense, "maxDefense": 7}}]
+
+
+class EtaTests(unittest.TestCase):
+    def load(self, start: dict, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(start)
+        state.update_inquire(inq)
+        return state
+
+    def test_me_eta_pure_frames(self) -> None:
+        state = self.load(INTERCEPT_START, intercept_inquire(me_node="A"))
+        self.assertEqual(14, safety.me_eta(state, "B"))     # A→B = 14 帧
+        self.assertEqual(17, safety.me_eta(state, "C"))     # +B→C 3 帧
+
+    def test_opp_eta_faster_with_horse(self) -> None:
+        base = self.load(INTERCEPT_START, intercept_inquire(opp_node="A"))
+        horsed = self.load(INTERCEPT_START,
+                           intercept_inquire(opp_node="A", opp_resources={"FAST_HORSE": 1}))
+        self.assertLess(safety.opp_eta(horsed, "B"), safety.opp_eta(base, "B"))
+
+
+class InterceptionNodeTests(unittest.TestCase):
+    def load(self, start: dict, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(start)
+        state.update_inquire(inq)
+        return state
+
+    def test_ahead_returns_opponent_choke(self) -> None:
+        # 我在咽喉 B、对手在 A：me_eta(B)=0 +4 ≤ opp_eta(B)=14 → 拦截点 B
+        state = self.load(INTERCEPT_START, intercept_inquire(me_node="B", opp_node="A"))
+        self.assertEqual("B", safety.interception_node(state))
+
+    def test_behind_returns_none(self) -> None:
+        # 我在 A、对手在 B：我到 B 反而更晚 → 无拦截点
+        state = self.load(INTERCEPT_START, intercept_inquire(me_node="A", opp_node="B"))
+        self.assertIsNone(safety.interception_node(state))
+
+    def test_no_choke_returns_none(self) -> None:
+        state = self.load(INTERCEPT_BYPASS, intercept_inquire(me_node="B", opp_node="A"))
+        self.assertIsNone(safety.interception_node(state))
+
+    def test_already_blocking_returns_none(self) -> None:
+        # 对手前方已有我方有效卡 → 一张卡已冻死他，别再滚动 camp
+        state = self.load(INTERCEPT_START, intercept_inquire(
+            me_node="B", opp_node="A", nodes=friendly_guard_node("B")))
+        self.assertIsNone(safety.interception_node(state))
+
+    def test_opponent_absent_returns_none(self) -> None:
+        inq = intercept_inquire(me_node="B", opp_node="A")
+        inq["players"] = inq["players"][:1]
+        state = self.load(INTERCEPT_START, inq)
+        self.assertIsNone(safety.interception_node(state))
+
+
+class FreezeWindowTests(unittest.TestCase):
+    def load(self, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(INTERCEPT_START)
+        state.update_inquire(inq)
+        return state
+
+    def test_open_when_committed_with_margin(self) -> None:
+        # 对手 MOVING A→B，剩余 10000ms=10 帧 ≥ 6 → 窗口开
+        state = self.load(intercept_inquire(
+            opp_node="A", opp_next="B", opp_state="MOVING",
+            opp_progress_ms=4000, opp_total_ms=14000))
+        self.assertTrue(safety.freeze_window_open(state, "B"))
+
+    def test_closed_when_not_committed(self) -> None:
+        # 对手停在 A（未上边）→ 窗口关，早设会被强通
+        state = self.load(intercept_inquire(opp_node="A"))
+        self.assertFalse(safety.freeze_window_open(state, "B"))
+
+    def test_closed_when_window_too_narrow(self) -> None:
+        # 剩余 4000ms=4 帧 < 6 → 到站前设不完
+        state = self.load(intercept_inquire(
+            opp_node="A", opp_next="B", opp_state="MOVING",
+            opp_progress_ms=10000, opp_total_ms=14000))
+        self.assertFalse(safety.freeze_window_open(state, "B"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -216,5 +216,81 @@ class DeliveryStateMachineTests(unittest.TestCase):
         self.assertEqual([{"action": "PROCESS", "targetNodeId": "B"}], acts)
 
 
+# 拦截 camp 测试图：A —(ROAD d=10, 14帧)— B(KEY_PASS 咽喉) — D(终点)
+CAMP_START = {
+    "matchId": "camp-test",
+    "durationRound": 600,
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                {"playerId": 2002, "teamId": "BLUE", "name": "op"}],
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True},
+        {"nodeId": "B", "nodeType": "KEY_PASS"},
+        {"nodeId": "D", "nodeType": "FINISH", "terminal": True},
+    ],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+         "routeType": "ROAD", "distance": 10, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "D",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+    "map": {"gameplay": {"roles": {"startNodeId": "A", "terminalNodeIds": ["D"]}}},
+}
+
+
+class InterceptionCampTests(unittest.TestCase):
+    """G2 camp：站在我方拦截咽喉不走位，三重释放兜住自冻。"""
+
+    def setUp(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(CAMP_START)
+        self.strategy = DeliveryStrategy()
+
+    def camp_inquire(self, round_no: int = 200, *, me_node: str = "B",
+                     opp_node: str = "A", opp_retired: bool = False,
+                     good_fruit: int = 50, freshness: float = 90.0,
+                     nodes: list | None = None) -> dict:
+        return {
+            "round": round_no, "phase": "NORMAL",
+            "players": [
+                {"playerId": MY_ID, "teamId": "RED", "state": "IDLE",
+                 "currentNodeId": me_node, "nextNodeId": "", "verified": False,
+                 "goodFruit": good_fruit, "freshness": freshness},
+                {"playerId": 2002, "teamId": "BLUE", "state": "IDLE",
+                 "currentNodeId": opp_node, "retired": opp_retired},
+            ],
+            "nodes": nodes or [],
+        }
+
+    def step(self, inq: dict) -> list[dict]:
+        self.state.update_inquire(inq)
+        return [a for it in self.strategy.propose(self.state) for a in it.actions]
+
+    def test_camps_at_interception_node(self) -> None:
+        # 我在咽喉 B、对手在 A（我先到）、时间充裕 → 原地 camp，不发 MOVE
+        self.assertEqual([], self.step(self.camp_inquire()))
+
+    def test_deadline_releases_camp(self) -> None:
+        # 交付死线（must_rush，round 540）→ 弃 camp 直冲终点
+        acts = self.step(self.camp_inquire(round_no=540))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "D"}], acts)
+
+    def test_opponent_retired_releases_camp(self) -> None:
+        # 对手退赛（判死）→ 拦截无意义，正常送达
+        acts = self.step(self.camp_inquire(opp_retired=True))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "D"}], acts)
+
+    def test_friendly_guard_here_releases_camp(self) -> None:
+        # 此咽喉已设我方有效卡（freeze 已成）→ 前压送达，别继续 camp
+        nodes = [{"nodeId": "B", "guard": {"active": True, "ownerTeamId": "RED",
+                                            "defense": 6, "initialDefense": 6}}]
+        acts = self.step(self.camp_inquire(nodes=nodes))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "D"}], acts)
+
+    def test_no_camp_when_behind_opponent(self) -> None:
+        # 我在 A、对手在 B（我到咽喉更晚）→ 无拦截点，正常走位
+        acts = self.step(self.camp_inquire(me_node="A", opp_node="B"))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
+
+
 if __name__ == "__main__":
     unittest.main()

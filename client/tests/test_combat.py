@@ -39,6 +39,8 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
             nodes: list | None = None, phase: str = "NORMAL",
             next_node: str = "", move_dir: str = "", squad_available: int = 8,
             squad_in_flight: int = 0, opp_node: str = "S10",
+            opp_next: str = "", opp_state: str = "IDLE",
+            opp_progress_ms: int = 0, opp_total_ms: int = 0,
             resources: dict | None = None, events: list | None = None,
             buffs: list | None = None, tasks: list | None = None,
             task_score: int = 0, total_score: int = 0,
@@ -55,13 +57,21 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
                      "squadInFlight": squad_in_flight, "verified": verified,
                      "resources": resources or {}, "buffs": buffs or [],
                      "taskScore": task_score, "totalScore": total_score},
-                    {"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
-                     "currentNodeId": opp_node, "totalScore": opp_total_score}],
+                    {"playerId": OPP_ID, "teamId": "BLUE", "state": opp_state,
+                     "currentNodeId": opp_node, "nextNodeId": opp_next,
+                     "edgeProgressMs": opp_progress_ms, "edgeTotalMs": opp_total_ms,
+                     "totalScore": opp_total_score}],
         "nodes": nodes or [],
         "contests": contests or [],
         "events": events or [],
         "tasks": tasks or [],
     }
+
+
+def opp_committed_to_s10(progress_ms: int = 0, total_ms: int = 30000) -> dict:
+    """对手已 commit 上 S09→S10 边（MOVING、剩余边帧充裕）→ freeze_window_open。"""
+    return {"opp_node": "S09", "opp_next": "S10", "opp_state": "MOVING",
+            "opp_progress_ms": progress_ms, "opp_total_ms": total_ms}
 
 
 def guard_s10(defense: int = 6) -> list[dict]:
@@ -216,12 +226,24 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(320, nodes=guard_s10(), good=0, bad=0))
         self.assertEqual([], [a for a in acts if a["action"] in ("BREAK_GUARD", "WAIT")])
 
-    def test_sets_guard_on_opponent_choke_when_ahead(self) -> None:
-        intents = self.intents(inquire(200, node="S10", opp_node="S09"))
+    def test_sets_guard_on_commit_when_ahead(self) -> None:
+        # 我 camp 在 S10，对手已 commit 上 S09→S10 边（MOVING、剩余边帧充裕）→ 冻结窗口开
+        intents = self.intents(inquire(200, node="S10", **opp_committed_to_s10()))
         guard = [it for it in intents if it.kind == "combat.guard"][0]
         self.assertEqual(PRIORITY_SET_GUARD, guard.priority)
         self.assertEqual({"action": "SET_GUARD", "targetNodeId": "S10",
                           "extraGoodFruit": 2}, guard.actions[0])
+
+    def test_no_guard_before_opponent_commits(self) -> None:
+        # 对手停在相邻节点 S09（未上边、可强通）→ set-on-commit 时序闸不放行，继续 camp
+        acts = self.actions(inquire(200, node="S10", opp_node="S09"))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
+
+    def test_no_guard_when_freeze_window_too_narrow(self) -> None:
+        # 对手已上边但只剩 4 帧（< 设卡读条4+安全2）→ 到站前设不完，别设
+        acts = self.actions(inquire(200, node="S10",
+                                    **opp_committed_to_s10(progress_ms=26000, total_ms=30000)))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 
     def test_set_guard_yields_to_onnode_task_claim(self) -> None:
         # A2：同帧 economy 抢脚下任务(110) 与 combat 设卡(108) → 仲裁选抢任务
@@ -252,9 +274,18 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(200, node="S10", opp_node="S10"))
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 
-    def test_does_not_set_guard_when_strictly_ahead_on_score(self) -> None:
-        acts = self.actions(inquire(200, node="S10", opp_node="S09",
-                                    total_score=10, opp_total_score=0))
+    def test_sets_guard_when_ahead_on_score_with_freeze_window(self) -> None:
+        # G6 放宽领先闸：领先分 + 冻结窗口开 + 对手仍能完赛 → 仍设卡（freeze EV > 悬赏喂分）
+        intents = self.intents(inquire(200, node="S10", total_score=10, opp_total_score=0,
+                                        **opp_committed_to_s10()))
+        guard = [it for it in intents if it.kind == "combat.guard"]
+        self.assertEqual(1, len(guard))
+
+    def test_no_guard_when_deadline_or_opponent_doomed(self) -> None:
+        # 临近死线（must_rush）时即使冻结窗口开也不设卡——让路直冲；此帧对手同时判死，
+        # 覆盖"领先且对手判死不徒增悬赏"的弱化领先闸（二者在近终点同时成立）
+        acts = self.actions(inquire(585, node="S10", total_score=10, opp_total_score=0,
+                                    **opp_committed_to_s10()))
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 
     def test_does_not_set_guard_when_two_friendly_guards_active(self) -> None:
@@ -268,8 +299,14 @@ class CombatStrategyTests(unittest.TestCase):
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 
     def test_does_not_set_guard_below_good_fruit_floor(self) -> None:
-        acts = self.actions(inquire(200, node="S10", opp_node="S09", good=91))
+        # 好果 < 地板 40（烧 3 好果后跌破）→ 护交付好果，不设卡（冻结窗口开也不设）
+        acts = self.actions(inquire(200, node="S10", good=41, **opp_committed_to_s10()))
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
+
+    def test_sets_guard_above_good_fruit_floor(self) -> None:
+        # 好果 50（烧 3 后 47 ≥ 40）→ 冻结窗口开时设满防卡
+        intents = self.intents(inquire(200, node="S10", good=50, **opp_committed_to_s10()))
+        self.assertEqual(1, len([it for it in intents if it.kind == "combat.guard"]))
 
     def test_break_guard_blocked_when_paused_mid_edge(self) -> None:
         # P4d 死锁根因①：半路被守卫暂停（WAITING+PAUSED+nextNodeId 保留）不是可攻坚状态，
@@ -295,6 +332,35 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(320, state="WAITING", next_node="S10",
                                     move_dir="PAUSED", nodes=guard_s10()))
         self.assertIn({"action": "SQUAD_WEAKEN", "targetNodeId": "S10"}, acts)
+
+    def test_reinforces_own_choke_guard_below_max(self) -> None:
+        # G3：我方在对手必经咽喉 S10 的卡防御 6<上限 7（被削/风化）→ 远程增援补回
+        acts = self.actions(inquire(200, node="S10", opp_node="S09",
+                                    nodes=[friendly_guard("S10")]))
+        self.assertIn({"action": "SQUAD_REINFORCE", "targetNodeId": "S10"}, acts)
+
+    def test_no_reinforce_at_max_defense(self) -> None:
+        at_max = [{"nodeId": "S10", "guard": {"active": True, "ownerTeamId": "RED",
+                   "defense": 7, "initialDefense": 7, "maxDefense": 7}}]
+        acts = self.actions(inquire(200, node="S10", opp_node="S09", nodes=at_max))
+        self.assertNotIn("SQUAD_REINFORCE", [a["action"] for a in acts])
+
+    def test_no_reinforce_without_enough_squads(self) -> None:
+        # 只剩 3 支 < 2(增援) + 2(保留地板) → 不增援，留人手削卡
+        acts = self.actions(inquire(200, node="S10", opp_node="S09", squad_available=3,
+                                    nodes=[friendly_guard("S10")]))
+        self.assertNotIn("SQUAD_REINFORCE", [a["action"] for a in acts])
+
+    def test_no_reinforce_when_guard_not_opponent_choke(self) -> None:
+        # 对手已越过 S10（停在 S10 自身）→ S10 不再是其必经咽喉，补了白费
+        acts = self.actions(inquire(200, node="S09", opp_node="S10",
+                                    nodes=[friendly_guard("S10")]))
+        self.assertNotIn("SQUAD_REINFORCE", [a["action"] for a in acts])
+
+    def test_no_reinforce_in_rush(self) -> None:
+        acts = self.actions(inquire(200, node="S10", opp_node="S09", phase="RUSH",
+                                    nodes=[friendly_guard("S10")]))
+        self.assertNotIn("SQUAD_REINFORCE", [a["action"] for a in acts])
 
     def test_squad_weaken_paused_stops_when_enough_in_flight(self) -> None:
         acts = self.actions(inquire(320, state="WAITING", next_node="S10",
@@ -352,11 +418,12 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(550, nodes=guard_s10()))
         self.assertIn("BREAK_GUARD", [a["action"] for a in acts])
 
-    def test_plays_bing_zheng_first_for_relevant_window(self) -> None:
+    def test_plays_xian_gong_first_for_relevant_window(self) -> None:
+        # G7 默认三联献贡：鲜度≥80、好果>1 时首选献贡
         contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",
                      "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
         acts = self.actions(inquire(44, contests=contests))
-        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "XIAN_GONG"}, acts)
 
     def test_plays_bing_zheng_when_not_fresh_enough_for_xian_gong(self) -> None:
         contests = [{"contestId": "C1", "contestType": "PASS", "targetNodeId": "S10",
@@ -373,7 +440,7 @@ class CombatStrategyTests(unittest.TestCase):
         ]
         acts = [a for a in self.actions(inquire(44, contests=contests))
                 if a["action"] == "WINDOW_CARD"]
-        self.assertEqual([{"action": "WINDOW_CARD", "contestId": "C2", "card": "BING_ZHENG"}], acts)
+        self.assertEqual([{"action": "WINDOW_CARD", "contestId": "C2", "card": "XIAN_GONG"}], acts)
 
     def test_irrelevant_window_gets_no_explicit_abstain(self) -> None:
         contests = [{"contestId": "C1", "contestType": "RESOURCE", "targetNodeId": "",
@@ -387,7 +454,7 @@ class CombatStrategyTests(unittest.TestCase):
                      "bluePlayerId": OPP_ID}]
         acts = self.actions(inquire(44, contests=contests,
                                     tasks=[task("T_x", "S08")]))
-        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "XIAN_GONG"}, acts)
 
     def test_task_window_abstains_when_task_score_capped(self) -> None:
         contests = [{"contestId": "C1", "contestType": "TASK", "taskId": "T_x",
@@ -402,7 +469,7 @@ class CombatStrategyTests(unittest.TestCase):
                      "resourceType": "ICE_BOX", "redPlayerId": MY_ID,
                      "bluePlayerId": OPP_ID}]
         acts = self.actions(inquire(44, contests=contests))
-        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "XIAN_GONG"}, acts)
 
         acts = self.actions(inquire(45, contests=contests, resources={"ICE_BOX": 2}))
         self.assertNotIn("WINDOW_CARD", [a["action"] for a in acts])
@@ -421,18 +488,21 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(44, contests=contests, freshness=70.0, guard_points=1))
         self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
 
-    def test_plays_xian_gong_against_bing_zheng_tendency(self) -> None:
+    def test_forced_xian_gong_ignores_opponent_card_history(self) -> None:
+        # G7 强制献贡：不看对手出牌历史，能出献贡就一律献贡（旧倾向自适应已删）
         contests = [{"contestId": "C3", "contestType": "PASS", "targetNodeId": "S10",
                      "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
         reveals = [
             {"eventId": "R1", "type": "WINDOW_CARD_REVEAL", "round": 40,
              "payload": {"contestId": "C1", "roundIndex": 1,
-                         "redCard": "YAN_DIE", "blueCard": "BING_ZHENG"}},
+                         "redCard": "YAN_DIE", "blueCard": "XIAN_GONG"}},
             {"eventId": "R2", "type": "WINDOW_CARD_REVEAL", "round": 41,
              "payload": {"contestId": "C2", "roundIndex": 1,
-                         "redCard": "YAN_DIE", "blueCard": "BING_ZHENG"}},
+                         "redCard": "YAN_DIE", "blueCard": "XIAN_GONG"}},
         ]
-        acts = self.actions(inquire(44, contests=contests, events=reveals))
+        acts = self.actions(inquire(44, contests=contests, events=reveals,
+                                    resources={"FAST_HORSE": 1}))
+        # 对手连出献贡，旧逻辑会切 QIANG_XING 反制；强制版仍出献贡（接受平局）
         self.assertIn({"action": "WINDOW_CARD", "contestId": "C3", "card": "XIAN_GONG"}, acts)
 
     def test_mirror_same_card_high_id_switches_to_counter(self) -> None:
@@ -457,7 +527,7 @@ class CombatStrategyTests(unittest.TestCase):
         contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",
                      "roundIndex": 2, "redPlayerId": 999, "bluePlayerId": MY_ID}]
         acts = self.actions(inquire(44, contests=contests))
-        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
+        self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "XIAN_GONG"}, acts)
 
     def test_free_qiang_xing_is_played_when_other_cards_unavailable(self) -> None:
         contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",
@@ -466,21 +536,6 @@ class CombatStrategyTests(unittest.TestCase):
                                     guard_points=0,
                                     buffs=[{"type": "FAST_HORSE", "remainingRound": 3}]))
         self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "QIANG_XING"}, acts)
-
-    def test_plays_qiang_xing_against_xian_gong_tendency(self) -> None:
-        contests = [{"contestId": "C3", "contestType": "PASS", "targetNodeId": "S10",
-                     "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
-        reveals = [
-            {"eventId": "R1", "type": "WINDOW_CARD_REVEAL", "round": 40,
-             "payload": {"contestId": "C1", "roundIndex": 1,
-                         "redCard": "BING_ZHENG", "blueCard": "XIAN_GONG"}},
-            {"eventId": "R2", "type": "WINDOW_CARD_REVEAL", "round": 41,
-             "payload": {"contestId": "C2", "roundIndex": 1,
-                         "redCard": "BING_ZHENG", "blueCard": "XIAN_GONG"}},
-        ]
-        acts = self.actions(inquire(44, contests=contests, events=reveals,
-                                    resources={"FAST_HORSE": 1}))
-        self.assertIn({"action": "WINDOW_CARD", "contestId": "C3", "card": "QIANG_XING"}, acts)
 
     def test_qiang_xing_needs_buff_or_horse(self) -> None:
         contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",

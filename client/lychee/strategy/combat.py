@@ -20,6 +20,9 @@ PRIORITY_COMBAT_MAIN = 130
 # 无可行任务）设卡仍先于纯走位触发，保留巡航中在咽喉设卡的能力。破卡/削卡/清障不动。
 PRIORITY_SET_GUARD = 108
 PRIORITY_SQUAD_WEAKEN = 128
+PRIORITY_SQUAD_REINFORCE = 127   # 维持拦截卡 > 预清障 > 探路；squad 类别每帧仅一动作，
+                                 # 由 propose 回退链 weaken→reinforce→clear→scout 保证次序
+PRIORITY_SQUAD_CLEAR = 127
 PRIORITY_SQUAD_SCOUT = 127
 PRIORITY_WINDOW_CARD = 125
 
@@ -42,7 +45,15 @@ SCOUT_PENDING_TIMEOUT = 16
 SQUAD_RESERVE_BEFORE_GATE = 6  # 用户铁律（2026-07-03）：宫门验核前永远留 ≥6 支小分队——
                                # 削穿一张满防卡（防御 6）需 6 支（2 支/次削 2 防），
                                # 被终点前设卡钉死比探路省帧致命；验核后设卡威胁消失
-GUARD_GOOD_FLOOR = 90
+SQUAD_RESERVE_LOCKED = 2       # P4m：对手被我方有效卡锁死在竞争咽喉远侧时，6 支保险
+                               # 所防的威胁被结构性排除，降为 2 腾 4 支给 G3 REINFORCE
+REINFORCE_SQUAD_FLOOR = 2       # G3：增援后至少留这么多支（防一张卡吃光人手、下张无兵/无法削卡）
+CLEAR_SQUAD_FLOOR = 4           # 预清障后至少留这么多支（护满防削卡预算 6 支的大部分）
+CLEAR_PENDING_TIMEOUT = SCOUT_PENDING_TIMEOUT  # 预清派队去重超时（复用探路）
+# G6 动态好果地板（拦截封锁流 §6.5）：满防卡仅烧 ≤3 好果，freeze EV 远超好果分损；
+# 40 保护交付好果主体（好果<42 才拦设卡），不再像旧值 90 近乎不设卡。旋钮：回 90 即
+# 一键退化到近乎不设卡。
+GUARD_GOOD_FLOOR = 40
 GUARD_GOOD_FRAME_COST = 15
 GUARD_MIN_NET_FRAMES = 30
 
@@ -51,6 +62,7 @@ class CombatStrategy(Strategy):
     def __init__(self, economy=None) -> None:
         self._scout_markers: dict[str, int] = {}
         self._scout_pending: dict[str, int] = {}
+        self._clear_pending: dict[str, int] = {}
         self._seen_window_reveals: set[str] = set()
         self._last_window_cards: dict[str, tuple[int, str, str]] = {}
         self._opponent_card_counts: dict[str, int] = {}
@@ -67,14 +79,18 @@ class CombatStrategy(Strategy):
         main = self._propose_break_guard(state)
         if main is None:
             main = self._propose_clear_obstacle(state)
-        if main is None and not safety.must_rush(state):
-            # 送达优先：时间账吃紧时设卡（4 帧架设+果子）纯刷分，让路；
+        if main is None and not safety.delivery_deadline_hit(state):
+            # 送达死线（路程线∪鲜度线）：吃紧时设卡（4 帧架设+烧好果）纯亏，让路直冲；
             # 攻坚/削卡/清障/探路保留——只处理终点路径上的阻挡，是送达的一部分
             main = self._propose_set_guard(state)
         if main is not None:
             intents.append(main)
 
         squad = self._propose_squad_weaken(state)
+        if squad is None:
+            squad = self._propose_squad_reinforce(state)
+        if squad is None:
+            squad = self._propose_squad_clear(state)
         if squad is None:
             squad = self._propose_squad_scout(state)
         if squad is not None:
@@ -185,8 +201,10 @@ class CombatStrategy(Strategy):
             return None
         if me.current_process is not None or me.state != "IDLE":
             return None
-        if me.total_score > state.opponent.total_score:
-            return None     # 压低悬赏喂分概率：严格领先时不主动造可攻破悬赏
+        # G6 放宽领先闸（拦截封锁流 §1 EV：领先也要拦，freeze 远值过 10/18 悬赏喂分）；
+        # 只保留"已领先且对手已判死"时不再徒增悬赏的弱化版
+        if me.total_score > state.opponent.total_score and safety.opponent_cannot_finish(state):
+            return None
         cur = me.current_node_id
         if not cur or self._is_terminal(state, cur) or self._has_active_guard(state, cur):
             return None
@@ -198,6 +216,10 @@ class CombatStrategy(Strategy):
         if not self._ahead_of_opponent(state, cur):
             return None
         if not self._is_opponent_choke(state, cur):
+            return None
+        # set-on-commit 时序闸（§6.4）：只在对手已 commit 上边、到站前设卡能生效时才设。
+        # 早设（对手还停在相邻节点）会让他停节点上强通逃脱——继续 camp 别设。
+        if not safety.freeze_window_open(state, cur):
             return None
 
         extra, defense, good_cost = self._guard_investment(state, cur)
@@ -230,6 +252,74 @@ class CombatStrategy(Strategy):
         action = {"action": "SQUAD_WEAKEN", "targetNodeId": me.next_node_id}
         return Intent(kind="combat.squad", priority=PRIORITY_SQUAD_WEAKEN,
                       actions=[action], note=f"小分队削卡@{me.next_node_id}")
+
+    def _propose_squad_reinforce(self, state: GameState) -> Intent | None:
+        """G3 维持拦截卡：己方仍挡在对手前面的有效卡被削/风化到低于上限时，
+        SQUAD_REINFORCE(+2/次，不限距离) 补回来——前压后仍能远程增援身后冻结卡。
+        只补"仍是对手必经咽喉"的卡（对手已越过的卡补了白费）。"""
+        me = state.me
+        if state.phase == "RUSH":
+            return None
+        # 铁律：增援同样不得击穿验核前 6 支保留（对手被锁死时 _squad_reserve 降 2 自然放开）
+        if me.squad_available - 2 < max(self._squad_reserve(state), REINFORCE_SQUAD_FLOOR):
+            return None
+        my_team = state.my_team_id or state.me.team_id
+        for node_id, ns in state.node_states.items():
+            guard = ns.guard
+            if not (guard and guard.active and guard.defense > 0
+                    and guard.owner_team_id == my_team):
+                continue
+            target = pathing.guard_max_defense(state, node_id)
+            if guard.defense >= target:
+                continue
+            if not self._is_opponent_choke(state, node_id):
+                continue
+            needed = ceil((target - int(guard.defense)) / 2)
+            if me.squad_in_flight >= needed:
+                return None
+            action = {"action": "SQUAD_REINFORCE", "targetNodeId": node_id}
+            return Intent(kind="combat.squad", priority=PRIORITY_SQUAD_REINFORCE,
+                          actions=[action], note=f"小分队增援@{node_id}")
+        return None
+
+    def _propose_squad_clear(self, state: GameState) -> Intent | None:
+        """小队提前破障：交付路径上 2+ 跳外的障碍(path[1] 留主车队反应式 CLEAR)派小分队
+        并行预清，主车队到站不再停 6 帧清障、也免咽喉障碍卡死风险(SQUAD_CLEAR 延迟清除、
+        2 支、清障方使对手 30 帧内过该点 +6 残留税)。留 CLEAR_SQUAD_FLOOR 支护削卡。"""
+        me = state.me
+        if state.phase == "RUSH":
+            return None
+        if me.squad_available < 2 + CLEAR_SQUAD_FLOOR:
+            return None
+        cur = me.current_node_id
+        if not cur:
+            return None
+        path = self._terminal_path(state, cur)
+        if not path or len(path) < 3:
+            return None
+        for node_id in path[2:]:
+            ns = state.node_states.get(node_id)
+            if ns is None or not ns.has_obstacle:
+                continue
+            if self._has_active_clear_task(state, node_id):
+                continue    # 有 T04 清障任务 → 留给做任务的清(领任务分)，别白派小分队
+            pending = self._clear_pending.get(node_id)
+            if pending is not None and pending + CLEAR_PENDING_TIMEOUT >= state.round:
+                continue
+            self._clear_pending[node_id] = state.round
+            return Intent(kind="combat.squad", priority=PRIORITY_SQUAD_CLEAR,
+                          actions=[{"action": "SQUAD_CLEAR", "targetNodeId": node_id}],
+                          note=f"小分队预清障@{node_id}")
+        return None
+
+    @staticmethod
+    def _has_active_clear_task(state: GameState, node_id: str) -> bool:
+        for t in state.tasks:
+            if not t.active or t.completed or t.failed or t.node_id != node_id:
+                continue
+            if t.process_type == "CLEAR_OBSTACLE" or t.task_template_id == "T04":
+                return True
+        return False
 
     def _propose_squad_scout(self, state: GameState) -> Intent | None:
         me = state.me
@@ -293,17 +383,15 @@ class CombatStrategy(Strategy):
         return [{"action": "WINDOW_CARD", "contestId": contest.contest_id, "card": card}]
 
     def _choose_window_card(self, state: GameState, contest: Contest) -> str:
-        if self._opponent_xian_gong_tendency():
-            order = ("QIANG_XING", "XIAN_GONG", "BING_ZHENG")
-            default = self._first_playable_card(state, contest, order)
-        elif self._opponent_bing_zheng_tendency():
-            order = ("XIAN_GONG", "BING_ZHENG", "YAN_DIE")
-            default = self._first_playable_card(state, contest, order)
-        else:
-            order = ("BING_ZHENG", "YAN_DIE", "XIAN_GONG")
-            default = self._first_playable_card(state, contest, order)
-            if default == "ABSTAIN" and self._can_play_free_qiang_xing(state):
-                default = "QIANG_XING"
+        """G7 强制三联献贡（用户决策 2026-07-03）：能出献贡就一律出，不再按对手出牌
+        倾向切走（献贡赢验牒+兵征、只输强行；对手要强行须有马/疾行令，出不了几次）。
+        仅保留 mirror-break switcher 作镜像同牌死锁（S02 DOCK 0:0，见 [[mirror-dock-deadlock]]）
+        的破对称安全阀。鲜度<80 或好果≤1 献贡出不了时退化尽量出牌。"""
+        if self._can_play_card(state, contest, "XIAN_GONG"):
+            return self._mirror_break_card(state, contest, "XIAN_GONG")
+        default = self._first_playable_card(state, contest, ("BING_ZHENG", "YAN_DIE"))
+        if default == "ABSTAIN" and self._can_play_free_qiang_xing(state):
+            default = "QIANG_XING"
         return self._mirror_break_card(state, contest, default)
 
     def _first_playable_card(self, state: GameState, contest: Contest,
@@ -357,16 +445,6 @@ class CombatStrategy(Strategy):
     def _document_resource_count(state: GameState) -> int:
         return sum(state.me.resources.get(resource_type, 0) for resource_type in DOCUMENT_RESOURCES)
 
-    def _opponent_bing_zheng_tendency(self) -> bool:
-        if self._opponent_card_total < 2:
-            return False
-        return self._opponent_card_counts.get("BING_ZHENG", 0) / self._opponent_card_total >= 0.60
-
-    def _opponent_xian_gong_tendency(self) -> bool:
-        if self._opponent_card_total < 2:
-            return False
-        return self._opponent_card_counts.get("XIAN_GONG", 0) / self._opponent_card_total >= 0.60
-
     def _read_events(self, state: GameState) -> None:
         self._read_scout_events(state)
         self._read_window_card_reveals(state)
@@ -378,6 +456,9 @@ class CombatStrategy(Strategy):
         for node_id, dispatch_round in list(self._scout_pending.items()):
             if dispatch_round + SCOUT_PENDING_TIMEOUT < state.round:
                 self._scout_pending.pop(node_id, None)
+        for node_id, dispatch_round in list(self._clear_pending.items()):
+            if dispatch_round + CLEAR_PENDING_TIMEOUT < state.round:
+                self._clear_pending.pop(node_id, None)
 
         my_player_id = state.player_id
         for event in state.scout_marker_events():
@@ -392,7 +473,6 @@ class CombatStrategy(Strategy):
                 self._scout_pending.pop(event.target_node_id, None)
 
     def _read_window_card_reveals(self, state: GameState) -> None:
-        my_team = state.my_team_id or state.me.team_id
         for reveal in state.window_card_reveals():
             key = reveal.event_id or f"{reveal.contest_id}:{reveal.round_index}"
             if key in self._seen_window_reveals:
@@ -400,11 +480,6 @@ class CombatStrategy(Strategy):
             self._seen_window_reveals.add(key)
             self._last_window_cards[reveal.contest_id] = (
                 reveal.round_index, reveal.red_card, reveal.blue_card)
-            card = reveal.blue_card if my_team == "RED" else reveal.red_card
-            if not card:
-                continue
-            self._opponent_card_counts[card] = self._opponent_card_counts.get(card, 0) + 1
-            self._opponent_card_total += 1
 
     def _has_scout_marker(self, state: GameState, node_id: str) -> bool:
         expire = self._scout_markers.get(node_id, 0)
