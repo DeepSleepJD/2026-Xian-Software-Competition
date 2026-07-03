@@ -50,11 +50,18 @@ class Strategy:
         # nodes an enemy guard is blocking us from entering (recomputed each frame
         # from node state in decide())
         self._guard_blocked: set[str] = set()
+        self._my_team: Optional[str] = None
         # obstacle nodes we've already sent a squad to clear (avoid re-dispatch)
         self._squad_clear_sent: set[str] = set()
         # (contestId, roundIndex) pairs we've already played -> never double-play a
         # tap or replay an ended window (that can server-error us into a retire)
         self._contest_played: set[tuple] = set()
+        # routing hooks (used by variants / future adaptive routing)
+        self.route_avoid: set[str] = set()   # nodes to route around when possible
+        self.collect_tasks = True            # False -> rush to the gate, no task detours
+
+    def _avoid(self) -> set:
+        return self._guard_blocked | self.route_avoid
 
     # ---- setup from the start message ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -100,12 +107,16 @@ class Strategy:
 
         self._account_tasks(tasks)
         self._account_process(inquire_data.get("events") or [])
-        # enemy guards blocking passage, read straight off the node state each frame
-        # (we never set guards, so any guard is the opponent's). Recomputed every
-        # frame so a weathered/broken guard automatically becomes passable again.
+        # enemy guards blocking passage, read from each node's `guard` object
+        # ({active, defense, ownerTeamId, ...}). Recomputed every frame so a
+        # weathered/broken guard (active False / defense 0) becomes passable again.
+        self._my_team = me.get("teamId")
         self._guard_blocked = {
             nid for nid, n in nodes_by_id.items()
-            if n.get("effectiveCombatCount", 0) > 0 or n.get("guardBlockCount", 0) > 0
+            if (g := n.get("guard"))
+            and g.get("active")
+            and g.get("defense", 0) > 0
+            and g.get("ownerTeamId") not in (None, self._my_team)
         }
 
         if me.get("delivered") or me.get("retired"):
@@ -156,7 +167,7 @@ class Strategy:
                 # from mid-edge (MOVING_ACTION_FORBIDDEN), so change course to another
                 # neighbour of the segment start that routes around it;
                 # if there's no way around (a funnel), wait for the guard to weather.
-                alt = self.graph.next_hop(node, self.gate_node, avoid=self._guard_blocked)
+                alt = self.graph.next_hop(node, self.gate_node, avoid=self._avoid())
                 if alt and alt != target:
                     return [self._mv(alt)]
                 return [M.wait()]
@@ -201,16 +212,17 @@ class Strategy:
         # process station before completing its process (task book 2.4.1). Doing
         # the mandatory process first was letting on-node tasks (e.g. T_019 @ S13)
         # expire during it -- task score is our only losing component.
-        task = self._claimable_task_here(node, tasks, me, round_no)
-        if task is not None:
-            tid = task["taskId"]
-            self._task_attempts[tid] = self._task_attempts.get(tid, 0) + 1
-            return [M.claim_task(tid)]
+        if self.collect_tasks:
+            task = self._claimable_task_here(node, tasks, me, round_no)
+            if task is not None:
+                tid = task["taskId"]
+                self._task_attempts[tid] = self._task_attempts.get(tid, 0) + 1
+                return [M.claim_task(tid)]
 
-        # stock useful resources this node has (no detour)
-        res = self._resource_to_claim(node, nodes_by_id, me)
-        if res is not None:
-            return [M.claim_resource(node, res)]
+            # stock useful resources this node has (no detour)
+            res = self._resource_to_claim(node, nodes_by_id, me)
+            if res is not None:
+                return [M.claim_resource(node, res)]
 
         # mandatory fixed-process station, detected from LIVE node state
         # (processRound > 0). Marked done ONLY on PROCESS_COMPLETE (see
@@ -226,8 +238,8 @@ class Strategy:
             return [M.process()]
 
         # head toward the best worth-it task/ice waypoint, else straight to the gate
-        dest = self._best_waypoint(node, nodes_by_id, tasks, me, round_no)
-        return self._advance(node, nodes_by_id, dest)
+        dest = self._best_waypoint(node, nodes_by_id, tasks, me, round_no) if self.collect_tasks else None
+        return self._advance(node, nodes_by_id, me, dest)
 
     def _resource_to_claim(
         self, node: str, nodes_by_id: dict[str, Any], me: dict[str, Any]
@@ -390,30 +402,54 @@ class Strategy:
         return best
 
     def _advance(
-        self, node: str, nodes_by_id: dict[str, Any], dest: Optional[str] = None
+        self, node: str, nodes_by_id: dict[str, Any], me: dict[str, Any],
+        dest: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """Step toward dest (default: the gate). Prefer a route that detours around
-        known enemy-guard nodes; if the guard sits on the only way through (an
-        end-game funnel), force through it instead."""
+        known enemy-guard nodes; if a guard sits on the only way through (an end-game
+        funnel), attack it (BREAK_GUARD) rather than a slow forced pass."""
         goal = dest or self.gate_node
-        nxt = self.graph.next_hop(node, goal, avoid=self._guard_blocked)
+        nxt = self.graph.next_hop(node, goal, avoid=self._avoid())
         if nxt is None:
-            # every route to the goal passes a guarded node -> go straight and
-            # force through it
+            # every route to the goal passes a guarded/avoided node -> go straight
             nxt = self.graph.next_hop(node, goal)
         if not nxt:
             return []
-        return [self._step_to(nxt, nodes_by_id)]
+        return [self._step_to(nxt, nodes_by_id, me)]
 
-    def _step_to(self, target: str, nodes_by_id: dict[str, Any]) -> dict[str, Any]:
-        """One hop toward target: FORCED_PASS a road obstacle or an enemy guard
-        (no contest window for a pure obstacle; a PASS window for a guard, which
-        our card policy then plays), else a normal MOVE."""
-        if nodes_by_id.get(target, {}).get("hasObstacle"):
+    def _step_to(
+        self, target: str, nodes_by_id: dict[str, Any], me: dict[str, Any]
+    ) -> dict[str, Any]:
+        """One hop toward target: FORCED_PASS a road obstacle or an enemy guard on
+        the only way through (opens a PASS window our card policy plays), else MOVE.
+
+        (BREAK_GUARD would be faster for a strong guard, but the server currently
+        rejects our attack as an invalid action -- under investigation via the
+        sparring harness; forced pass at least never errors.)"""
+        tgt = nodes_by_id.get(target, {})
+        if tgt.get("hasObstacle"):
             return M.forced_pass(target)
-        if target in self._guard_blocked:
+        g = tgt.get("guard")
+        enemy_guard = (
+            g and g.get("active") and g.get("defense", 0) > 0
+            and g.get("ownerTeamId") not in (None, self._my_team)
+        )
+        if enemy_guard or target in self._guard_blocked:
             return M.forced_pass(target)
         return self._mv(target)
+
+    def _break_guard(self, target: str, defense: int, me: dict[str, Any]) -> dict[str, Any]:
+        """Attack an adjacent enemy guard, spending bad fruit first (worthless
+        otherwise) then the minimum good fruit needed to beat the defense."""
+        bad = min(2, me.get("badFruit", 0))
+        val = bad * 3
+        good = 0
+        while val < defense and good < 2 and good < me.get("goodFruit", 0):
+            good += 1
+            val += 2
+        if bad == 0 and good == 0:  # always invest something to chip the defense down
+            good = 1 if me.get("goodFruit", 0) > 0 else 0
+        return M.break_guard(target, good_fruit=good, bad_fruit=bad)
 
     def _mv(self, target: str) -> dict[str, Any]:
         return M.move(target)

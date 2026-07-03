@@ -121,3 +121,31 @@ class Graph:
         if path and len(path) >= 2:
             return path[1]
         return None
+
+    def _reachable(self, src: str, dst: str, blocked: set) -> bool:
+        if src == dst:
+            return True
+        seen = {src}
+        stack = [src]
+        while stack:
+            u = stack.pop()
+            for v, _rt, _dd in self.adj.get(u, []):
+                if v == dst:
+                    return True
+                if v not in seen and v not in blocked:
+                    seen.add(v)
+                    stack.append(v)
+        return False
+
+    def choke_points(self, src: str, dst: str) -> list[str]:
+        """Cut-vertices between src and dst: nodes whose removal disconnects the
+        route (a guard on such a node locks the opponent out). Ordered nearest to
+        dst first -- the last choke before the gate is the strongest to hold."""
+        if not self._reachable(src, dst, set()):
+            return []
+        chokes = [
+            n for n in list(self.adj.keys())
+            if n not in (src, dst) and not self._reachable(src, dst, {n})
+        ]
+        chokes.sort(key=lambda n: self.path_cost(n, dst))
+        return chokes

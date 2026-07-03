@@ -36,6 +36,15 @@ def active_contest(
     so we exclude those here (and the caller also de-dups per tap)."""
     mine = []
     for c in contests:
+        cid = c.get("contestId")
+        # only real, playable windows: a valid id (not a None/"SUPPRESSED:..."
+        # pseudo-contest) and an actual play tap. Carding a suppressed/idless
+        # window makes the server send an error that can retire us.
+        if not cid or str(cid).startswith("SUPPRESSED"):
+            continue
+        ri = c.get("roundIndex")
+        if not isinstance(ri, int) or ri < 1:
+            continue
         if c.get("resolved"):
             continue
         if player_id not in (c.get("redPlayerId"), c.get("bluePlayerId")):

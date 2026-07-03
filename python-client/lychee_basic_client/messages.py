@@ -111,3 +111,23 @@ def rush_protect() -> dict[str, Any]:
 def squad_clear(target_node_id: str) -> dict[str, Any]:
     """小分队清障: delayed remote obstacle clear (2 squad members, no window)."""
     return {"action": "SQUAD_CLEAR", "targetNodeId": target_node_id}
+
+
+def set_guard(target_node_id: str, extra_good_fruit: int = 0) -> dict[str, Any]:
+    """设卡: build a guard on the current node (extra fruit 0-2 raises defense)."""
+    return {
+        "action": "SET_GUARD",
+        "targetNodeId": target_node_id,
+        "extraGoodFruit": extra_good_fruit,
+    }
+
+
+def break_guard(target_node_id: str, good_fruit: int = 0, bad_fruit: int = 0) -> dict[str, Any]:
+    """攻坚破卡: attack an enemy guard on an adjacent node. Always send both fruit
+    fields (the server treats a missing field as an invalid action)."""
+    return {
+        "action": "BREAK_GUARD",
+        "targetNodeId": target_node_id,
+        "goodFruit": good_fruit,
+        "badFruit": bad_fruit,
+    }

@@ -12,12 +12,19 @@ from .recorder import MatchRecorder
 from .strategy import Strategy
 
 
+def _make_strategy(config: Config) -> Strategy:
+    if config.strategy == "aggressive":
+        from .sparring import AggressiveStrategy
+        return AggressiveStrategy(config.player_id)
+    return Strategy(config.player_id)
+
+
 class ClientSession:
     def __init__(self, sock: socket.socket, config: Config) -> None:
         self._sock = sock
         self._config = config
         self._match_id = ""
-        self._strategy = Strategy(config.player_id)
+        self._strategy = _make_strategy(config)
         self._battle_logger = BattleLogger(config.player_id)
         self._recorder = (
             MatchRecorder(config.record_dir, config.player_id)
@@ -59,9 +66,11 @@ class ClientSession:
             self._close_recorder()
             return 0
         elif msg_name == "error":
+            # non-fatal: an error about one action must NOT make us disconnect
+            # (disconnect = offline = retire). Log it and keep playing; if the
+            # server really drops us, read_frame will EOF and we exit cleanly.
             print(f"error received: {json.dumps(message, ensure_ascii=False)}", file=sys.stderr)
             self._battle_logger.log_message("error", data)
-            return 1
         else:
             print(f"ignored msg_name={msg_name}")
         return None

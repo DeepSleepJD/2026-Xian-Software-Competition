@@ -3,13 +3,14 @@ import unittest
 from lychee_basic_client.contest import active_contest, pick_card
 
 
-def _contest(ctype, cid="C1", red=1001, blue=2002, resolved=False):
+def _contest(ctype, cid="C1", red=1001, blue=2002, resolved=False, round_index=1):
     return {
         "contestId": cid,
         "contestType": ctype,
         "redPlayerId": red,
         "bluePlayerId": blue,
         "resolved": resolved,
+        "roundIndex": round_index,
     }
 
 
@@ -26,6 +27,15 @@ class ContestTests(unittest.TestCase):
     def test_active_contest_none_when_not_party(self) -> None:
         contests = [_contest("GATE", red=3003, blue=4004)]
         self.assertIsNone(active_contest(1001, contests))
+
+    def test_active_contest_skips_suppressed_and_idless_windows(self) -> None:
+        # a suppressed / id-less pseudo-contest must never be carded (server error)
+        supp = _contest("DOCK", cid="SUPPRESSED:DOCK:S02"); supp["roundIndex"] = None
+        idless = _contest("DOCK", cid=None); idless["roundIndex"] = None
+        self.assertIsNone(active_contest(1001, [supp, idless], round_no=54))
+        # a real window with a valid id and an active tap IS returned
+        real = _contest("GATE", cid="C_1"); real["roundIndex"] = 1
+        self.assertEqual("C_1", active_contest(1001, [real], round_no=54)["contestId"])
 
     def test_active_contest_excludes_ended_window_past_deadline(self) -> None:
         c = _contest("TASK")

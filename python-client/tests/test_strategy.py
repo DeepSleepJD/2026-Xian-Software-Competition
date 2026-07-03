@@ -161,11 +161,12 @@ class GuardHandlingTests(unittest.TestCase):
         s = self._diamond()
         s._guard_blocked.add("S02")
         # S02 guarded -> detour via S03 with a normal MOVE, not a forced pass
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], s._advance("S01", {}))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], s._advance("S01", {}, _me("S01")))
 
-    def test_forces_through_guard_on_a_funnel(self) -> None:
+    def test_forces_through_enemy_guard_on_a_funnel(self) -> None:
         s = Strategy(1001)
         s.gate_node = "S03"
+        s._my_team = "RED"
         s.graph.load_edges(
             [
                 {"fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD",
@@ -174,22 +175,24 @@ class GuardHandlingTests(unittest.TestCase):
                  "distance": 10, "bidirectional": True},
             ]
         )
-        s._guard_blocked.add("S02")  # only way to the gate is through the guard
-        self.assertEqual(
-            [{"action": "FORCED_PASS", "targetNodeId": "S02"}], s._advance("S01", {})
-        )
+        me = _me("S01")
+        nodes = {"S02": {"nodeId": "S02", "guard": {"active": True, "defense": 6, "ownerTeamId": "BLUE"}}}
+        s._guard_blocked.add("S02")
+        act = s._advance("S01", nodes, me)[0]
+        self.assertEqual("FORCED_PASS", act["action"])
+        self.assertEqual("S02", act["targetNodeId"])
 
-    def test_step_to_forced_passes_obstacle_and_guard(self) -> None:
+    def test_step_to_handles_obstacle_guard_and_plain(self) -> None:
         s = Strategy(1001)
-        s._guard_blocked.add("SG")
+        s._my_team = "RED"
+        me = _me("X")
         self.assertEqual(
             {"action": "FORCED_PASS", "targetNodeId": "SO"},
-            s._step_to("SO", {"SO": {"hasObstacle": True}}),
+            s._step_to("SO", {"SO": {"hasObstacle": True}}, me),
         )
-        self.assertEqual(
-            {"action": "FORCED_PASS", "targetNodeId": "SG"}, s._step_to("SG", {})
-        )
-        self.assertEqual({"action": "MOVE", "targetNodeId": "SF"}, s._step_to("SF", {}))
+        guard_node = {"SG": {"guard": {"active": True, "defense": 4, "ownerTeamId": "BLUE"}}}
+        self.assertEqual("FORCED_PASS", s._step_to("SG", guard_node, me)["action"])
+        self.assertEqual({"action": "MOVE", "targetNodeId": "SF"}, s._step_to("SF", {}, me))
 
 
 class TravellingStateTests(unittest.TestCase):

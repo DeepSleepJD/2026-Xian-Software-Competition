@@ -11,6 +11,7 @@ class Config:
     player_name: str
     version: str
     record_dir: Optional[str] = None
+    strategy: str = "default"
 
 
 def parse_args() -> Config:
@@ -26,6 +27,13 @@ def parse_args() -> Config:
         help="if set, write each round's inquire (both sides' state) to a JSONL "
         "file in this directory for later analysis",
     )
+    parser.add_argument(
+        "--strategy",
+        default="default",
+        choices=["default", "aggressive"],
+        help="'aggressive' = the choke-guarding sparring opponent for local "
+        "adversarial testing; 'default' = our real client",
+    )
     args = parser.parse_args()
     return Config(
         host=args.host,
@@ -34,4 +42,5 @@ def parse_args() -> Config:
         player_name=args.player_name,
         version=args.version,
         record_dir=args.record_dir,
+        strategy=args.strategy,
     )
