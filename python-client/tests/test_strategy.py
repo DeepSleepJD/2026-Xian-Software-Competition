@@ -53,12 +53,20 @@ class BlockadeTests(unittest.TestCase):
         # heads deeper toward the choke, not idling
         self.assertEqual("MOVE", act[0]["action"])
 
-    def test_guards_choke_as_we_pass_when_opponent_must_cross(self) -> None:
+    def test_freezes_when_opponent_commits_onto_edge(self) -> None:
         s = _line_strategy(gate="S04")  # chokes S02, S03 on the line
-        me = _me("S02", goodFruit=20)   # standing on a choke
-        opp = _opp("S01")               # opponent still behind -> must cross S02
+        me = _me("S02", goodFruit=20)   # camped on a choke
+        # opponent committed onto S01->S02 with the whole edge ahead -> freeze
+        opp = _opp("S01", state="MOVING", nextNodeId="S02", edgeProgressPermille=0)
         act = s.decide(_inq(50, me, opp))
         self.assertIn({"action": "SET_GUARD", "targetNodeId": "S02", "extraGoodFruit": 2}, act)
+
+    def test_camps_not_guards_before_opponent_commits(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S02", goodFruit=20)
+        opp = _opp("S01")  # parked, not committed -> we camp (wait), don't set early
+        act = s.decide(_inq(50, me, opp))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in act])
 
     def test_does_not_guard_choke_opponent_already_passed(self) -> None:
         s = _line_strategy(gate="S04")

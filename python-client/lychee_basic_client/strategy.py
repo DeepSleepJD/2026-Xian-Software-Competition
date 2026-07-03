@@ -22,7 +22,9 @@ from .contest import active_contest, pick_card
 from .graph import Graph
 
 TOTAL_ROUNDS = 600
-DELIVER_MARGIN = 25          # safety frames kept before the delivery deadline
+DELIVER_MARGIN = 60          # safety frames before the delivery deadline (covers the
+                             # obstacle clear-waits our frame estimate doesn't model, so
+                             # camping on a choke never drags us past our own delivery)
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
 DELIVER_FRAMES = 2           # move-into-terminal + DELIVER
 GUARD_KEEP_FRUIT = 6         # never spend guard fruit below this (keep some to deliver)
@@ -149,17 +151,25 @@ class Strategy:
         if me.get("routeEdgeId") and me.get("nextNodeId"):
             return [M.move(me["nextNodeId"])]
 
-        # GUARD-AS-WE-PASS: drop a guard on every choke we stand on that the opponent
-        # must still cross, then keep moving. We never camp waiting for the perfect
-        # commit moment (that once stalled us past our own delivery deadline); the
-        # freeze still happens -- the opponent freezes mid-edge whenever they arrive
-        # while the guard is up. First guard = decoy (see _squad_action).
+        # FREEZE: camp on a choke the opponent must still cross and SET_GUARD only the
+        # instant they've COMMITTED onto the edge into it (MOVING, nextNode==choke) AND
+        # enough edge is left for the guard to finish before they arrive. They then
+        # arrive to a blocked node and freeze mid-edge -- no backtrack, no FORCED_PASS,
+        # no BREAK_GUARD. If they haven't committed yet we hold the choke and wait; our
+        # delivery deadline (_must_deliver upstream) drags us off before we're too late.
         if node in self.chokes and not self._we_hold(node, nodes_by_id) \
-           and self._opp_must_cross(node, opp) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
-            if self._first_guard_node is None:
-                self._first_guard_node = node
-            self._guarded_round[node] = round_no
-            return [M.set_guard(node, extra_good_fruit=self._guard_fruit(me))]
+           and self._opp_must_cross(node, opp):
+            if self._freeze_window_open(opp, node) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
+                if self._first_guard_node is None:
+                    self._first_guard_node = node
+                self._guarded_round[node] = round_no
+                return [M.set_guard(node, extra_good_fruit=self._guard_fruit(me))]
+            # opponent not committed yet -> camp (grab a freebie task if it's a station)
+            if self._stopped_anyway(node, me, phase, nodes_by_id):
+                t = self._free_task_here(node, tasks, me)
+                if t:
+                    return t
+            return [M.wait()]
 
         if self._stopped_anyway(node, me, phase, nodes_by_id):
             here = self._free_task_here(node, tasks, me)
