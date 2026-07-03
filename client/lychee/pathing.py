@@ -229,6 +229,78 @@ def shortest_path(state: GameState, src: str, dst: str,
     return None
 
 
+INF_FRAMES = 10 ** 9
+
+
+def _frames_step_cost(state: GameState, edge, to_node: str, move_per_frame: int) -> int:
+    """走一条边并（如需）完成目标站固定处理的纯帧数（不含守卫时间税、不含鲜度）。
+
+    与 _step_cost 的区别：只算帧数、去掉鲜度维度、且**不计守卫惩罚**——守卫时间税由
+    safety.opponent_cannot_finish 按"我方挡在对手前面的有效卡"另行叠加，此处若一并计入
+    会双算。move_per_frame 传高值即建模马匹（固定处理读条不随马匹变快）。
+    """
+    frames = edge_frames_for_state(state, edge, move_per_frame)
+    proc = state.process_nodes.get(to_node)
+    if proc:
+        frames += proc.process_round + _process_weather_extra_frames(state, proc)
+    return frames
+
+
+def min_frames(state: GameState, src: str, dst: str,
+               move_per_frame: int = BASE_MOVE_PER_FRAME) -> int:
+    """理论最短到达帧数（frames-first Dijkstra），拦截层 ETA 引擎的基石。
+
+    与 shortest_path 的"鲜度优先、帧数次之"不同：这里只按帧数（移动 + 固定处理读条 +
+    天气）排序，可能选出与鲜度线不同的路。不含守卫时间税、不含任务绕行、不含鲜度。
+    move_per_frame 传高值即建模马匹（快马 1200 / 短程马 1150）。不可达返回 INF_FRAMES。
+    """
+    if src not in state.nodes or dst not in state.nodes:
+        return INF_FRAMES
+    if src == dst:
+        return 0
+    dist: dict[str, int] = {src: 0}
+    heap: list[tuple[int, str]] = [(0, src)]
+    visited: set[str] = set()
+    while heap:
+        d, node = heapq.heappop(heap)
+        if node in visited:
+            continue
+        visited.add(node)
+        if node == dst:
+            return d
+        for nxt, edge in state.neighbors(node):
+            if nxt in visited:
+                continue
+            cand = d + _frames_step_cost(state, edge, nxt, move_per_frame)
+            if nxt not in dist or cand < dist[nxt]:
+                dist[nxt] = cand
+                heapq.heappush(heap, (cand, nxt))
+    return INF_FRAMES
+
+
+def min_frames_from(state: GameState, src: str,
+                    move_per_frame: int = BASE_MOVE_PER_FRAME) -> dict[str, int]:
+    """单源到全图各节点的理论最短帧数（多目标估值共用），语义同 min_frames。"""
+    if src not in state.nodes:
+        return {}
+    dist: dict[str, int] = {src: 0}
+    heap: list[tuple[int, str]] = [(0, src)]
+    visited: set[str] = set()
+    while heap:
+        d, node = heapq.heappop(heap)
+        if node in visited:
+            continue
+        visited.add(node)
+        for nxt, edge in state.neighbors(node):
+            if nxt in visited:
+                continue
+            cand = d + _frames_step_cost(state, edge, nxt, move_per_frame)
+            if nxt not in dist or cand < dist[nxt]:
+                dist[nxt] = cand
+                heapq.heappush(heap, (cand, nxt))
+    return dist
+
+
 def all_costs(state: GameState, src: str) -> dict[str, tuple[float, int]]:
     """单源到全图各节点的 (鲜度损耗, 帧数)。多目标估值时替代反复调 shortest_path。"""
     dist: dict[str, tuple[float, int]] = {src: (0.0, 0)}

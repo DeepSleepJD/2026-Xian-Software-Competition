@@ -259,5 +259,139 @@ class SafetyTests(unittest.TestCase):
         self.assertTrue(safety.must_rush(self.load(inquire(10, node=""))))
 
 
+# 拦截层死线测试地图：A —(ROAD d=2, 3帧)— B(KEY_PASS, 咽喉) — C(终点)
+DEADLINE_START = {
+    "matchId": "deadline-test",
+    "durationRound": 600,
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True},
+        {"nodeId": "B", "nodeType": "KEY_PASS"},
+        {"nodeId": "C", "nodeType": "FINISH", "terminal": True},
+    ],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+    "map": {"gameplay": {"roles": {"startNodeId": "A", "terminalNodeIds": ["C"]}}},
+}
+
+
+def deadline_inquire(round_no: int, *, me_node: str = "A", me_good: int = 50,
+                     me_fresh: float = 90.0, opp_node: str = "A",
+                     opp_delivered: bool = False, opp_retired: bool = False,
+                     opp_present: bool = True, opp_buffs: list | None = None,
+                     opp_resources: dict | None = None,
+                     nodes: list | None = None) -> dict:
+    players = [{"playerId": MY_ID, "teamId": "RED", "state": "IDLE",
+                "currentNodeId": me_node, "goodFruit": me_good, "freshness": me_fresh}]
+    if opp_present:
+        players.append({"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
+                        "currentNodeId": opp_node, "freshness": 90.0,
+                        "delivered": opp_delivered, "retired": opp_retired,
+                        "buffs": opp_buffs or [], "resources": opp_resources or {}})
+    return {"round": round_no, "players": players, "nodes": nodes or []}
+
+
+def my_guard(node_id: str, defense: int = 6) -> list[dict]:
+    return [{"nodeId": node_id,
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": defense,
+                       "initialDefense": defense, "maxDefense": 7}}]
+
+
+class OpponentCannotFinishTests(unittest.TestCase):
+    def load(self, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(DEADLINE_START)
+        state.update_inquire(inq)
+        return state
+
+    def test_healthy_opponent_can_finish(self) -> None:
+        self.assertFalse(safety.opponent_cannot_finish(self.load(deadline_inquire(100))))
+
+    def test_near_deadline_opponent_cannot_finish(self) -> None:
+        # A→C 干净行程 6 帧 + 余量 20 = 26；round 595 → 595+26 > 600
+        self.assertTrue(safety.opponent_cannot_finish(self.load(deadline_inquire(595))))
+
+    def test_delivered_opponent_is_not_cannot_finish(self) -> None:
+        self.assertFalse(safety.opponent_cannot_finish(
+            self.load(deadline_inquire(100, opp_node="C", opp_delivered=True))))
+
+    def test_retired_opponent_cannot_finish(self) -> None:
+        self.assertTrue(safety.opponent_cannot_finish(
+            self.load(deadline_inquire(100, opp_retired=True))))
+
+    def test_absent_opponent_cannot_finish(self) -> None:
+        self.assertTrue(safety.opponent_cannot_finish(
+            self.load(deadline_inquire(100, opp_present=False))))
+
+    def test_my_guard_tax_pushes_opponent_over_deadline(self) -> None:
+        # round 560：无卡 560+6+20=586<600 能完赛；我方在咽喉 B 满防卡 tax=min(50,15+30)=45
+        # → 560+6+45+20=631>600 判死
+        base = self.load(deadline_inquire(560))
+        self.assertFalse(safety.opponent_cannot_finish(base))
+        taxed = self.load(deadline_inquire(560, nodes=my_guard("B", 6)))
+        self.assertTrue(safety.opponent_cannot_finish(taxed))
+
+
+class OppMovePerFrameTests(unittest.TestCase):
+    def load(self, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(DEADLINE_START)
+        state.update_inquire(inq)
+        return state
+
+    def test_base_speed_without_buffs(self) -> None:
+        self.assertEqual(1000, safety.opp_move_per_frame(self.load(deadline_inquire(100))))
+
+    def test_fast_horse_buff(self) -> None:
+        state = self.load(deadline_inquire(
+            100, opp_buffs=[{"type": "FAST_HORSE", "remainingRound": 5}]))
+        self.assertEqual(1200, safety.opp_move_per_frame(state))
+
+    def test_held_short_horse_resource(self) -> None:
+        state = self.load(deadline_inquire(100, opp_resources={"SHORT_HORSE": 1}))
+        self.assertEqual(1150, safety.opp_move_per_frame(state))
+
+    def test_rush_buff(self) -> None:
+        state = self.load(deadline_inquire(
+            100, opp_buffs=[{"type": "RUSH_SPEED", "remainingRound": 5}]))
+        self.assertEqual(1300, safety.opp_move_per_frame(state))
+
+
+class FreshnessDeadlineTests(unittest.TestCase):
+    def load(self, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(DEADLINE_START)
+        state.update_inquire(inq)
+        return state
+
+    def test_healthy_no_deadline(self) -> None:
+        state = self.load(deadline_inquire(100, me_good=50, me_fresh=90.0))
+        self.assertFalse(safety.freshness_deadline_hit(state))
+
+    def test_low_good_hits_deadline(self) -> None:
+        state = self.load(deadline_inquire(100, me_good=1, me_fresh=90.0))
+        self.assertTrue(safety.freshness_deadline_hit(state))
+
+    def test_low_freshness_hits_deadline(self) -> None:
+        state = self.load(deadline_inquire(100, me_good=50, me_fresh=3.0))
+        self.assertTrue(safety.freshness_deadline_hit(state))
+
+    def test_delivery_deadline_combines_rush_and_freshness(self) -> None:
+        # 健康 + 时间充裕 → 不触发
+        self.assertFalse(safety.delivery_deadline_hit(
+            self.load(deadline_inquire(100, me_good=50, me_fresh=90.0))))
+        # must_rush 触发（round 595）
+        self.assertTrue(safety.delivery_deadline_hit(
+            self.load(deadline_inquire(595, me_good=50, me_fresh=90.0))))
+        # 鲜度线触发（好果 1）
+        self.assertTrue(safety.delivery_deadline_hit(
+            self.load(deadline_inquire(100, me_good=1, me_fresh=90.0))))
+
+
 if __name__ == "__main__":
     unittest.main()

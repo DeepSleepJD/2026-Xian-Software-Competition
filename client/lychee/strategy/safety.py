@@ -20,6 +20,14 @@ HOLD_MAX_FRAMES = 12
 RUSH_SAFETY_MARGIN = 60   # 帧。覆盖削卡等待+验核读条+处理中断重来+暂停损耗+抖动；
                           # 比经济层候选级 ENDGAME_MARGIN=40 更保守（全局最后防线），
                           # P5 自对弈可调；置 0 即近似退化为无兜底
+
+# 拦截层交付死线旋钮（拦截封锁流设计 §6.3/§6.6，出问题逐个回退）
+FRESH_MIN_AT_DELIVER = 5   # 预计交付鲜度低于此 → 弃拦直冲（逼近报废悬崖）
+GOOD_MIN_AT_DELIVER = 1    # 好果低于此 → 弃拦直冲（逼近好果归零，全货报废）
+OPP_FINISH_MARGIN = 20     # 对手判死的验核/交付余量帧
+# 对手"能用上的最好速度"上界（§6.1，保守取上界：宁可高估对手也别过早判他死）
+_OPP_HORSE_PER_FRAME = {"FAST_HORSE": 1200, "SHORT_HORSE": 1150}
+_RUSH_PER_FRAME = 1300
 _INF = 10 ** 9
 _HOLD_MEMORY: "WeakKeyDictionary[GameState, dict]" = WeakKeyDictionary()
 
@@ -104,6 +112,154 @@ def remaining_edge_frames(state: GameState, player) -> int:
     if remaining > 0:
         return ceil(remaining / pathing.BASE_MOVE_PER_FRAME)
     return _edge_frames_between(state, player.current_node_id, player.next_node_id)
+
+
+# ---------- 拦截层观测器（第一刀：纯观测，不改行为）----------
+
+def opp_move_per_frame(state: GameState) -> int:
+    """对手"能用上的最好速度"（每帧移动量上界，拦截封锁流设计 §6.1）。
+
+    保守取上界：在用或持有的马/疾行令都计入，取最大——ETA 引擎算对手 ETA 时宁可高估
+    他的速度（少判他死、多拦一会儿），也别低估导致过早弃拦。
+    """
+    opp = state.opponent
+    best = pathing.BASE_MOVE_PER_FRAME
+    if opp is None:
+        return best
+    for b in opp.buffs:
+        if b.remaining_round <= 0:
+            continue
+        if b.type in _OPP_HORSE_PER_FRAME:
+            best = max(best, _OPP_HORSE_PER_FRAME[b.type])
+        elif b.type == "RUSH_SPEED":
+            best = max(best, _RUSH_PER_FRAME)
+    for rt, per in _OPP_HORSE_PER_FRAME.items():
+        if opp.resources.get(rt, 0) > 0:
+            best = max(best, per)
+    return best
+
+
+def opp_min_frames_to_finish(state: GameState) -> int:
+    """对手到最近终点的理论最短帧数（按其最好速度；半路计入剩余边）。
+
+    只算干净行程（移动+固定处理），不含我方卡的时间税——后者由
+    opponent_cannot_finish 另行叠加。对手缺席/退赛/位置未知返回 _INF。
+    """
+    opp = state.opponent
+    if opp is None or opp.retired:
+        return _INF
+    speed = opp_move_per_frame(state)
+    if opp.next_node_id:
+        remaining = max(0, opp.edge_total_ms - opp.edge_progress_ms)
+        extra = ceil(remaining / speed) if remaining else 0
+        start = opp.next_node_id
+    else:
+        extra = 0
+        start = opp.current_node_id
+    if not start:
+        return _INF
+    best: int | None = None
+    for terminal in _terminals(state):
+        frames = pathing.min_frames(state, start, terminal, speed)
+        if frames >= pathing.INF_FRAMES:
+            continue
+        if best is None or frames < best:
+            best = frames
+    if best is None:
+        return _INF
+    return extra + best
+
+
+def _force_pass_tax(state: GameState, node_id: str, defense: int) -> int:
+    """对手强制通过我方一张有效卡的时间税（任务书 6.3.2 :1000-1001）。"""
+    node = state.nodes.get(node_id)
+    if node and node.node_type == "KEY_PASS":
+        return min(50, 15 + defense * 5)
+    return min(40, 10 + defense * 5)
+
+
+def _my_guard_tax_on_opponent_path(state: GameState, opp_start: str) -> int:
+    """我方仍挡在对手前面（其必经咽喉上）的有效卡对他造成的时间税之和（§6.6）。"""
+    my_team = state.my_team_id or state.me.team_id
+    speed = opp_move_per_frame(state)
+    best_terminal, best_frames = "", None
+    for terminal in _terminals(state):
+        frames = pathing.min_frames(state, opp_start, terminal, speed)
+        if best_frames is None or frames < best_frames:
+            best_terminal, best_frames = terminal, frames
+    if not best_terminal:
+        return 0
+    tax = 0
+    for node_id in pathing.choke_nodes(state, opp_start, best_terminal):
+        ns = state.node_states.get(node_id)
+        guard = ns.guard if ns else None
+        if guard and guard.active and guard.defense > 0 and guard.owner_team_id == my_team:
+            tax += _force_pass_tax(state, node_id, int(guard.defense))
+    return tax
+
+
+def opponent_cannot_finish(state: GameState) -> bool:
+    """对手已不可能完赛（或无需拦截）→ 拦截无意义，弃拦全力送达（§6.6）。
+
+    True：对手缺席/退赛/终点不可达，或"剩余帧 < 干净行程 + 我方卡时间税 + 交付余量"。
+    False：对手已交付（他完成了），或仍在有效竞速且时间账够完赛。
+    """
+    opp = state.opponent
+    if opp is None or (not opp.current_node_id and not opp.next_node_id):
+        return True
+    if opp.delivered:
+        return False
+    if opp.retired:
+        return True
+    finish = opp_min_frames_to_finish(state)
+    if finish >= _INF:
+        return True
+    opp_start = opp.next_node_id or opp.current_node_id
+    tax = _my_guard_tax_on_opponent_path(state, opp_start)
+    return state.round + finish + tax + OPP_FINISH_MARGIN > state.duration_round
+
+
+def _predicted_delivery_freshness(state: GameState) -> float:
+    """预计交付到 S15 时的剩余鲜度（沿鲜度最优路估损耗；半路含剩余边损耗）。"""
+    me = state.me
+    start = me.next_node_id or me.current_node_id
+    if not start:
+        return me.freshness
+    extra_loss = 0.0
+    if me.next_node_id:
+        remaining = max(0, me.edge_total_ms - me.edge_progress_ms)
+        frames = ceil(remaining / pathing.BASE_MOVE_PER_FRAME) if remaining else 0
+        extra_loss = frames * pathing.ROUTE_FRESHNESS.get(
+            me.route_type or "", pathing._UNKNOWN_FRESHNESS)
+    best_loss: float | None = None
+    for terminal in _terminals(state):
+        path = pathing.shortest_path(state, start, terminal)
+        if path is None:
+            continue
+        loss = pathing.path_cost(state, path)[0]
+        if best_loss is None or loss < best_loss:
+            best_loss = loss
+    if best_loss is None:
+        return me.freshness
+    return me.freshness - extra_loss - best_loss
+
+
+def freshness_deadline_hit(state: GameState) -> bool:
+    """鲜度/合法性预算触底 → 弃拦直冲（§6.3）。
+
+    触发任一：(a) 预计交付鲜度 ≤ FRESH_MIN_AT_DELIVER（逼近报废）；
+    (b) 好果 ≤ GOOD_MIN_AT_DELIVER（逼近好果归零、全货报废）。
+    """
+    if _predicted_delivery_freshness(state) <= FRESH_MIN_AT_DELIVER:
+        return True
+    if state.my_good <= GOOD_MIN_AT_DELIVER:
+        return True
+    return False
+
+
+def delivery_deadline_hit(state: GameState) -> bool:
+    """交付死线 = min(路程线, 鲜度线)：拦截/camp/设卡的最高闸，一亮即弃拦直冲。"""
+    return must_rush(state) or freshness_deadline_hit(state)
 
 
 def _can_opponent_set_guard_before_arrival(state: GameState, next_node: str) -> bool:
