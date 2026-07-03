@@ -10,8 +10,9 @@ import unittest
 
 from lychee.state import GameState
 from lychee.strategy.economy import (
-    CONTEST_DISCOUNT, EconomyStrategy, PRIORITY_ECONOMY, PRIORITY_ICE_USE,
-    TASK_SCORE_GOAL, _Target, _use_resource_action,
+    CONTEST_DISCOUNT, EconomyStrategy, ICE_BOX_VALUE, ICE_ZERO_STOCK_BONUS,
+    PRIORITY_ECONOMY, PRIORITY_ICE_USE, TASK_SCORE_GOAL, _Target,
+    _use_resource_action,
 )
 
 MY_ID = 1001
@@ -42,27 +43,30 @@ START = {
             {"nodeId": "B", "processType": "TRANSFER", "processRound": 2, "canWindow": True},
             {"nodeId": "C", "processType": "VERIFY", "processRound": 6, "canWindow": True},
         ],
+        "taskCandidates": {"T01": ["A", "B", "E"], "T04": ["E"]},
     }},
 }
 
 
 def task(task_id: str, node: str, *, score: int = 30, proc: int = 3, expire: int = 500,
          owner: int = 0, protect: int = 0, active: bool = True, completed: bool = False,
-         template: str = "T01") -> dict:
+         template: str = "T01", refresh: int = 1) -> dict:
     return {"taskId": task_id, "taskTemplateId": template, "nodeId": node,
             "processType": "CLAIM_TASK", "processRound": proc, "score": score,
-            "refreshRound": 1, "expireRound": expire, "active": active,
+            "refreshRound": refresh, "expireRound": expire, "active": active,
             "completed": completed, "failed": False,
             "ownerPlayerId": owner, "protectionPlayerId": protect}
 
 
 def opp_player(node: str, *, state: str = "IDLE", next_node: str = "",
                process: dict | None = None, task_score: int = 0,
-               delivered: bool = False, verified: bool = False) -> dict:
+               total_score: int = 0, delivered: bool = False,
+               verified: bool = False) -> dict:
     return {"playerId": OPP_ID, "teamId": "BLUE", "state": state,
             "currentNodeId": node, "nextNodeId": next_node,
             "currentProcess": process, "taskScore": task_score,
-            "delivered": delivered, "verified": verified}
+            "totalScore": total_score, "delivered": delivered,
+            "verified": verified}
 
 
 def seen_enemy_guard(node_id: str = "C") -> dict:
@@ -83,6 +87,7 @@ def inquire(round_no: int, *, node: str = "A", state: str = "IDLE", phase: str =
             action_results: list | None = None, tasks: list | None = None,
             nodes: list | None = None, resources: dict | None = None,
             task_score: int = 0, freshness: float = 100.0,
+            good_fruit: int = 90, total_score: int = 0,
             buffs: list | None = None, weather: dict | None = None,
             contests: list | None = None) -> dict:
     return {
@@ -90,8 +95,9 @@ def inquire(round_no: int, *, node: str = "A", state: str = "IDLE", phase: str =
         "players": [{"playerId": MY_ID, "teamId": "RED", "state": state,
                      "currentNodeId": node, "nextNodeId": next_node,
                      "currentProcess": process, "verified": verified,
-                     "goodFruit": 90, "freshness": freshness,
+                     "goodFruit": good_fruit, "freshness": freshness,
                      "resources": resources or {}, "taskScore": task_score,
+                     "totalScore": total_score,
                      "buffs": buffs or []}],
         "tasks": tasks or [],
         "nodes": nodes or [],
@@ -165,10 +171,10 @@ class EconomyTaskTests(unittest.TestCase):
         self.assertEqual([], self.step(inquire(2, node="A", verified=True, tasks=[task("T_1", "B")])))
 
     def test_skips_opponent_owned_or_protected(self) -> None:
-        # 对方归属/保护的任务不碰；没有其他候选 → 原地蹲守等刷新
-        self.assertEqual([{"action": "WAIT"}],
+        # 对方归属/保护的任务不碰；没有足够波次证据时不再盲蹲
+        self.assertEqual([],
                          self.acts(inquire(1, tasks=[task("T_1", "B", owner=OPP_ID)])))
-        self.assertEqual([{"action": "WAIT"}],
+        self.assertEqual([],
                          self.acts(inquire(2, tasks=[task("T_1", "B", protect=OPP_ID)])))
 
     def test_own_protection_ok(self) -> None:
@@ -176,14 +182,14 @@ class EconomyTaskTests(unittest.TestCase):
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
 
     def test_skips_expiring_task(self) -> None:
-        # A→B 3 帧 + 读条 3 帧 > expire=4 → 追不上，放弃（转为蹲守）
-        self.assertEqual([{"action": "WAIT"}],
+        # A→B 3 帧 + 读条 3 帧 > expire=4 → 追不上，放弃
+        self.assertEqual([],
                          self.acts(inquire(1, tasks=[task("T_1", "B", expire=4)])))
 
     def test_skips_completed_inactive(self) -> None:
-        self.assertEqual([{"action": "WAIT"}],
+        self.assertEqual([],
                          self.acts(inquire(1, tasks=[task("T_1", "B", completed=True)])))
-        self.assertEqual([{"action": "WAIT"}],
+        self.assertEqual([],
                          self.acts(inquire(2, tasks=[task("T_1", "B", active=False)])))
 
     def test_prefers_on_route_task(self) -> None:
@@ -249,28 +255,82 @@ class EconomyTaskTests(unittest.TestCase):
         acts = self.acts(inquire(10, node="A", tasks=[task("T_gate", "C")]))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
 
-    def test_no_linger_when_behind_opponent(self) -> None:
-        # P4e：落后于在场对手时不蹲守——被会设卡的对手甩在咽喉后面是败局起点
-        inq = inquire(1, node="A", resources={"ICE_BOX": 2})
-        inq["players"].append({"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
-                               "currentNodeId": "C", "nextNodeId": ""})
-        self.assertEqual([], self.step(inq))
-
-    def test_lingers_when_opponent_delivered(self) -> None:
-        inq = inquire(1, node="A", resources={"ICE_BOX": 2})
-        inq["players"].append({"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
-                               "currentNodeId": "D", "delivered": True})
-        intents = self.step(inq)
-        self.assertEqual([{"action": "WAIT"}], [a for it in intents for a in it.actions])
-
-    def test_lingers_when_no_candidates_and_time_ample(self) -> None:
-        # 无任何候选、离截止尚早：原地 WAIT 蹲刷新（压制 delivery 的赶路）
-        intents = self.step(inquire(1, node="A", resources={"ICE_BOX": 2}))
+    def test_lingers_when_wave_is_close_and_time_ample(self) -> None:
+        # 无任何候选，但脚下是任务候选节点且下一波临近：WAIT 蹲刷新
+        self.strategy._seen_waves.update({240, 280})
+        intents = self.step(inquire(308, node="A", resources={"ICE_BOX": 2}))
         self.assertEqual([{"action": "WAIT"}], [a for it in intents for a in it.actions])
         self.assertEqual(PRIORITY_ECONOMY, intents[0].priority)
 
+    def test_no_linger_when_wave_is_far(self) -> None:
+        # P4j 局 1 核心反例：下一波 34 帧外，行军穿走廊优先
+        self.strategy._seen_waves.update({200, 240})
+        self.assertEqual([], self.step(inquire(246, node="A", resources={"ICE_BOX": 2})))
+
+    def test_no_linger_without_wave_samples(self) -> None:
+        self.strategy._seen_waves.add(240)
+        self.assertEqual([], self.step(inquire(246, node="A", resources={"ICE_BOX": 2})))
+
+    def test_no_linger_at_non_candidate_node(self) -> None:
+        self.strategy._seen_waves.update({240, 280})
+        self.assertEqual([], self.step(inquire(308, node="C", resources={"ICE_BOX": 2})))
+
+    def test_linger_when_behind_non_guard_opponent(self) -> None:
+        # P4j 放宽：刷任务型对手没见过设卡，落后时仍可为临近波次蹲守
+        self.strategy._seen_waves.update({240, 280})
+        inq = inquire(308, node="A", resources={"ICE_BOX": 2})
+        inq["players"].append(opp_player("B"))
+        self.assertEqual([{"action": "WAIT"}],
+                         [a for it in self.step(inq) for a in it.actions])
+
+    def test_no_linger_when_behind_guard_opponent(self) -> None:
+        self.strategy._seen_waves.update({240, 280})
+        inq = inquire(308, node="A", resources={"ICE_BOX": 2},
+                      nodes=[seen_enemy_guard()])
+        inq["players"].append(opp_player("B"))
+        self.assertEqual([], self.step(inq))
+
+    def test_lingers_when_opponent_delivered_and_deficit_small(self) -> None:
+        self.strategy._seen_waves.update({400, 440})
+        inq = inquire(473, node="A", resources={"ICE_BOX": 2},
+                      task_score=105, freshness=90.0, good_fruit=99)
+        inq["players"].append(opp_player("D", delivered=True, total_score=750))
+        intents = self.step(inq)
+        self.assertEqual([{"action": "WAIT"}], [a for it in intents for a in it.actions])
+
+    def test_no_linger_when_opponent_delivered_and_we_lead_or_gap_too_large(self) -> None:
+        self.strategy._seen_waves.update({400, 440})
+        lead = inquire(473, node="A", resources={"ICE_BOX": 2},
+                       task_score=105, freshness=90.0, good_fruit=99)
+        lead["players"].append(opp_player("D", delivered=True, total_score=700))
+        self.assertEqual([], self.step(lead))
+
+        self.strategy._seen_waves.update({400, 440})
+        far = inquire(474, node="A", resources={"ICE_BOX": 2},
+                      task_score=105, freshness=90.0, good_fruit=99)
+        far["players"].append(opp_player("D", delivered=True, total_score=800))
+        self.assertEqual([], self.step(far))
+
+    def test_projected_score_matches_endgame_order_of_magnitude(self) -> None:
+        self.state.update_inquire(inquire(473, node="A", task_score=105,
+                                          freshness=90.0, good_fruit=99))
+        self.assertAlmostEqual(732, self.strategy._projected_score(self.state), delta=10)
+
+    def test_next_wave_round_uses_seen_period(self) -> None:
+        self.strategy._seen_waves.update({240, 280})
+        self.state.update_inquire(inquire(308, node="A"))
+        self.assertEqual(320, self.strategy._next_wave_round(self.state))
+        self.state.update_inquire(inquire(321, node="A"))
+        self.assertEqual(360, self.strategy._next_wave_round(self.state))
+
+    def test_next_wave_round_requires_two_samples(self) -> None:
+        self.strategy._seen_waves.add(240)
+        self.state.update_inquire(inquire(246, node="A"))
+        self.assertIsNone(self.strategy._next_wave_round(self.state))
+
     def test_no_linger_near_deadline(self) -> None:
         # 现在动身刚好来得及：不再蹲守，放行 delivery
+        self.strategy._seen_waves.update({520, 560})
         self.assertEqual([], self.step(inquire(555, node="A", resources={"ICE_BOX": 2})))
 
     def test_no_linger_at_unprocessed_station(self) -> None:
@@ -320,14 +380,14 @@ class EconomyTaskTests(unittest.TestCase):
         self.assertNotIn({"action": "CLAIM_TASK", "taskId": "T_e"}, acts)
 
     def test_consumable_task_needs_stock(self) -> None:
-        # T06 类模板需要消耗马：没有库存不接（转蹲守），有库存接
+        # T06 类模板需要消耗马：没有库存不接，有库存接
         start = dict(START)
         start["taskTemplates"] = [{"taskTemplateId": "T06", "processRound": 3, "score": 30,
                                    "requiredResourceTypes": ["SHORT_HORSE"]}]
         self.state = GameState(MY_ID)
         self.state.update_start(start)
         t = [task("T_1", "B", template="T06")]
-        self.assertEqual([{"action": "WAIT"}], self.acts(inquire(1, node="A", tasks=t)))
+        self.assertEqual([], self.acts(inquire(1, node="A", tasks=t)))
         acts = self.acts(inquire(2, node="A", tasks=t, resources={"SHORT_HORSE": 1}))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
 
@@ -371,6 +431,19 @@ class EconomyIceBoxTests(unittest.TestCase):
         nodes = [{"nodeId": "B", "resourceStock": {"ICE_BOX": 1}}]
         acts = self.acts(inquire(1, node="A", nodes=nodes, resources={"ICE_BOX": 2}))
         self.assertNotIn("CLAIM_RESOURCE", [a["action"] for a in acts])
+
+    def test_zero_stock_ice_box_has_bonus_value(self) -> None:
+        nodes = [{"nodeId": "B", "resourceStock": {"ICE_BOX": 1}}]
+        self.state.update_inquire(inquire(1, node="A", nodes=nodes))
+        cands = self.strategy._candidates(self.state, "A")
+        ice = next(c for c in cands if c.key == "RES:B:ICE_BOX")
+        self.assertEqual(ICE_BOX_VALUE + ICE_ZERO_STOCK_BONUS, ice.value)
+
+        self.state.update_inquire(inquire(2, node="A", nodes=nodes,
+                                          resources={"ICE_BOX": 1}))
+        cands = self.strategy._candidates(self.state, "A")
+        ice = next(c for c in cands if c.key == "RES:B:ICE_BOX")
+        self.assertEqual(ICE_BOX_VALUE, ice.value)
 
     def test_claims_ice_box_after_task_goal(self) -> None:
         # 任务分拿满只关任务候选，冰鉴领取不连坐（P3 修正：756 局停 S07
@@ -469,6 +542,31 @@ class EconomyIceBoxTests(unittest.TestCase):
         acts = self.acts(inquire(1, node="A", freshness=84.0,
                                  resources={"ICE_BOX": 1}, weather=weather))
         self.assertIn({"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}, acts)
+
+    def test_zero_stock_ice_box_exempts_slow_route_filter(self) -> None:
+        slow = {**START, "matchId": "slow-ice-test",
+                "edges": [dict(e) for e in START["edges"]]}
+        slow["edges"][3] = {"edgeId": "E4", "fromNodeId": "B", "toNodeId": "E",
+                            "routeType": "MOUNTAIN", "distance": 4, "bidirectional": True}
+        self.state = GameState(MY_ID)
+        self.state.update_start(slow)
+        nodes = [{"nodeId": "E", "resourceStock": {"ICE_BOX": 1}}]
+        acts = self.acts(inquire(1, node="A", nodes=nodes, task_score=TASK_SCORE_GOAL))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
+
+    def test_held_ice_box_does_not_exempt_slow_route_filter(self) -> None:
+        slow = {**START, "matchId": "slow-held-ice-test",
+                "edges": [dict(e) for e in START["edges"]]}
+        slow["edges"][3] = {"edgeId": "E4", "fromNodeId": "B", "toNodeId": "E",
+                            "routeType": "MOUNTAIN", "distance": 4, "bidirectional": True}
+        self.state = GameState(MY_ID)
+        self.state.update_start(slow)
+        nodes = [{"nodeId": "E", "resourceStock": {"ICE_BOX": 1}}]
+        acts = self.acts(inquire(1, node="A", nodes=nodes,
+                                 resources={"ICE_BOX": 1},
+                                 task_score=TASK_SCORE_GOAL))
+        self.assertNotIn("MOVE", [a["action"] for a in acts])
+        self.assertNotIn("CLAIM_RESOURCE", [a["action"] for a in acts])
 
 
 class EconomyGeneralResourceTests(unittest.TestCase):
@@ -682,6 +780,27 @@ class EconomyContestTests(unittest.TestCase):
         inq = inquire(1, node="A")
         inq["players"].append(opp_player("B", state="MOVING", next_node="E"))
         self.assertEqual({"T_x": 0.0}, self.factors(inq, [feas("T_x", "E", 11)]))
+
+    def test_rare_zero_stock_ice_keeps_full_value_with_small_eta_loss(self) -> None:
+        inq = inquire(1, node="A",
+                      nodes=[{"nodeId": "E", "resourceStock": {"ICE_BOX": 1}}])
+        inq["players"].append(opp_player("B", state="MOVING", next_node="E"))
+        got = self.factors(inq, [feas("RES:E:ICE_BOX", "E", 10, raw=0)])
+        self.assertEqual({"RES:E:ICE_BOX": 1.0}, got)
+
+    def test_rare_ice_tolerance_does_not_apply_when_eta_loss_is_large(self) -> None:
+        inq = inquire(1, node="A",
+                      nodes=[{"nodeId": "E", "resourceStock": {"ICE_BOX": 1}}])
+        inq["players"].append(opp_player("B", state="MOVING", next_node="E"))
+        got = self.factors(inq, [feas("RES:E:ICE_BOX", "E", 12, raw=0)])
+        self.assertEqual({"RES:E:ICE_BOX": 0.0}, got)
+
+    def test_rare_ice_tolerance_does_not_apply_when_holding_ice(self) -> None:
+        inq = inquire(1, node="A", resources={"ICE_BOX": 1},
+                      nodes=[{"nodeId": "E", "resourceStock": {"ICE_BOX": 1}}])
+        inq["players"].append(opp_player("B", state="MOVING", next_node="E"))
+        got = self.factors(inq, [feas("RES:E:ICE_BOX", "E", 10, raw=0)])
+        self.assertEqual({"RES:E:ICE_BOX": 0.0}, got)
 
     def test_factor_heading_within_margin_only_discounts(self) -> None:
         # 对手 ETA 6 vs 我方 8：更近但不"明显"（6+3 ≥ 8）→ 有朝向也只打折

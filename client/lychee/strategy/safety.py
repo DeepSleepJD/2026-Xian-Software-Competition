@@ -142,6 +142,13 @@ def _observe_enemy_guard(state: GameState, mem: dict) -> None:
             return
 
 
+def opponent_ever_set_guard(state: GameState) -> bool:
+    """本局是否见过对手设卡；供 economy 区分刷任务型/设卡型对手。"""
+    mem = _hold_memory(state)
+    _observe_enemy_guard(state, mem)
+    return bool(mem.get("guard_ever_seen"))
+
+
 def _hold_streak_allows(state: GameState, next_node: str, mem: dict) -> bool:
     streaks = mem.setdefault("streaks", {})
     count, last_round = streaks.get(next_node, (0, -1))

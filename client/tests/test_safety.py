@@ -142,6 +142,14 @@ class TrapGateTests(unittest.TestCase):
         state = self.load(TRAP_START, trap_inquire(100))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
+    def test_opponent_ever_set_guard_accessor_keeps_memory(self) -> None:
+        state = self.load(TRAP_START, trap_inquire(100))
+        self.assertFalse(safety.opponent_ever_set_guard(state))
+        state.update_inquire(trap_inquire(101, nodes=seen_enemy_guard()))
+        self.assertTrue(safety.opponent_ever_set_guard(state))
+        state.update_inquire(trap_inquire(102))
+        self.assertTrue(safety.opponent_ever_set_guard(state))
+
     def test_no_hold_without_opponent_guard_points(self) -> None:
         state = self.load(TRAP_START, trap_inquire(100, opp_ap=0, nodes=seen_enemy_guard()))
         self.assertFalse(safety.hold_before_choke(state, "B"))

@@ -50,11 +50,18 @@ CONTEST_DISCOUNT = 0.5        # 竞争折扣（B2b）：对手到候选点 ETA �
                               # 目标，全面出局会饿死经济层
 CONTEST_ETA_MARGIN = 3        # 帧。硬出局要求对手"明显"更近（ETA+此值仍先到）：
                               # ETA 是估计值（天气/守卫/暂停噪声），弱优势只降权不放弃
+LINGER_WAVE_WINDOW = 15       # 蹲守只等临近刷新波；更远时行军穿走廊优先
+LINGER_WAVE_GRACE = 3         # 波次边界/feed 抖动余量；落空后下一波会自然超窗
+LINGER_DEFICIT_WINDOW = 45    # 对手已交付且小差额落后时，最多等约一个刷新周期
+DEFICIT_LINGER_MAX = 40       # 差额过大时不白等，立即交付锁分/保鲜
+WAVE_MIN_SAMPLES = 2          # 至少见过两个不同 refreshRound，才外推刷新周期
 TARGET_STICKINESS = 2.0       # 换目标需净值优势超过此值（防止停靠间目标抖动）
 TARGET_SWITCH_RATIO = 0.20    # 已承诺目标存在时，新目标需额外领先 20%
 BACKTRACK_MARGIN = 2.0        # 刚到站即原路折返需额外覆盖一条边成本
 ICE_BOX_MAX_HOLD = 2          # 库存到量后不再追领（本图第 3 个在 S06 支线，
                               # 实账往返~118帧鲜度+用时亏损 > 冰鉴收益，正确放弃）
+ICE_ZERO_STOCK_BONUS = 6.0    # 0 冰时首个冰鉴额外覆盖十位鲜度阈值的坏果损失
+ICE_CONTEST_TOLERANCE = 5     # 稀缺冰 ETA 劣势在此范围内仍全价争，不系统性让渡
 RESOURCE_CLAIM_FRAMES = 2     # 实测资源领取读条帧数（估值用，非规则常量）
 ICE_USE_MARGIN = 2.0          # freshness ≤ 阈值+2 即用
 HOT_ICE_USE_MARGIN = 5.0      # 酷暑/临近酷暑时更早保鲜，避免连续跨十位阈值
@@ -197,6 +204,7 @@ class EconomyStrategy(Strategy):
         self._previous_stationary_node = ""
         self._pending_use_resource = ""
         self.current_plan: tuple[str, int] | None = None
+        self._seen_waves: set[int] = set()
 
     def propose(self, state: GameState) -> list[Intent]:
         me = state.me
@@ -205,6 +213,7 @@ class EconomyStrategy(Strategy):
 
         self._gate.observe(state)
         self._read_feedback(state)
+        self._observe_waves(state)
 
         # 读条/移动/休整中：闭嘴让帧推进（打断读条 = 进度清零，任务书 4.3）
         if me.current_process is not None:
@@ -298,12 +307,9 @@ class EconomyStrategy(Strategy):
         self._cur_target_key = target.key if target else ""
         self.current_plan = (spot, target.proc_frames) if target is not None else None
         if target is None:
-            # 无候选：离终局截止尚早就原地蹲守刷新（任务只在刷新后才可见）。
-            # 只为未拿到的里程碑档（<110）蹲；110 后边际最多 +10，
-            # 抵不过蹲守的用时分流失（~0.117/帧）
-            # P4e：落后于在场对手时不蹲——被会设卡的对手甩在咽喉后面是败局起点
-            if me.task_score < 110 and safety.ahead_of_opponent(state) \
-                    and self._can_linger(state, cur):
+            # 无候选：只在脚下可能刷任务、下一波临近或终局小差额时蹲守。
+            # 否则行军穿过任务走廊本身更优，避免 P4j 复盘中的白等。
+            if self._should_linger(state, cur):
                 return Intent(kind="economy", priority=PRIORITY_ECONOMY,
                               actions=[{"action": "WAIT"}], note="蹲守任务刷新")
             return None
@@ -352,7 +358,8 @@ class EconomyStrategy(Strategy):
             done_round = state.round + to_frames + cand.proc_frames
             if cand.expire_round > 0 and done_round > cand.expire_round:
                 continue
-            if self._walks_slow_route(state, cur, spot, anchor, allowed_slow):
+            if self._walks_slow_route(state, cur, spot, anchor, allowed_slow) \
+                    and not self._slow_route_exempt(state, cand):
                 continue   # 只为经济目标走山路/支线级慢边 → 弃（P4e）
             feasible.append((cand, spot, to_frames, done_round))
         if not feasible:
@@ -429,6 +436,9 @@ class EconomyStrategy(Strategy):
         if not opp.current_node_id:
             return factors      # 对手不在场：估值完全不变
         opp_task_capped = opp.task_score >= TASK_SCORE_GOAL
+        me_ice = state.me.resources.get("ICE_BOX", 0)
+        map_ice_left = sum(ns.resource_stock.get("ICE_BOX", 0)
+                           for ns in state.node_states.values())
         if opp.next_node_id:    # 半路：从下一节点起算 + 剩余边帧
             origin = opp.next_node_id
             extra = safety.remaining_edge_frames(state, opp)
@@ -446,6 +456,9 @@ class EconomyStrategy(Strategy):
             opp_eta = extra + frames
             if opp_eta >= to_frames:
                 continue        # 对手不更近：估值完全不变
+            if cand.key.endswith(":ICE_BOX") and me_ice == 0 and map_ice_left <= 2 \
+                    and to_frames <= opp_eta + ICE_CONTEST_TOLERANCE:
+                continue        # 稀缺首冰：小 ETA 劣势仍争，避免对手双吃冰鉴
             if opp_eta + CONTEST_ETA_MARGIN < to_frames and \
                     self._opponent_heading_to(state, spot):
                 factors[cand.key] = 0.0
@@ -501,6 +514,12 @@ class EconomyStrategy(Strategy):
                 return True
         return False
 
+    @staticmethod
+    def _slow_route_exempt(state: GameState, cand: _Target) -> bool:
+        """0 冰状态下冰鉴候选解除慢边硬禁令，交给净值账裁决。"""
+        return cand.key.endswith(":ICE_BOX") and \
+            state.me.resources.get("ICE_BOX", 0) < 1
+
     def _can_linger(self, state: GameState, cur: str) -> bool:
         """蹲守安全判定：现在动身仍能在截止前送达，且不欠本站固定处理。"""
         if not self._gate.clear(state, cur):
@@ -513,6 +532,70 @@ class EconomyStrategy(Strategy):
             return False
         return state.round + pathing.path_frames(state, p) <= \
             state.duration_round - ENDGAME_MARGIN
+
+    def _observe_waves(self, state: GameState) -> None:
+        for t in state.tasks:
+            if t.refresh_round > 0:
+                self._seen_waves.add(t.refresh_round)
+
+    def _next_wave_round(self, state: GameState) -> int | None:
+        waves = sorted(self._seen_waves)
+        if len(waves) < WAVE_MIN_SAMPLES:
+            return None
+        diffs = [b - a for a, b in zip(waves, waves[1:]) if b > a]
+        if not diffs:
+            return None
+        period = min(diffs)
+        nxt = waves[-1]
+        while nxt <= state.round:
+            nxt += period
+        return nxt
+
+    @staticmethod
+    def _is_task_candidate_node(state: GameState, node_id: str) -> bool:
+        return any(node_id in nodes for nodes in state.task_candidates.values())
+
+    def _should_linger(self, state: GameState, cur: str) -> bool:
+        me = state.me
+        if not self._can_linger(state, cur):
+            return False
+        if not self._is_task_candidate_node(state, cur):
+            return False
+        nxt = self._next_wave_round(state)
+        if nxt is None:
+            return False
+        wait = nxt - state.round
+        opp = state.opponent
+        opp_delivered = bool(opp and opp.delivered)
+
+        if opp_delivered and me.task_score < TASK_SCORE_GOAL:
+            deficit = opp.total_score - self._projected_score(state)
+            if 0 < deficit <= DEFICIT_LINGER_MAX and \
+                    wait <= LINGER_DEFICIT_WINDOW + LINGER_WAVE_GRACE:
+                return True
+            return False
+
+        if me.task_score >= 110:
+            return False
+        if wait > LINGER_WAVE_WINDOW + LINGER_WAVE_GRACE:
+            return False
+        if not (safety.ahead_of_opponent(state)
+                or not safety.opponent_ever_set_guard(state)):
+            return False
+        return True
+
+    @staticmethod
+    def _projected_score(state: GameState) -> int:
+        """按当前状态即刻动身交付的最终分保守估计（终局差额蹲守用）。"""
+        me = state.me
+        terminal_frames = safety.frames_to_terminal(state)
+        eta = state.round + terminal_frames
+        time_left = max(0, state.duration_round - eta)
+        raw = me.task_score
+        time_score = (time_left * 70 // state.duration_round) * min(raw, 90) // 90
+        fresh = max(0.0, me.freshness - terminal_frames * 0.07)
+        return (240 + _task_points(raw) + int(me.good_fruit / 100 * 180)
+                + int(fresh / 100 * 180) + time_score)
 
     def _is_immediate_backtrack(self, state: GameState, cur: str, spot: str) -> bool:
         if not self._previous_stationary_node or spot == cur:
@@ -576,7 +659,7 @@ class EconomyStrategy(Strategy):
                 cap = RESOURCE_CLAIM_CAPS.get(resource_type)
                 if cap is not None and me.resources.get(resource_type, 0) >= cap:
                     continue
-                value = self._resource_value(resource_type, hard_required_resources)
+                value = self._resource_value(state, resource_type, hard_required_resources)
                 if value is None:
                     continue
                 if not self._resource_has_claim_consumer(state, resource_type,
@@ -591,10 +674,13 @@ class EconomyStrategy(Strategy):
                     expire_round=0, note=f"资源{resource_type}@{node_id}"))
         return out
 
-    def _resource_value(self, resource_type: str, hard_required_resources: set[str]) -> float | None:
+    def _resource_value(self, state: GameState, resource_type: str,
+                        hard_required_resources: set[str]) -> float | None:
         value = RESOURCE_BASE_VALUES.get(resource_type)
         if value is None:
             return None
+        if resource_type == "ICE_BOX" and state.me.resources.get("ICE_BOX", 0) < 1:
+            value += ICE_ZERO_STOCK_BONUS
         if resource_type in hard_required_resources:
             return max(value, ICE_BOX_VALUE)
         return value
