@@ -51,6 +51,9 @@ SLOW_ROUTE_COEF_LIMIT = 1500  # 经济目标不走慢边（P4e）：MOUNTAIN(178
                               # 主线只有山路时经济层不哑）。帧数上限方案已否决——
                               # 它把"大路任务簇"（对水路基线呈绕行，实测配冰鉴净赚
                               # 34 分）一起误杀，见任务归档 2026-07-03 归因实验
+CHOKE_LEAD_MARGIN = 8         # P4m 领先权治理器：领先竞争咽喉 ≥此帧数才算"持有领先权"，
+                              # 持有时任何候选做完必须仍先于对手进咽喉（含同样余量）——
+                              # 13:22 现网局 19 帧之差=对手先到 S10 关门打狗、我方 0 分
 CONTEST_DISCOUNT = 0.5        # 竞争折扣（B2b）：对手到候选点 ETA 更近但无朝向实证时
                               # 净值打对折——宁可折扣不硬出局，对手一次只能处理一个
                               # 目标，全面出局会饿死经济层
@@ -326,6 +329,39 @@ class EconomyStrategy(Strategy):
                           note=f"赶路→{target.note}")
         return None
 
+    def _race_context(self, state: GameState, cur: str,
+                      anchor: str) -> tuple[int, dict] | None:
+        """P4m 领先权治理器上下文：正持有竞争咽喉领先权时返回
+        (咽喉绝对截止帧, 咽喉出发的全图帧数表)，否则 None（不启用）。
+
+        竞争咽喉 = 我方与对手剩余路径共有的割点（本图 S10）。只保护既有领先
+        （my_eta ≤ opp_eta - MARGIN 才启用）、不牺牲经济去创造领先：平手/落后时
+        照常吃分——落后进咽喉的关门风险由 hold_before_choke 兜底，多做任务不加险；
+        领先时任何候选做完必须仍先于对手进咽喉，否则出局（13:22 局 19 帧之差 =
+        对手先到关门、我方归零；农夫型对手 opp_eta 极大，此约束永不触发、零损）。
+        """
+        opp = state.opponent
+        if opp is None or opp.delivered or opp.retired:
+            return None
+        opp_start = opp.next_node_id or opp.current_node_id
+        if not opp_start:
+            return None
+        my_chokes = list(pathing.choke_nodes(state, cur, anchor))
+        if not my_chokes:
+            return None
+        opp_chokes = set(pathing.choke_nodes(state, opp_start, anchor))
+        contested = [c for c in my_chokes if c in opp_chokes]
+        if not contested:
+            return None
+        choke = min(contested, key=lambda c: safety.me_eta(state, c))
+        my_direct = safety.me_eta(state, choke)
+        opp_eta = safety.opp_eta(state, choke)
+        if my_direct >= _INF or opp_eta >= _INF:
+            return None
+        if my_direct > opp_eta - CHOKE_LEAD_MARGIN:
+            return None
+        return state.round + opp_eta - CHOKE_LEAD_MARGIN, pathing.all_costs(state, choke)
+
     def _pick_target(self, state: GameState, cur: str) -> tuple[_Target | None, str]:
         """净值 + 一步前瞻贪心，返回 (目标, 停靠节点)。"""
         anchor = self._nearest_terminal(state, cur) or state.roles.gate_node_id
@@ -334,6 +370,7 @@ class EconomyStrategy(Strategy):
         from_cur = pathing.all_costs(state, cur)
         base_frames = from_cur.get(anchor, (0.0, _INF))[1]
         deadline = state.duration_round - ENDGAME_MARGIN
+        race = self._race_context(state, cur, anchor)
 
         # 第一遍：可行性过滤（到点最近停靠点、过期、终局截止、慢边、净值>0）
         allowed_slow = self._delivery_slow_edges(state, cur, anchor)
@@ -352,6 +389,11 @@ class EconomyStrategy(Strategy):
                 if not cand.delivery_critical and \
                         self._is_backtrack_trip(state, cur, s, anchor):
                     continue   # 回头路铁律：去程回程共边（身后/死胡同）永不追
+                if race is not None and not cand.delivery_critical:
+                    choke_deadline, from_choke = race
+                    reach = from_choke.get(s, (0.0, _INF))[1]
+                    if state.round + f + cand.proc_frames + reach > choke_deadline:
+                        continue   # 领先权治理器：做完就丢咽喉领先权的候选出局
                 if f < to_frames:
                     spot, to_frames = s, f
             if not spot or to_frames >= _INF:
@@ -405,6 +447,10 @@ class EconomyStrategy(Strategy):
                 if not c2.delivery_critical and \
                         self._is_backtrack_trip(state, spot, s2, anchor):
                     continue   # 前瞻跟进同样不走回头路
+                if race is not None and not c2.delivery_critical:
+                    choke_deadline, from_choke = race
+                    if done2 + from_choke.get(s2, (0.0, _INF))[1] > choke_deadline:
+                        continue   # 前瞻跟进同样不得丢咽喉领先权
                 cost2 = max(0, to2 + c2.proc_frames + back2 - back)
                 follow = max(follow, (c2.marginal_value(raw + cand.raw_score)
                                       - cost2 * DETOUR_COST_PER_FRAME) * contest[c2.key])

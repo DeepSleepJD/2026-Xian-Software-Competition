@@ -798,5 +798,85 @@ class EconomyContestTests(unittest.TestCase):
         self.assertEqual({"T_x": 1.0, "RES:E:ICE_BOX": 1.0}, self.factors(inq2, cands))
 
 
+# P4m 领先权治理器地图（C 不设处理站，避免"经 C 绕行更便宜"触发回头路铁律）：
+# A —d20— B —d2— C(咽喉/宫门) —d2— D(终点)；环路支线 B —d2— E —d2— C，任务在 E。
+# 帧数：B→C=3、B→E=3、E→C=3；E 任务 via 咽喉 = 3+proc3+3 = 9 帧后过 C。
+RACE_START = {
+    **START,
+    "matchId": "race-test",
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B", "routeType": "ROAD", "distance": 20, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C", "routeType": "ROAD", "distance": 2, "bidirectional": True},
+        {"edgeId": "E3", "fromNodeId": "C", "toNodeId": "D", "routeType": "ROAD", "distance": 2, "bidirectional": True},
+        {"edgeId": "E4", "fromNodeId": "B", "toNodeId": "E", "routeType": "ROAD", "distance": 2, "bidirectional": True},
+        {"edgeId": "E5", "fromNodeId": "E", "toNodeId": "C", "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+    "map": {"gameplay": {
+        "roles": {"startNodeId": "A", "gateNodeId": "C", "terminalNodeIds": ["D"]},
+        "processNodes": [],
+    }},
+}
+
+
+def racing_opp(progress_ms: int = 17500) -> dict:
+    """对手在 A→B 长边上（总 30000ms）：progress 17500 → 剩余 13 帧，
+    到咽喉 C 的 ETA = 13+3 = 16，治理器截止 = +8 帧。"""
+    opp = opp_player("A", next_node="B", state="MOVING")
+    opp["edgeProgressMs"] = progress_ms
+    opp["edgeTotalMs"] = 30000
+    return opp
+
+
+class RaceGovernorTests(unittest.TestCase):
+    """P4m：领先竞争咽喉时，做完会丢领先权的候选出局；平手/落后/无对手不禁食。
+
+    13:22 现网局：19 帧之差 = 对手先进 S09→S10 边关门打狗、我方未送达归零。
+    """
+
+    def load(self, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(RACE_START)
+        state.update_inquire(inq)
+        return state
+
+    def race_inquire(self, *, opp: dict | None, me_node: str = "B") -> dict:
+        inq = inquire(100, node=me_node, tasks=[task("T_far", "E", score=30)])
+        if opp is not None:
+            inq["players"].append(opp)
+        return inq
+
+    def acts(self, inq: dict) -> list[dict]:
+        state = self.load(inq)
+        return [a for it in EconomyStrategy().propose(state) for a in it.actions]
+
+    def test_far_detour_rejected_while_leading(self) -> None:
+        # 我在 B（距咽喉 C 3 帧）、对手剩 13 帧到 B（到 C 16 帧）→ 持有领先权，
+        # 截止 +8；E 任务 via = 9 > 8 → 做完丢领先权，出局，无经济 MOVE
+        acts = self.acts(self.race_inquire(opp=racing_opp()))
+        self.assertEqual([], [a for a in acts if a.get("action") == "MOVE"])
+
+    def test_far_detour_allowed_when_opponent_delivered(self) -> None:
+        acts = self.acts(self.race_inquire(opp=opp_player("A", delivered=True)))
+        self.assertIn({"action": "MOVE", "targetNodeId": "E"}, acts)
+
+    def test_far_detour_allowed_when_already_behind(self) -> None:
+        # 对手已越过咽喉 C（在 C→D 段）→ 竞速已输，不禁食（关门风险由 hold 兜底）
+        acts = self.acts(self.race_inquire(opp=opp_player("C", next_node="D",
+                                                          state="MOVING")))
+        self.assertIn({"action": "MOVE", "targetNodeId": "E"}, acts)
+
+    def test_far_detour_allowed_without_opponent(self) -> None:
+        acts = self.acts(self.race_inquire(opp=None))
+        self.assertIn({"action": "MOVE", "targetNodeId": "E"}, acts)
+
+    def test_near_task_allowed_while_leading(self) -> None:
+        # 领先时脚下候选照做：B 本地任务 via = proc3+3 = 6 ≤ 8，不丢领先权
+        inq = inquire(100, node="B", tasks=[task("T_near", "B", score=30)])
+        inq["players"].append(racing_opp())
+        state = self.load(inq)
+        acts = [a for it in EconomyStrategy().propose(state) for a in it.actions]
+        self.assertIn({"action": "CLAIM_TASK", "taskId": "T_near"}, acts)
+
+
 if __name__ == "__main__":
     unittest.main()
