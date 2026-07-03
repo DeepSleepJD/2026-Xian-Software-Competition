@@ -194,6 +194,12 @@ class TrapGateTests(unittest.TestCase):
         state = self.load(TRAP_START, trap_inquire(100, opp_delivered=True, nodes=seen_enemy_guard()))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
+    def test_no_hold_when_opponent_beyond_choke(self) -> None:
+        # 对手在 B 之外的 C（未朝 B 走）：不算威胁——全路径回身 ETA 扩面已论证否决
+        # （会对"跟在领先对手身后"连环 hold），预算制释放兜住尾部风险
+        state = self.load(LONG_TRAP_START, trap_inquire(100, opp_node="C"))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+
     def test_hold_time_budget(self) -> None:
         # P4m：12 帧死等上限 → 时间预算制。A 到终点 6 帧，预算线 =
         # 600 - 6 - FP_TAX_RESERVE(50) - RUSH_SAFETY_MARGIN(60) = 484：

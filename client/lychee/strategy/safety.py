@@ -382,6 +382,35 @@ def interception_node(state: GameState) -> str | None:
     return best_node
 
 
+def opponent_locked(state: GameState) -> bool:
+    """对手是否被我方有效卡锁死在竞争咽喉远侧（P4m 决策#1）。
+
+    True = 对手到每个终点的路径咽喉集里都压着我方有效卡——他够不到我方前路
+    任何节点、无法关门，铁律"验核前保留 6 支"所防的威胁被结构性排除，
+    保留量可降至 SQUAD_RESERVE_LOCKED 腾人手给 G3 增援维持卡。
+    """
+    opp = state.opponent
+    if opp is None or opp.delivered or opp.retired:
+        return False
+    opp_start = opp.next_node_id or opp.current_node_id
+    if not opp_start:
+        return False
+    my_team = state.my_team_id or state.me.team_id
+    guarded = [nid for nid, ns in state.node_states.items()
+               if ns.guard and ns.guard.active and ns.guard.defense > 0
+               and ns.guard.owner_team_id == my_team]
+    if not guarded:
+        return False
+    terminals = _terminals(state)
+    if not terminals:
+        return False
+    for terminal in terminals:
+        chokes = set(pathing.choke_nodes(state, opp_start, terminal))
+        if not any(g in chokes for g in guarded):
+            return False
+    return True
+
+
 def freeze_window_open(state: GameState, node: str) -> bool:
     """set-on-commit 时序闸（§6.4）：对手已 commit 进入 node 的边、且到站前设卡能生效。
 
@@ -411,6 +440,9 @@ def _can_opponent_set_guard_before_arrival(state: GameState, next_node: str) -> 
         return True
     if opp.next_node_id != next_node:
         return False
+    # 特意不做"全路径 ETA"扩面：跟在领先对手身后时它会在每个咽喉连环 hold（对手
+    # 回身 ETA 恒小于我进边帧数），P4m 陪练局逐帧验证过现两分支已覆盖实际关门形态
+    # （同边领先=分支2、蹲点=分支1），预算制释放兜住尾部风险
     my_eta = _edge_frames_between(state, state.me.current_node_id, next_node)
     if my_eta >= _INF:
         return False

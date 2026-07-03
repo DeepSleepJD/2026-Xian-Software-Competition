@@ -54,6 +54,10 @@ CLEAR_PENDING_TIMEOUT = SCOUT_PENDING_TIMEOUT  # 预清派队去重超时（复�
 # 40 保护交付好果主体（好果<42 才拦设卡），不再像旧值 90 近乎不设卡。旋钮：回 90 即
 # 一键退化到近乎不设卡。
 GUARD_GOOD_FLOOR = 40
+# P4m 第四刀·滚动设卡（用户点名"领先帧数足够就连续设卡"）：
+ROLLING_GUARD_MIN_LEAD = 20        # 对手到本咽喉 ETA ≥此值才先手设卡——4 帧读条期间他追
+                                   # 不上；更近时留给 set-on-commit 半路关门（冻结更狠）
+ROLLING_GUARD_MIN_ARRIVAL_DEF = 3  # 对手到达时卡剩余防值下限：太远的卡到货前风化成渣=白设
 GUARD_GOOD_FRAME_COST = 15
 GUARD_MIN_NET_FRAMES = 30
 
@@ -234,21 +238,42 @@ class CombatStrategy(Strategy):
             return None
         if not self._is_opponent_choke(state, cur):
             return None
-        # set-on-commit 时序闸（§6.4）：只在对手已 commit 上边、到站前设卡能生效时才设。
-        # 早设（对手还停在相邻节点）会让他停节点上强通逃脱——继续 camp 别设。
-        if not safety.freeze_window_open(state, cur):
-            return None
-
         extra, defense, good_cost = self._guard_investment(state, cur)
         if defense < 4:
             return None
+        # set-on-commit 时序闸（§6.4）：对手已 commit 上边、到站前设卡能生效 → 半路
+        # 关门（最狠：冻结态攻坚/强通全废，M2 实证只剩改道绕行）。
+        # P4m 第四刀·滚动设卡：对手未 commit 但我领先足够（4 帧读条期间他追不上、
+        # 到货时卡还有肉）→ 先手关门再走。他到卡前只能节点上强通吃时间税/烧果攻坚，
+        # 我 4 帧 + ≤3 好果换他 ≥30 帧或等值资源；沿途每个咽喉如此 = "连续设卡"，
+        # 上限 2 张在场（任务书 921）由上方 _friendly_guard_count 闸把守。
         delay = self._guard_weathering_frames(state, cur, defense)
+        if not safety.freeze_window_open(state, cur):
+            opp_eta = safety.opp_eta(state, cur)
+            if opp_eta < ROLLING_GUARD_MIN_LEAD or opp_eta >= 10 ** 8:
+                return None
+            arrival_def = defense - self._weathering_decays(state, cur, defense, opp_eta)
+            if arrival_def < ROLLING_GUARD_MIN_ARRIVAL_DEF:
+                return None   # 到货前风化成渣 = 白设（对手太远不值先手）
+            # 先手卡对他的价值 = 他到达时刻卡的剩余风化寿命（等要等这么久；
+            # 强通税/攻坚烧果是等值资源替代，口径与 set-on-commit 一致）
+            delay = max(0, delay - opp_eta)
         net = delay - safety.GUARD_SETUP_FRAMES - good_cost * GUARD_GOOD_FRAME_COST
         if net < GUARD_MIN_NET_FRAMES:
             return None
         action = {"action": "SET_GUARD", "targetNodeId": cur, "extraGoodFruit": extra}
         return Intent(kind="combat.guard", priority=PRIORITY_SET_GUARD,
                       actions=[action], note=f"设卡@{cur}")
+
+    @staticmethod
+    def _weathering_decays(state: GameState, node_id: str, defense: int,
+                           frames_ahead: int) -> int:
+        """从设卡完成起 frames_ahead 帧内会发生几次风化 -1（任务书 924-936）。"""
+        node = state.nodes.get(node_id)
+        first = 45 if node and node.node_type == "KEY_PASS" and defense >= 4 else 30
+        if frames_ahead < first:
+            return 0
+        return 1 + (frames_ahead - first) // 30
 
     def _propose_squad_weaken(self, state: GameState) -> Intent | None:
         me = state.me
@@ -311,7 +336,9 @@ class CombatStrategy(Strategy):
         me = state.me
         if state.phase == "RUSH":
             return None
-        if me.squad_available < 2 + CLEAR_SQUAD_FLOOR:
+        # 铁律：预清障同样不得击穿验核前 6 支保留（P4m 陪练局实证：r1-2 两次预清
+        # 8→4，削卡本钱只剩两刀，差 2 防干等风化 70 帧）。8 满编时首次预清仍放行
+        if me.squad_available - 2 < max(self._squad_reserve(state), CLEAR_SQUAD_FLOOR):
             return None
         cur = me.current_node_id
         if not cur:
@@ -552,9 +579,14 @@ class CombatStrategy(Strategy):
 
     @staticmethod
     def _squad_reserve(state: GameState) -> int:
-        if not state.me.verified:
-            return SQUAD_RESERVE_BEFORE_GATE
-        return 0
+        if state.me.verified:
+            return 0
+        # 铁律（2026-07-03）：验核前恒 6。唯一豁免（P4m 决策#1，已报备）：对手被
+        # 我方有效卡锁死在咽喉远侧——6 支保险所防的"被关门"威胁被结构性排除，
+        # 降到 2 腾 4 支给 G3 REINFORCE 维持锁门卡
+        if safety.opponent_locked(state):
+            return SQUAD_RESERVE_LOCKED
+        return SQUAD_RESERVE_BEFORE_GATE
 
     @staticmethod
     def _squad_delay(state: GameState, cur: str, target: str) -> int:

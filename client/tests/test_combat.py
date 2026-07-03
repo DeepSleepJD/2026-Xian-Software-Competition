@@ -7,7 +7,7 @@ from lychee.state import GameState
 from lychee.strategy import Intent
 from lychee.strategy.combat import (
     CombatStrategy, PRIORITY_COMBAT_MAIN, PRIORITY_SET_GUARD, PRIORITY_SQUAD_SCOUT,
-    SCOUT_PENDING_TIMEOUT, SQUAD_RESERVE_BEFORE_GATE,
+    SCOUT_PENDING_TIMEOUT, SQUAD_RESERVE_BEFORE_GATE, SQUAD_RESERVE_LOCKED,
 )
 
 MY_ID = 1001
@@ -258,8 +258,46 @@ class CombatStrategyTests(unittest.TestCase):
         self.assertEqual({"action": "SET_GUARD", "targetNodeId": "S10",
                           "extraGoodFruit": 2}, guard.actions[0])
 
-    def test_no_guard_before_opponent_commits(self) -> None:
-        # 对手停在相邻节点 S09（未上边、可强通）→ set-on-commit 时序闸不放行，继续 camp
+    def test_rolls_guard_when_opponent_far_in_band(self) -> None:
+        # P4m 第四刀：对手停在 S09 未 commit，但到 S10 的 ETA=45 ∈ [20, 风化带)
+        # → 领先足够，先手滚动卡（旧行为：等 commit；新行为：关门再走）
+        acts = self.actions(inquire(200, node="S10", opp_node="S09"))
+        self.assertIn({"action": "SET_GUARD", "targetNodeId": "S10",
+                       "extraGoodFruit": 2}, acts)
+
+    def test_no_rolling_guard_when_opponent_too_close(self) -> None:
+        # 对手 ETA=15 < 20：4 帧读条窗口不稳，留给 set-on-commit 半路关门
+        start = {**START, "matchId": "close-test", "edges": [
+            {"edgeId": "E1", "fromNodeId": "S09", "toNodeId": "S10",
+             "routeType": "ROAD", "distance": 10, "bidirectional": True},
+            START["edges"][1]]}
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        self.strategy = CombatStrategy()
+        acts = self.actions(inquire(200, node="S10", opp_node="S09"))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
+
+    def test_squad_reserve_drops_when_opponent_locked(self) -> None:
+        # P4m 决策#1（铁律唯一豁免）：我方有效卡压在对手到终点的必经咽喉 S10 上
+        # → 对手够不到我方前路，保留量 6 → 2，腾 4 支给 G3 增援维持锁门卡
+        self.state.update_inquire(inquire(
+            200, node="S15", opp_node="S09", nodes=[friendly_guard("S10")]))
+        self.assertEqual(SQUAD_RESERVE_LOCKED, CombatStrategy._squad_reserve(self.state))
+
+    def test_squad_reserve_stays_six_without_lock(self) -> None:
+        self.state.update_inquire(inquire(200, node="S15", opp_node="S09"))
+        self.assertEqual(SQUAD_RESERVE_BEFORE_GATE,
+                         CombatStrategy._squad_reserve(self.state))
+
+    def test_no_rolling_guard_when_opponent_too_far(self) -> None:
+        # 对手 ETA=135：到货时卡只剩防 2 < 3（风化成渣）→ 白设，不设
+        start = {**START, "matchId": "far-test", "edges": [
+            {"edgeId": "E1", "fromNodeId": "S09", "toNodeId": "S10",
+             "routeType": "ROAD", "distance": 90, "bidirectional": True},
+            START["edges"][1]]}
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        self.strategy = CombatStrategy()
         acts = self.actions(inquire(200, node="S10", opp_node="S09"))
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 

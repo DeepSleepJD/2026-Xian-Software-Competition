@@ -73,10 +73,11 @@ class InterceptionIntegrationTests(unittest.TestCase):
         # camp 生效：不发离开 S10 的 MOVE
         self.assertNotIn("MOVE", [a.get("action") for a in acts])
 
-    def test_camps_without_guard_before_commit(self) -> None:
-        # 对手还停在 S09 未上边：继续 camp（不走位），但不早设卡（等他 commit）
+    def test_rolls_guard_before_commit_when_lead_sufficient(self) -> None:
+        # P4m 第四刀：对手停在 S09 未上边、到 S10 ETA 在滚动带内 → 不再干等
+        # commit，先手设卡关门（设完 camp 释放、前压送达）；本帧仍不走位
         acts = self.actions(inquire(round_no=200, opp_committed=False))
-        self.assertNotIn("SET_GUARD", [a.get("action") for a in acts])
+        self.assertIn("SET_GUARD", [a.get("action") for a in acts])
         self.assertNotIn("MOVE", [a.get("action") for a in acts])
 
 
