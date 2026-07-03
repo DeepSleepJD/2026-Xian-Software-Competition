@@ -246,10 +246,13 @@ class EconomyStrategy(Strategy):
         if must_rush:
             self.current_plan = None
         rush_target = None if must_rush else safety.first_common_rush_node(state)
-        if rush_target:
+        rush_horse = self._propose_rush_horse_claim(state, cur, rush_target) \
+            if rush_target else None
+        if rush_target and rush_horse is None:
             self.current_plan = None
             self._cur_target_key = ""
-        eco = None if must_rush or rush_target else self._propose_economy(state, cur)
+        eco = None if must_rush else (rush_horse or (
+            None if rush_target else self._propose_economy(state, cur)))
         if eco is not None:
             intents.append(eco)
             # 冰鉴上边预判只看本帧真会走的边：economy 出 MOVE 用其目标，
@@ -331,6 +334,62 @@ class EconomyStrategy(Strategy):
             return Intent(kind="economy", priority=PRIORITY_ECONOMY,
                           actions=[{"action": "MOVE", "targetNodeId": path[1]}],
                           note=f"赶路→{target.note}")
+        return None
+
+    def _propose_rush_horse_claim(
+            self, state: GameState, cur: str, rush_target: str | None) -> Intent | None:
+        """During first-common rush, only keep horse pickups already on the rush path.
+
+        Tasks and ordinary resources still yield to the tempo race. Horses are the narrow
+        exception because their speedup can pay back before or right after the first target.
+        """
+        if not rush_target or rush_target == cur or state.phase != "NORMAL" or state.me.verified:
+            return None
+        path = pathing.min_frame_path(state, cur, rush_target, safety.me_move_per_frame(state))
+        if not path or len(path) < 2:
+            return None
+        found = self._first_rush_path_horse(state, path)
+        if found is None:
+            return None
+        node_id, resource_type, key = found
+        self.current_plan = (node_id, self._resource_claim_round(state, node_id, resource_type))
+        self._cur_target_key = key
+        if node_id == cur:
+            self._pending_claim = key
+            return Intent(kind="economy", priority=PRIORITY_ECONOMY,
+                          actions=[{"action": "CLAIM_RESOURCE", "targetNodeId": node_id,
+                                    "resourceType": resource_type}],
+                          note=f"抢点顺路马{resource_type}@{node_id}")
+        self._pending_claim = ""
+        if not self._gate.clear(state, cur):
+            return None
+        next_hop = path[1]
+        if not self._has_obstacle(state, next_hop):
+            return Intent(kind="economy", priority=PRIORITY_ECONOMY,
+                          actions=[{"action": "MOVE", "targetNodeId": next_hop}],
+                          note=f"赶路→抢点顺路马{resource_type}@{node_id}")
+        return None
+
+    def _first_rush_path_horse(
+            self, state: GameState, path: list[str]) -> tuple[str, str, str] | None:
+        lock = self._opponent_lock(state)
+        for node_id in path[:-1]:
+            ns = state.node_states.get(node_id)
+            if ns is None:
+                continue
+            for resource_type in HORSE_RESOURCES:
+                if ns.resource_stock.get(resource_type, 0) < 1:
+                    continue
+                if lock is not None and lock.resource_type == resource_type \
+                        and lock.target_node_id == node_id:
+                    continue
+                cap = RESOURCE_CLAIM_CAPS.get(resource_type)
+                if cap is not None and state.me.resources.get(resource_type, 0) >= cap:
+                    continue
+                key = f"RES:{node_id}:{resource_type}"
+                if state.round < self._backoff.get(key, 0):
+                    continue
+                return node_id, resource_type, key
         return None
 
     def _race_context(self, state: GameState, cur: str,
@@ -816,6 +875,11 @@ class EconomyStrategy(Strategy):
             return ""
         p = pathing.shortest_path(state, cur, terminal)
         return p[1] if p and len(p) >= 2 else ""
+
+    @staticmethod
+    def _has_obstacle(state: GameState, node_id: str) -> bool:
+        ns = state.node_states.get(node_id)
+        return bool(ns and ns.has_obstacle)
 
     @staticmethod
     def _resource_claim_round(state: GameState, node_id: str, resource_type: str) -> int:

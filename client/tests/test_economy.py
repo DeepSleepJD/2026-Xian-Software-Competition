@@ -914,6 +914,25 @@ class FirstCommonRushEconomyTests(unittest.TestCase):
         acts = [a for it in EconomyStrategy().propose(state) for a in it.actions]
         self.assertNotIn({"action": "CLAIM_TASK", "taskId": "T_near"}, acts)
 
+    def test_on_route_horse_claimed_before_first_common_rush_node(self) -> None:
+        # 马是抢点窗口里唯一保留的顺路经济动作：CLAIM 两帧可换后续移速。
+        nodes = [{"nodeId": "B", "resourceStock": {"FAST_HORSE": 1}}]
+        inq = inquire(100, node="B", nodes=nodes)
+        inq["players"].append(racing_opp())
+        state = self.load(inq)
+        acts = [a for it in EconomyStrategy().propose(state) for a in it.actions]
+        self.assertIn({"action": "CLAIM_RESOURCE", "targetNodeId": "B",
+                       "resourceType": "FAST_HORSE"}, acts)
+
+    def test_on_route_non_horse_resource_still_yields_during_first_common_rush(self) -> None:
+        nodes = [{"nodeId": "B", "resourceStock": {"ICE_BOX": 1}}]
+        inq = inquire(100, node="B", nodes=nodes)
+        inq["players"].append(racing_opp())
+        state = self.load(inq)
+        acts = [a for it in EconomyStrategy().propose(state) for a in it.actions]
+        self.assertNotIn({"action": "CLAIM_RESOURCE", "targetNodeId": "B",
+                          "resourceType": "ICE_BOX"}, acts)
+
 
 if __name__ == "__main__":
     unittest.main()

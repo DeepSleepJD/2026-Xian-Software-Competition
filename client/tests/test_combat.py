@@ -511,10 +511,15 @@ class CombatStrategyTests(unittest.TestCase):
 
     def test_clears_obstacle_on_terminal_path_next_hop(self) -> None:
         # P4d 实测：咽喉道路障碍无人清 = MOVE 永拒 = 卡死未送达（任务书 2.4.4）
-        intents = self.intents(inquire(100, nodes=obstacle_s10()))
+        intents = self.intents(inquire(100, opp_node="", nodes=obstacle_s10()))
         clear = [it for it in intents if it.kind == "combat.clear"][0]
         self.assertEqual(PRIORITY_COMBAT_MAIN, clear.priority)
         self.assertEqual({"action": "CLEAR", "targetNodeId": "S10"}, clear.actions[0])
+
+    def test_squad_clears_adjacent_first_common_rush_target_obstacle(self) -> None:
+        acts = self.actions(inquire(100, nodes=obstacle_s10()))
+        self.assertIn({"action": "SQUAD_CLEAR", "targetNodeId": "S10"}, acts)
+        self.assertNotIn({"action": "CLEAR", "targetNodeId": "S10"}, acts)
 
     def test_clears_obstacle_on_first_common_rush_next_hop(self) -> None:
         self.state = GameState(MY_ID)
@@ -526,7 +531,7 @@ class CombatStrategyTests(unittest.TestCase):
         self.assertEqual({"action": "CLEAR", "targetNodeId": "S06"}, clear.actions[0])
 
     def test_clear_beats_delivery_move_in_arbiter(self) -> None:
-        intents = self.intents(inquire(100, nodes=obstacle_s10()))
+        intents = self.intents(inquire(100, opp_node="", nodes=obstacle_s10()))
         intents.append(Intent(kind="delivery", priority=100,
                               actions=[{"action": "MOVE", "targetNodeId": "S10"}]))
         actions = merge_intents(intents)

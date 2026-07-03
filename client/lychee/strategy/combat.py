@@ -95,6 +95,8 @@ class CombatStrategy(Strategy):
 
         squad = self._propose_squad_weaken(state)
         if squad is None:
+            squad = self._propose_rush_target_squad_clear(state)
+        if squad is None:
             squad = self._propose_squad_reinforce(state)
         if squad is None:
             squad = self._propose_squad_clear(state)
@@ -205,12 +207,15 @@ class CombatStrategy(Strategy):
         cur = me.current_node_id
         if not cur or state.my_good < 1:
             return None
+        rush = safety.first_common_rush_node(state)
         path = self._rush_path(state, cur) or self._terminal_path(state, cur)
         if not path or len(path) < 2:
             return None
         target = path[1]
         ns = state.node_states.get(target)
         if ns is None or not ns.has_obstacle:
+            return None
+        if rush == target and self._can_dispatch_squad_clear(state, target):
             return None
         action = {"action": "CLEAR", "targetNodeId": target}
         return Intent(kind="combat.clear", priority=PRIORITY_COMBAT_MAIN,
@@ -360,6 +365,40 @@ class CombatStrategy(Strategy):
                           actions=[{"action": "SQUAD_CLEAR", "targetNodeId": node_id}],
                           note=f"小分队预清障@{node_id}")
         return None
+
+    def _propose_rush_target_squad_clear(self, state: GameState) -> Intent | None:
+        """First-common target obstacle is urgent enough to pre-clear even when adjacent."""
+        cur = state.me.current_node_id
+        if not cur:
+            return None
+        rush = safety.first_common_rush_node(state)
+        if not rush or rush == cur:
+            return None
+        path = self._rush_path(state, cur)
+        if not path or rush not in path[1:]:
+            return None
+        if not self._can_dispatch_squad_clear(state, rush):
+            return None
+        self._clear_pending[rush] = state.round
+        return Intent(kind="combat.squad", priority=PRIORITY_SQUAD_CLEAR,
+                      actions=[{"action": "SQUAD_CLEAR", "targetNodeId": rush}],
+                      note=f"小分队抢点清障@{rush}")
+
+    def _can_dispatch_squad_clear(self, state: GameState, node_id: str) -> bool:
+        me = state.me
+        if state.phase == "RUSH":
+            return False
+        if me.squad_available - 2 < max(self._squad_reserve(state), CLEAR_SQUAD_FLOOR):
+            return False
+        ns = state.node_states.get(node_id)
+        if ns is None or not ns.has_obstacle:
+            return False
+        if self._has_active_clear_task(state, node_id):
+            return False
+        pending = self._clear_pending.get(node_id)
+        if pending is not None and pending + CLEAR_PENDING_TIMEOUT >= state.round:
+            return False
+        return True
 
     @staticmethod
     def _has_active_clear_task(state: GameState, node_id: str) -> bool:
