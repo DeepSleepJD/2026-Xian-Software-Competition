@@ -29,6 +29,8 @@ GUARD_KEEP_FRUIT = 6         # never spend guard fruit below this (keep some to 
 GUARD_SETUP_FRAMES = 5       # SET_GUARD read-bar (4) + activates next frame
 FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before arrival
 ICE_BOX = "ICE_BOX"
+HORSES = ("FAST_HORSE", "SHORT_HORSE")   # move-buff resources (fast first)
+SQUAD_LOOKAHEAD = 70         # only pre-clear obstacles within this many frames ahead
 
 # main-car states where the engine is running our action; don't interrupt
 BUSY_STATES = {"PROCESSING", "VERIFYING", "FORCED_PASSING", "RESTING", "CONTESTING"}
@@ -214,6 +216,23 @@ class Strategy:
         spare = me.get("goodFruit", 0) - GUARD_KEEP_FRUIT
         return max(0, min(2, spare))
 
+    def _horse_action(self, me, node, nodes_by_id):
+        """Mount a held horse (speed buff) before moving; else grab one sitting here.
+        Horses accelerate the race to the choke -- and taking the one before the choke
+        also denies it to the opponent."""
+        res = me.get("resources") or {}
+        buffed = any((b.get("type") or "").endswith("HORSE") or b.get("type") == "MOVE_BUFF"
+                     for b in (me.get("buffs") or []))
+        held = [h for h in HORSES if res.get(h, 0) > 0]
+        if not buffed and held:
+            return [M.use_resource(held[0])]           # mount it now, then move
+        if not buffed and not held:
+            stock = nodes_by_id.get(node, {}).get("resourceStock") or {}
+            for h in HORSES:                            # fast horse first
+                if stock.get(h, 0) > 0:
+                    return [M.claim_resource(node, h)]
+        return None
+
     def _squad_action(self, node, me, nodes_by_id) -> list:
         """Squad is a separate quota and a scarce budget. Priorities:
         1) REINFORCE our own guard the opponent is squad-weakening (heal the freeze,
@@ -229,11 +248,14 @@ class Strategy:
                 cap = g.get("maxDefense", g.get("initialDefense", 0))
                 if 0 < g.get("defense", 0) <= cap - 2:
                     return [M.squad_reinforce(nid)]
-        # 2) pre-clear the next obstacle on our path
+        # 2) pre-clear the next obstacle on our path -- but only ones close enough
+        # ahead to matter (don't waste a squad clearing the far destination at r1)
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         path = self.graph.fastest_path(node, self.gate_node, obstacles=obstacles) or []
         for nid in path[1:]:
             if nid in obstacles and nid not in self._squad_sent:
+                if self.graph.path_frames(node, nid, obstacles=obstacles) > SQUAD_LOOKAHEAD:
+                    break  # too far ahead to bother clearing yet
                 self._squad_sent.add(nid)
                 return [M.squad_clear(nid)]
         return []
@@ -255,6 +277,11 @@ class Strategy:
         # mandatory fixed process at the node we're standing on
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
             return [M.process(node)]
+        # grab / mount a horse to win the race to the choke (and deny it to the
+        # opponent). A move-buff means every following edge is faster.
+        horse = self._horse_action(me, node, nodes_by_id)
+        if horse:
+            return horse
         # route around obstacle nodes (they carry a time tax); only cross one when
         # it's unavoidable (e.g. an obstacle sitting on a choke).
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
