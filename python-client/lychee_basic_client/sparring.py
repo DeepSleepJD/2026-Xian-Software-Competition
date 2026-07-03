@@ -27,7 +27,7 @@ class AggressiveStrategy(Strategy):
         dest = self.terminal_node if me.get("verified") else self.gate_node
         return self._advance_to(dest, me, node, state, phase, nodes_by_id)
 
-    def _squad_action(self, node, me, nodes_by_id):
+    def _squad_action(self, node, me, opp, nodes_by_id):
         """Break through: weaken the enemy guard on our route; else clear our own
         obstacles so we can keep moving."""
         if me.get("squadAvailable", 0) < 2:
