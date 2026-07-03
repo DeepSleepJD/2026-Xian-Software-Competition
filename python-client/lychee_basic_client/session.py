@@ -125,6 +125,5 @@ class ClientSession:
             print(
                 f"r{round_no} phase={data.get('phase')} node={me.get('currentNodeId')} "
                 f"state={me.get('state')} fresh={fresh:.1f} "
-                f"good={me.get('goodFruit')} verified={me.get('verified')} "
-                f"taskbase={self._strategy.task_base} -> {act}"
+                f"good={me.get('goodFruit')} verified={me.get('verified')} -> {act}"
             )

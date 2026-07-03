@@ -122,6 +122,63 @@ class Graph:
             return path[1]
         return None
 
+    def _frame_edge(self, dst: str, route_type: str, distance: int, speed: float) -> int:
+        """Frames to cross an edge at a given move-speed multiplier, plus any
+        mandatory fixed-process wait on arrival. speed>1 models opponent
+        acceleration (fast horse / RUSH_SPEED); speed=1 is our plain pace."""
+        coef = ROUTE_COST_COEF.get(route_type, 1500)
+        required = math.ceil(distance * coef)
+        frames = max(1, math.ceil(required / (BASE_MOVE_PER_FRAME * speed)))
+        return frames + self.process_rounds.get(dst, 0)
+
+    def _frame_dijkstra(self, src, speed, avoid, obstacles=None, obstacle_penalty=0):
+        avoid = avoid or set()
+        obstacles = obstacles or set()
+        dist: dict[str, int] = {src: 0}
+        prev: dict[str, str] = {}
+        pq: list[tuple[int, str]] = [(0, src)]
+        while pq:
+            d, u = heapq.heappop(pq)
+            if d > dist.get(u, math.inf):
+                continue
+            for v, rt, dd in self.adj.get(u, []):
+                if v in avoid:
+                    continue
+                nd = d + self._frame_edge(v, rt, dd, speed)
+                if v in obstacles:
+                    nd += obstacle_penalty  # obstacle time-tax: route around if we can
+                if nd < dist.get(v, math.inf):
+                    dist[v] = nd
+                    prev[v] = u
+                    heapq.heappush(pq, (nd, v))
+        return dist, prev
+
+    def path_frames(
+        self, src: str, dst: str, speed: float = 1.0, avoid: Optional[set] = None,
+        obstacles: Optional[set] = None, obstacle_penalty: int = 0,
+    ) -> float:
+        """Fewest frames from src to dst at the given speed (inf if unreachable)."""
+        if src == dst:
+            return 0
+        dist, _ = self._frame_dijkstra(src, speed, avoid, obstacles, obstacle_penalty)
+        return dist.get(dst, math.inf)
+
+    def fastest_hop(
+        self, src: str, dst: str, avoid: Optional[set] = None,
+        obstacles: Optional[set] = None, obstacle_penalty: int = 40,
+    ) -> Optional[str]:
+        """Next node on the fewest-frames route to dst (our own pace), routing
+        around obstacle nodes when a comparable clear route exists."""
+        if src == dst:
+            return None
+        dist, prev = self._frame_dijkstra(src, 1.0, avoid, obstacles, obstacle_penalty)
+        if dst not in dist:
+            return None
+        path = [dst]
+        while path[-1] != src:
+            path.append(prev[path[-1]])
+        return path[-2]
+
     def _reachable(self, src: str, dst: str, blocked: set) -> bool:
         if src == dst:
             return True

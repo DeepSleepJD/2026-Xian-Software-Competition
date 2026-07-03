@@ -1,211 +1,80 @@
 import unittest
 
-from lychee_basic_client.strategy import Strategy
+from lychee_basic_client.strategy import Strategy, TOTAL_ROUNDS
 
 
-def _strategy_with_line_map() -> Strategy:
+def _line_strategy(gate="S05"):
+    # S01 - S02 - S03 - S04 - S05 (a single funnel: every inner node is a choke)
     s = Strategy(1001)
-    s.gate_node = "S03"
-    s.graph.load_edges(
-        [
-            {"fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD",
-             "distance": 10, "bidirectional": True},
-            {"fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD",
-             "distance": 10, "bidirectional": True},
-        ]
-    )
+    s.graph.load_edges([
+        {"fromNodeId": a, "toNodeId": b, "routeType": "ROAD", "distance": 10,
+         "bidirectional": True}
+        for a, b in [("S01", "S02"), ("S02", "S03"), ("S03", "S04"), ("S04", "S05")]
+    ])
+    s.start_node, s.gate_node, s.terminal_node = "S01", gate, "S05"
+    s.chokes = s.graph.choke_points("S01", gate)
+    s._my_team = "RED"
     return s
 
 
-class SquadPreClearTests(unittest.TestCase):
-    def test_dispatches_to_first_obstacle_on_path(self) -> None:
-        s = _strategy_with_line_map()
-        nodes = {"S02": {"nodeId": "S02", "hasObstacle": True}, "S03": {"nodeId": "S03"}}
-        me = {"squadAvailable": 8}
-        self.assertEqual(
-            {"action": "SQUAD_CLEAR", "targetNodeId": "S02"},
-            s._squad_action("S01", nodes, me, "NORMAL"),
-        )
-        # already dispatched -> no re-dispatch to the same node
-        self.assertIsNone(s._squad_action("S01", nodes, me, "NORMAL"))
-
-    def test_gated_by_phase_and_members(self) -> None:
-        s = _strategy_with_line_map()
-        nodes = {"S02": {"nodeId": "S02", "hasObstacle": True}, "S03": {"nodeId": "S03"}}
-        self.assertIsNone(s._squad_action("S01", nodes, {"squadAvailable": 8}, "RUSH"))
-        self.assertIsNone(s._squad_action("S01", nodes, {"squadAvailable": 1}, "NORMAL"))
-
-    def test_none_when_no_obstacle_on_path(self) -> None:
-        s = _strategy_with_line_map()
-        nodes = {"S02": {"nodeId": "S02"}, "S03": {"nodeId": "S03"}}
-        self.assertIsNone(s._squad_action("S01", nodes, {"squadAvailable": 8}, "NORMAL"))
+def _me(node, **kw):
+    d = {"playerId": 1001, "teamId": "RED", "currentNodeId": node, "state": "IDLE",
+         "nextNodeId": None, "routeEdgeId": None, "resources": {}, "goodFruit": 20,
+         "freshness": 90.0, "verified": False, "delivered": False, "retired": False}
+    d.update(kw)
+    return d
 
 
-class ContestDedupTests(unittest.TestCase):
-    def test_plays_card_once_per_tap(self) -> None:
-        s = Strategy(1001)
-        s.gate_node = "S14"
-        me = {"playerId": 1001, "state": "CONTESTING", "guardActionPoint": 2, "resources": {}}
-        contest = {
-            "contestId": "C1", "contestType": "TASK", "roundIndex": 1,
-            "redPlayerId": 1001, "bluePlayerId": 2002, "resolved": False,
-            "deadlineRound": 200,
-        }
-        first = s._window_card_action(me, [contest], 100)
-        self.assertEqual("WINDOW_CARD", first[0]["action"])
-        # same tap again -> do NOT replay (would risk a server error / retire)
-        self.assertEqual([], s._window_card_action(me, [contest], 100))
-        # next tap -> play again
-        contest["roundIndex"] = 2
-        second = s._window_card_action(me, [contest], 100)
-        self.assertEqual("WINDOW_CARD", second[0]["action"])
+def _opp(node, **kw):
+    d = {"playerId": 2002, "teamId": "BLUE", "currentNodeId": node, "state": "IDLE",
+         "nextNodeId": None, "routeEdgeId": None}
+    d.update(kw)
+    return d
 
 
-def _node(nid, process_round=0, obstacle=False, ice=0):
-    n = {"nodeId": nid, "processRound": process_round, "effectiveCombatCount": 0,
-         "guardBlockCount": 0, "hasObstacle": obstacle, "resourceStock": {}}
-    if ice:
-        n["resourceStock"] = {"ICE_BOX": ice}
-    return n
+def _inq(round_no, me, opp, nodes=None, phase="NORMAL", tasks=None):
+    ns = nodes or []
+    return {"round": round_no, "phase": phase, "players": [me, opp],
+            "nodes": ns, "tasks": tasks or [], "contests": [], "events": []}
 
 
-def _me(node, state="IDLE"):
-    return {"playerId": 1001, "state": state, "currentNodeId": node, "nextNodeId": None,
-            "routeEdgeId": None, "resources": {}, "freshness": 90.0, "goodFruit": 100,
-            "verified": False, "delivered": False, "retired": False,
-            "squadAvailable": 0, "rushTacticUsedCount": 1}
+class ChokeSetupTests(unittest.TestCase):
+    def test_finds_chokes_on_a_funnel(self) -> None:
+        s = _line_strategy(gate="S04")
+        # S02, S03 are cut-vertices between S01 and S04
+        self.assertIn("S02", s.chokes)
+        self.assertIn("S03", s.chokes)
 
 
-def _inq(round_no, node, state, nodes, events=None):
-    return {"round": round_no, "phase": "NORMAL", "players": [_me(node, state)],
-            "nodes": nodes, "tasks": [], "contests": [], "events": events or [],
-            "actionResults": []}
+class BlockadeTests(unittest.TestCase):
+    def test_races_to_the_choke_first(self) -> None:
+        s = _line_strategy(gate="S04")  # chokes S02(near gate first?)/S03
+        act = s.decide(_inq(10, _me("S01"), _opp("S01")))
+        # heads deeper toward the choke, not idling
+        self.assertEqual("MOVE", act[0]["action"])
 
+    def test_guards_when_opponent_commits(self) -> None:
+        s = _line_strategy(gate="S04")
+        choke = s._active_choke(_opp("S01"))
+        # we are parked on the choke; opponent just departed onto an edge toward it
+        me = _me(choke)
+        opp = _opp("S01", state="MOVING", nextNodeId="S02", routeEdgeId="E1")
+        act = s.decide(_inq(50, me, opp))
+        self.assertEqual("SET_GUARD", act[0]["action"])
+        self.assertEqual(choke, act[0]["targetNodeId"])
 
-class ReprocessOnRevisitTests(unittest.TestCase):
-    def _strat(self):
-        s = Strategy(1001)
-        s.gate_node = "S03"
-        s.graph.load_edges([
-            {"fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD",
-             "distance": 10, "bidirectional": True},
-            {"fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD",
-             "distance": 10, "bidirectional": True},
-        ])
-        return s
+    def test_must_deliver_overrides_blocking_near_deadline(self) -> None:
+        s = _line_strategy(gate="S04")
+        # very late: no time left to keep blocking -> must move toward the gate
+        act = s.decide(_inq(TOTAL_ROUNDS - 5, _me("S01"), _opp("S01")))
+        self.assertEqual("MOVE", act[0]["action"])
 
-    def test_reprocesses_a_station_on_revisit(self) -> None:
-        s = self._strat()
-        nodes = [_node("S01"), _node("S02", process_round=4), _node("S03")]
-        done = [{"type": "PROCESS_COMPLETE", "payload": {"playerId": 1001, "targetNodeId": "S02"}}]
+    def test_delivers_when_verified_at_terminal(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S05", verified=True, currentNodeId="S05")
+        act = s.decide(_inq(300, me, _opp("S01")))
+        self.assertEqual("DELIVER", act[0]["action"])
 
-        # arrive S02 -> must PROCESS
-        self.assertEqual("PROCESS", s.decide(_inq(1, "S02", "IDLE", nodes))[0]["action"])
-        # server confirms completion -> now free to move on
-        self.assertEqual("MOVE", s.decide(_inq(2, "S02", "IDLE", nodes, done))[0]["action"])
-        # leave to S03 (node changes -> processed cleared)
-        s.decide(_inq(3, "S03", "IDLE", nodes))
-        # come back to S02 -> must PROCESS AGAIN, not MOVE (the dead-lock bug)
-        self.assertEqual("PROCESS", s.decide(_inq(4, "S02", "IDLE", nodes))[0]["action"])
-
-
-class WaypointTests(unittest.TestCase):
-    def _line(self) -> Strategy:
-        s = Strategy(1001)
-        s.gate_node = "S05"
-        s.graph.load_edges([
-            {"fromNodeId": a, "toNodeId": b, "routeType": "ROAD", "distance": 10,
-             "bidirectional": True}
-            for a, b in [("S01", "S02"), ("S02", "S03"), ("S03", "S04"), ("S04", "S05")]
-        ])
-        return s
-
-    def _task(self, node):
-        return [{"taskId": "T", "taskTemplateId": "T01", "nodeId": node, "score": 30,
-                 "active": True, "completed": False, "failed": False,
-                 "ownerPlayerId": 0, "protectionPlayerId": 0, "expireRound": 999}]
-
-    def test_detours_for_a_worthwhile_task(self) -> None:
-        s = self._line()
-        s.task_base = 0
-        # a task worth 30 (x2.5 below 90) easily beats the detour freshness cost
-        self.assertEqual("S04", s._best_waypoint("S03", {}, self._task("S04"), _me("S03"), 100))
-
-    def test_no_waypoint_once_task_target_reached(self) -> None:
-        s = self._line()
-        s.task_base = 130  # at the cap -> tasks are worth 0 -> no detour
-        self.assertIsNone(s._best_waypoint("S03", {}, self._task("S04"), _me("S03"), 100))
-
-
-class GuardHandlingTests(unittest.TestCase):
-    def _diamond(self) -> Strategy:
-        # S01 -> S02 -> S04  and  S01 -> S03 -> S04  (two ways to the gate S04)
-        s = Strategy(1001)
-        s.gate_node = "S04"
-        s.graph.load_edges(
-            [
-                {"fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD",
-                 "distance": 10, "bidirectional": True},
-                {"fromNodeId": "S02", "toNodeId": "S04", "routeType": "ROAD",
-                 "distance": 10, "bidirectional": True},
-                {"fromNodeId": "S01", "toNodeId": "S03", "routeType": "ROAD",
-                 "distance": 10, "bidirectional": True},
-                {"fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD",
-                 "distance": 10, "bidirectional": True},
-            ]
-        )
-        return s
-
-    def test_reroutes_around_guard_when_alternative_exists(self) -> None:
-        s = self._diamond()
-        s._guard_blocked.add("S02")
-        # S02 guarded -> detour via S03 with a normal MOVE, not a forced pass
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], s._advance("S01", {}, _me("S01")))
-
-    def test_forces_through_enemy_guard_on_a_funnel(self) -> None:
-        s = Strategy(1001)
-        s.gate_node = "S03"
-        s._my_team = "RED"
-        s.graph.load_edges(
-            [
-                {"fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD",
-                 "distance": 10, "bidirectional": True},
-                {"fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD",
-                 "distance": 10, "bidirectional": True},
-            ]
-        )
-        me = _me("S01")
-        nodes = {"S02": {"nodeId": "S02", "guard": {"active": True, "defense": 6, "ownerTeamId": "BLUE"}}}
-        s._guard_blocked.add("S02")
-        act = s._advance("S01", nodes, me)[0]
-        self.assertEqual("FORCED_PASS", act["action"])
-        self.assertEqual("S02", act["targetNodeId"])
-
-    def test_step_to_handles_obstacle_guard_and_plain(self) -> None:
-        s = Strategy(1001)
-        s._my_team = "RED"
-        me = _me("X")
-        self.assertEqual(
-            {"action": "FORCED_PASS", "targetNodeId": "SO"},
-            s._step_to("SO", {"SO": {"hasObstacle": True}}, me),
-        )
-        guard_node = {"SG": {"guard": {"active": True, "defense": 4, "ownerTeamId": "BLUE"}}}
-        self.assertEqual("FORCED_PASS", s._step_to("SG", guard_node, me)["action"])
-        self.assertEqual({"action": "MOVE", "targetNodeId": "SF"}, s._step_to("SF", {}, me))
-
-
-class TravellingStateTests(unittest.TestCase):
-    def test_waiting_with_stale_route_edge_is_not_travelling(self) -> None:
-        s = Strategy(1001)
-        me = {"state": "WAITING", "currentNodeId": "S02", "nextNodeId": None,
-              "routeEdgeId": "E01"}
-        self.assertFalse(s._is_travelling(me, "WAITING", "S02"))
-
-    def test_waiting_with_next_node_is_travelling(self) -> None:
-        s = Strategy(1001)
-        me = {"state": "WAITING", "currentNodeId": "S02", "nextNodeId": "S03",
-              "routeEdgeId": "E02"}
-        self.assertTrue(s._is_travelling(me, "WAITING", "S02"))
 
 if __name__ == "__main__":
     unittest.main()
