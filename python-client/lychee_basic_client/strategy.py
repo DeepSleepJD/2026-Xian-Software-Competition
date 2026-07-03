@@ -34,7 +34,9 @@ RACE_SAFETY = 30             # only task pre-choke if we lead the race to it by 
 FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before arrival
 ICE_BOX = "ICE_BOX"
 HORSES = ("FAST_HORSE", "SHORT_HORSE")   # move-buff resources (fast first)
-SQUAD_LOOKAHEAD = 70         # only pre-clear obstacles within this many frames ahead
+OBSTACLE_PENALTY = 0         # routing cost of crossing an obstacle node: obstacles are
+                             # squad-cleared in parallel now (near-free), so don't avoid
+                             # them -- take the true shortest route (may use shortcuts)
 XIAN_GONG_FLOOR = 6          # keep at least this many good fruit (guards + delivery)
 
 # main-car states where the engine is running our action; don't interrupt
@@ -293,7 +295,8 @@ class Strategy:
         if me.get("squadAvailable", 0) < 2:
             return []
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
-        path = self.graph.fastest_path(node, self.gate_node, obstacles=obstacles) or []
+        path = self.graph.fastest_path(node, self.gate_node, obstacles=obstacles,
+                                       obstacle_penalty=OBSTACLE_PENALTY) or []
         for nid in path[1:]:
             if nid in obstacles and nid not in self._squad_sent:
                 self._squad_sent.add(nid)   # nearest uncleared obstacle on our path
@@ -335,8 +338,10 @@ class Strategy:
         # it's unavoidable (e.g. an obstacle sitting on a choke).
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         avoid = self._guard_blocked | self.route_avoid
-        nxt = self.graph.fastest_hop(node, dest, avoid=avoid, obstacles=obstacles) \
-            or self.graph.fastest_hop(node, dest, obstacles=obstacles)
+        nxt = self.graph.fastest_hop(node, dest, avoid=avoid, obstacles=obstacles,
+                                     obstacle_penalty=OBSTACLE_PENALTY) \
+            or self.graph.fastest_hop(node, dest, obstacles=obstacles,
+                                      obstacle_penalty=OBSTACLE_PENALTY)
         if not nxt:
             return []
         if nodes_by_id.get(nxt, {}).get("hasObstacle") or nxt in self._guard_blocked:
