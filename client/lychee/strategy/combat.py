@@ -6,6 +6,7 @@
 - 窗口出牌独立于主车队动作，但每张牌必须带 contestId + card。
 """
 
+import heapq
 from math import ceil
 
 from .. import pathing
@@ -41,6 +42,11 @@ SQUAD_RESERVE_FOR_WEAKEN = 6   # 削穿一张满防卡（防御 6）需 6 支（
 GUARD_GOOD_FLOOR = 90
 GUARD_GOOD_FRAME_COST = 15
 GUARD_MIN_NET_FRAMES = 30
+GUARD_DELIVERY_MARGIN = 55
+GUARD_INTERCEPT_LEAD = safety.GUARD_SETUP_FRAMES + 1
+GUARD_WAIT_MAX_FRAMES = 24
+OPPONENT_FAST_MOVE_PER_FRAME = 1200
+_INF = 10 ** 9
 
 
 class CombatStrategy(Strategy):
@@ -176,27 +182,44 @@ class CombatStrategy(Strategy):
 
     def _propose_set_guard(self, state: GameState) -> Intent | None:
         me = state.me
-        if state.phase != "NORMAL" or me.verified:
+        if state.phase != "NORMAL":
             return None
         if me.current_process is not None or me.state != "IDLE":
             return None
-        if me.total_score > state.opponent.total_score:
-            return None     # 压低悬赏喂分概率：严格领先时不主动造可攻破悬赏
-        cur = me.current_node_id
-        if not cur or self._is_terminal(state, cur) or self._has_active_guard(state, cur):
+        if state.my_guard_points < 1:
             return None
-        node = state.nodes.get(cur)
-        if node is None or node.node_type not in ("KEY_PASS", "PASS"):
+        cur = me.current_node_id
+        if not cur or self._is_terminal(state, cur):
+            return None
+        if safety.must_rush(state):
             return None
         if self._friendly_guard_count(state) >= 2:
             return None
-        if not self._ahead_of_opponent(state, cur):
+
+        plan = self._guard_intercept_plan(state, cur)
+        if plan is None:
             return None
-        if not self._is_opponent_choke(state, cur):
+        target, my_eta, opp_eta, opp_path = plan
+
+        if target != cur:
+            if not self._can_spend_guard_time(state, target, 0, my_eta):
+                return None
+            path = self._fastest_path(state, cur, target)
+            if path and len(path) >= 2:
+                return Intent(kind="combat.guard.move", priority=PRIORITY_SET_GUARD,
+                              actions=[{"action": "MOVE", "targetNodeId": path[1]}],
+                              note=f"intercept guard@{target}")
+            return None
+
+        if self._has_active_guard(state, cur):
+            return None
+        if not self._opponent_has_just_left_previous_stop(state, cur, opp_eta, opp_path):
             return None
 
         extra, defense, good_cost = self._guard_investment(state, cur)
         if defense < 4:
+            return None
+        if not self._can_spend_guard_time(state, cur, good_cost, 0):
             return None
         delay = self._guard_weathering_frames(state, cur, defense)
         net = delay - safety.GUARD_SETUP_FRAMES - good_cost * GUARD_GOOD_FRAME_COST
@@ -205,6 +228,169 @@ class CombatStrategy(Strategy):
         action = {"action": "SET_GUARD", "targetNodeId": cur, "extraGoodFruit": extra}
         return Intent(kind="combat.guard", priority=PRIORITY_SET_GUARD,
                       actions=[action], note=f"设卡@{cur}")
+
+    def _guard_intercept_plan(
+            self, state: GameState, cur: str) -> tuple[str, int, int, list[str]] | None:
+        opp = state.opponent
+        if opp.delivered or opp.retired or not opp.current_node_id:
+            return None
+        if opp.next_node_id:
+            tail = self._fastest_terminal_path(state, opp.next_node_id, OPPONENT_FAST_MOVE_PER_FRAME)
+            if not tail:
+                return None
+            opp_path = [opp.current_node_id] + tail
+        else:
+            opp_path = self._fastest_terminal_path(
+                state, opp.current_node_id, OPPONENT_FAST_MOVE_PER_FRAME)
+        if not opp_path or len(opp_path) < 2:
+            return None
+        my_costs = self._fastest_costs(state, cur)
+        opp_elapsed = 0
+        best: tuple[int, int, str] | None = None
+        for index, node_id in enumerate(opp_path[1:-1], start=1):
+            if index == 1 and opp.next_node_id == node_id:
+                edge_frames = safety.remaining_edge_frames(state, opp)
+            else:
+                edge_frames = self._path_prefix_frames(state, opp_path[index - 1:index + 1],
+                                                       OPPONENT_FAST_MOVE_PER_FRAME)
+            opp_elapsed += edge_frames
+            if self._is_terminal(state, node_id) or self._has_active_guard(state, node_id):
+                continue
+            node = state.nodes.get(node_id)
+            if node is None or node.node_type not in ("KEY_PASS", "PASS", "GATE", "DOCK", "STATION"):
+                continue
+            my_eta = my_costs.get(node_id, _INF)
+            if my_eta >= _INF:
+                continue
+            if my_eta + GUARD_INTERCEPT_LEAD > opp_elapsed:
+                continue
+            if not self._can_spend_guard_time(state, node_id, 0, my_eta):
+                continue
+            candidate = (opp_elapsed - my_eta, -my_eta, node_id)
+            if best is None or candidate > best:
+                best = candidate
+        if best is None:
+            return None
+        _, neg_my_eta, target = best
+        target_index = opp_path.index(target)
+        if state.opponent.next_node_id == target and target_index == 1:
+            opp_eta = safety.remaining_edge_frames(state, state.opponent)
+        else:
+            opp_eta = self._path_prefix_frames(
+                state, opp_path[:target_index + 1], OPPONENT_FAST_MOVE_PER_FRAME)
+        return target, -neg_my_eta, opp_eta, opp_path
+
+    def _opponent_has_just_left_previous_stop(
+            self, state: GameState, cur: str, opp_eta: int, opp_path: list[str]) -> bool:
+        opp = state.opponent
+        if opp.next_node_id:
+            if cur not in opp_path:
+                return False
+            target_index = opp_path.index(cur)
+            if target_index <= 0:
+                return False
+            if opp.current_node_id != opp_path[target_index - 1]:
+                return False
+            if opp.edge_progress_ms > 0:
+                return opp.edge_progress_ms <= pathing.BASE_MOVE_PER_FRAME
+            return safety.remaining_edge_frames(state, opp) + safety.GUARD_SETUP_FRAMES <= opp_eta
+        wait = max(0, opp_eta - safety.GUARD_SETUP_FRAMES)
+        return wait <= GUARD_WAIT_MAX_FRAMES
+
+    def _can_spend_guard_time(
+            self, state: GameState, guard_node: str, good_cost: int, travel_to_guard: int) -> bool:
+        if state.my_good - good_cost <= 0:
+            return False
+        path = self._fastest_terminal_path(state, guard_node)
+        if path is None:
+            return False
+        remaining = pathing.path_frames(state, path)
+        spend = travel_to_guard + safety.GUARD_SETUP_FRAMES + good_cost * GUARD_GOOD_FRAME_COST
+        return state.round + spend + remaining + GUARD_DELIVERY_MARGIN < state.duration_round
+
+    def _fastest_terminal_path(
+            self, state: GameState, src: str, move_per_frame: int = pathing.BASE_MOVE_PER_FRAME
+    ) -> list[str] | None:
+        best: list[str] | None = None
+        best_frames: int | None = None
+        for terminal in self._terminals(state):
+            path = self._fastest_path(state, src, terminal, move_per_frame)
+            if path is None:
+                continue
+            frames = self._path_prefix_frames(state, path, move_per_frame)
+            if best_frames is None or frames < best_frames:
+                best, best_frames = path, frames
+        return best
+
+    def _fastest_path(
+            self, state: GameState, src: str, dst: str,
+            move_per_frame: int = pathing.BASE_MOVE_PER_FRAME) -> list[str] | None:
+        if src == dst:
+            return [src]
+        dist = {src: 0}
+        prev: dict[str, str] = {}
+        heap = [(0, src)]
+        seen: set[str] = set()
+        while heap:
+            frames, node = heapq.heappop(heap)
+            if node in seen:
+                continue
+            seen.add(node)
+            if node == dst:
+                path = [dst]
+                while path[-1] != src:
+                    path.append(prev[path[-1]])
+                path.reverse()
+                return path
+            for nxt, edge in state.neighbors(node):
+                if nxt in seen:
+                    continue
+                cand = frames + pathing.edge_frames_for_state(state, edge, move_per_frame)
+                proc = state.process_nodes.get(nxt)
+                if proc:
+                    cand += proc.process_round
+                if cand < dist.get(nxt, _INF):
+                    dist[nxt] = cand
+                    prev[nxt] = node
+                    heapq.heappush(heap, (cand, nxt))
+        return None
+
+    def _fastest_costs(
+            self, state: GameState, src: str,
+            move_per_frame: int = pathing.BASE_MOVE_PER_FRAME) -> dict[str, int]:
+        dist = {src: 0}
+        heap = [(0, src)]
+        seen: set[str] = set()
+        while heap:
+            frames, node = heapq.heappop(heap)
+            if node in seen:
+                continue
+            seen.add(node)
+            for nxt, edge in state.neighbors(node):
+                if nxt in seen:
+                    continue
+                cand = frames + pathing.edge_frames_for_state(state, edge, move_per_frame)
+                proc = state.process_nodes.get(nxt)
+                if proc:
+                    cand += proc.process_round
+                if cand < dist.get(nxt, _INF):
+                    dist[nxt] = cand
+                    heapq.heappush(heap, (cand, nxt))
+        return dist
+
+    @staticmethod
+    def _path_prefix_frames(
+            state: GameState, path: list[str], move_per_frame: int = pathing.BASE_MOVE_PER_FRAME) -> int:
+        frames = 0
+        for a, b in zip(path, path[1:]):
+            for nxt, edge in state.neighbors(a):
+                if nxt == b:
+                    frames += pathing.edge_frames_for_state(state, edge, move_per_frame)
+                    proc = state.process_nodes.get(b)
+                    if proc:
+                        frames += proc.process_round
+                    break
+        return frames
 
     def _propose_squad_weaken(self, state: GameState) -> Intent | None:
         me = state.me

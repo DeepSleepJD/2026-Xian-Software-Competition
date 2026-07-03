@@ -38,6 +38,8 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
             nodes: list | None = None, phase: str = "NORMAL",
             next_node: str = "", move_dir: str = "", squad_available: int = 8,
             squad_in_flight: int = 0, opp_node: str = "S10",
+            opp_state: str = "IDLE", opp_next: str = "",
+            opp_edge_progress: int = 0, opp_edge_total: int = 0,
             resources: dict | None = None, events: list | None = None,
             buffs: list | None = None, tasks: list | None = None,
             task_score: int = 0, total_score: int = 0,
@@ -54,8 +56,10 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
                      "squadInFlight": squad_in_flight,
                      "resources": resources or {}, "buffs": buffs or [],
                      "taskScore": task_score, "totalScore": total_score},
-                    {"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
-                     "currentNodeId": opp_node, "totalScore": opp_total_score}],
+                    {"playerId": OPP_ID, "teamId": "BLUE", "state": opp_state,
+                     "currentNodeId": opp_node, "nextNodeId": opp_next,
+                     "edgeProgressMs": opp_edge_progress, "edgeTotalMs": opp_edge_total,
+                     "totalScore": opp_total_score}],
         "nodes": nodes or [],
         "contests": contests or [],
         "events": events or [],
@@ -156,11 +160,51 @@ class CombatStrategyTests(unittest.TestCase):
         self.assertEqual([], [a for a in acts if a["action"] in ("BREAK_GUARD", "WAIT")])
 
     def test_sets_guard_on_opponent_choke_when_ahead(self) -> None:
-        intents = self.intents(inquire(200, node="S10", opp_node="S09"))
+        intents = self.intents(inquire(200, node="S10", opp_node="S09",
+                                      opp_state="MOVING", opp_next="S10",
+                                      opp_edge_progress=1000, opp_edge_total=41400))
         guard = [it for it in intents if it.kind == "combat.guard"][0]
         self.assertEqual(PRIORITY_SET_GUARD, guard.priority)
         self.assertEqual({"action": "SET_GUARD", "targetNodeId": "S10",
                           "extraGoodFruit": 2}, guard.actions[0])
+
+    def test_moves_to_later_intercept_before_setting_guard(self) -> None:
+        start = {
+            "matchId": "intercept-test",
+            "durationRound": 600,
+            "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                        {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+            "nodes": [
+                {"nodeId": "A", "nodeType": "START", "start": True},
+                {"nodeId": "O", "nodeType": "START", "start": True},
+                {"nodeId": "B", "nodeType": "KEY_PASS"},
+                {"nodeId": "C", "nodeType": "FINISH", "terminal": True},
+            ],
+            "edges": [
+                {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+                 "routeType": "ROAD", "distance": 1, "bidirectional": True},
+                {"edgeId": "E2", "fromNodeId": "O", "toNodeId": "B",
+                 "routeType": "ROAD", "distance": 30, "bidirectional": True},
+                {"edgeId": "E3", "fromNodeId": "B", "toNodeId": "C",
+                 "routeType": "ROAD", "distance": 2, "bidirectional": True},
+            ],
+            "map": {"gameplay": {"roles": {"terminalNodeIds": ["C"]}}},
+        }
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        self.strategy = CombatStrategy()
+
+        acts = self.actions(inquire(100, node="A", opp_node="O"))
+
+        self.assertIn({"action": "MOVE", "targetNodeId": "B"}, acts)
+
+    def test_sets_guard_when_opponent_has_just_left_previous_station(self) -> None:
+        acts = self.actions(inquire(200, node="S10", opp_node="S09",
+                                    opp_state="MOVING", opp_next="S10",
+                                    opp_edge_progress=1000, opp_edge_total=41400))
+
+        self.assertIn({"action": "SET_GUARD", "targetNodeId": "S10",
+                       "extraGoodFruit": 2}, acts)
 
     def test_set_guard_yields_to_onnode_task_claim(self) -> None:
         # A2：同帧 economy 抢脚下任务(110) 与 combat 设卡(108) → 仲裁选抢任务
