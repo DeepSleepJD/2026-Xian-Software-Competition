@@ -20,8 +20,9 @@ PRIORITY_COMBAT_MAIN = 130
 # 无可行任务）设卡仍先于纯走位触发，保留巡航中在咽喉设卡的能力。破卡/削卡/清障不动。
 PRIORITY_SET_GUARD = 108
 PRIORITY_SQUAD_WEAKEN = 128
-PRIORITY_SQUAD_REINFORCE = 127   # 维持拦截卡 > 探路；squad 类别每帧仅一动作，
-                                 # 由 propose 回退链 weaken→reinforce→scout 保证次序
+PRIORITY_SQUAD_REINFORCE = 127   # 维持拦截卡 > 预清障 > 探路；squad 类别每帧仅一动作，
+                                 # 由 propose 回退链 weaken→reinforce→clear→scout 保证次序
+PRIORITY_SQUAD_CLEAR = 127
 PRIORITY_SQUAD_SCOUT = 127
 PRIORITY_WINDOW_CARD = 125
 
@@ -48,6 +49,8 @@ SQUAD_RESERVE_FOR_WEAKEN = SQUAD_RESERVE_GUARDER
 SQUAD_RELAX_ROUND = 150
 SQUAD_SPEND_ALL_ROUND = 350
 REINFORCE_SQUAD_FLOOR = 2       # G3：增援后至少留这么多支（防一张卡吃光人手、下张无兵/无法削卡）
+CLEAR_SQUAD_FLOOR = 4           # 预清障后至少留这么多支（护满防削卡预算 6 支的大部分）
+CLEAR_PENDING_TIMEOUT = SCOUT_PENDING_TIMEOUT  # 预清派队去重超时（复用探路）
 # G6 动态好果地板（拦截封锁流 §6.5）：满防卡仅烧 ≤3 好果，freeze EV 远超好果分损；
 # 40 保护交付好果主体（好果<42 才拦设卡），不再像旧值 90 近乎不设卡。旋钮：回 90 即
 # 一键退化到近乎不设卡。
@@ -60,6 +63,7 @@ class CombatStrategy(Strategy):
     def __init__(self, economy=None) -> None:
         self._scout_markers: dict[str, int] = {}
         self._scout_pending: dict[str, int] = {}
+        self._clear_pending: dict[str, int] = {}
         self._seen_window_reveals: set[str] = set()
         self._last_window_cards: dict[str, tuple[int, str, str]] = {}
         self._opponent_ever_set_guard = False
@@ -85,6 +89,8 @@ class CombatStrategy(Strategy):
         squad = self._propose_squad_weaken(state)
         if squad is None:
             squad = self._propose_squad_reinforce(state)
+        if squad is None:
+            squad = self._propose_squad_clear(state)
         if squad is None:
             squad = self._propose_squad_scout(state)
         if squad is not None:
@@ -275,6 +281,45 @@ class CombatStrategy(Strategy):
                           actions=[action], note=f"小分队增援@{node_id}")
         return None
 
+    def _propose_squad_clear(self, state: GameState) -> Intent | None:
+        """小队提前破障：交付路径上 2+ 跳外的障碍(path[1] 留主车队反应式 CLEAR)派小分队
+        并行预清，主车队到站不再停 6 帧清障、也免咽喉障碍卡死风险(SQUAD_CLEAR 延迟清除、
+        2 支、清障方使对手 30 帧内过该点 +6 残留税)。留 CLEAR_SQUAD_FLOOR 支护削卡。"""
+        me = state.me
+        if state.phase == "RUSH":
+            return None
+        if me.squad_available < 2 + CLEAR_SQUAD_FLOOR:
+            return None
+        cur = me.current_node_id
+        if not cur:
+            return None
+        path = self._terminal_path(state, cur)
+        if not path or len(path) < 3:
+            return None
+        for node_id in path[2:]:
+            ns = state.node_states.get(node_id)
+            if ns is None or not ns.has_obstacle:
+                continue
+            if self._has_active_clear_task(state, node_id):
+                continue    # 有 T04 清障任务 → 留给做任务的清(领任务分)，别白派小分队
+            pending = self._clear_pending.get(node_id)
+            if pending is not None and pending + CLEAR_PENDING_TIMEOUT >= state.round:
+                continue
+            self._clear_pending[node_id] = state.round
+            return Intent(kind="combat.squad", priority=PRIORITY_SQUAD_CLEAR,
+                          actions=[{"action": "SQUAD_CLEAR", "targetNodeId": node_id}],
+                          note=f"小分队预清障@{node_id}")
+        return None
+
+    @staticmethod
+    def _has_active_clear_task(state: GameState, node_id: str) -> bool:
+        for t in state.tasks:
+            if not t.active or t.completed or t.failed or t.node_id != node_id:
+                continue
+            if t.process_type == "CLEAR_OBSTACLE" or t.task_template_id == "T04":
+                return True
+        return False
+
     def _propose_squad_scout(self, state: GameState) -> Intent | None:
         me = state.me
         if state.phase == "RUSH":
@@ -422,6 +467,9 @@ class CombatStrategy(Strategy):
         for node_id, dispatch_round in list(self._scout_pending.items()):
             if dispatch_round + SCOUT_PENDING_TIMEOUT < state.round:
                 self._scout_pending.pop(node_id, None)
+        for node_id, dispatch_round in list(self._clear_pending.items()):
+            if dispatch_round + CLEAR_PENDING_TIMEOUT < state.round:
+                self._clear_pending.pop(node_id, None)
 
         my_player_id = state.player_id
         for event in state.scout_marker_events():
