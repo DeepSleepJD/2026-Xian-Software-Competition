@@ -20,6 +20,8 @@ PRIORITY_COMBAT_MAIN = 130
 # 无可行任务）设卡仍先于纯走位触发，保留巡航中在咽喉设卡的能力。破卡/削卡/清障不动。
 PRIORITY_SET_GUARD = 108
 PRIORITY_SQUAD_WEAKEN = 128
+PRIORITY_SQUAD_REINFORCE = 127   # 维持拦截卡 > 探路；squad 类别每帧仅一动作，
+                                 # 由 propose 回退链 weaken→reinforce→scout 保证次序
 PRIORITY_SQUAD_SCOUT = 127
 PRIORITY_WINDOW_CARD = 125
 
@@ -45,6 +47,7 @@ SQUAD_RESERVE_GUARDER = 6      # 削穿一张满防卡（防御 6）需 6 支（
 SQUAD_RESERVE_FOR_WEAKEN = SQUAD_RESERVE_GUARDER
 SQUAD_RELAX_ROUND = 150
 SQUAD_SPEND_ALL_ROUND = 350
+REINFORCE_SQUAD_FLOOR = 2       # G3：增援后至少留这么多支（防一张卡吃光人手、下张无兵/无法削卡）
 # G6 动态好果地板（拦截封锁流 §6.5）：满防卡仅烧 ≤3 好果，freeze EV 远超好果分损；
 # 40 保护交付好果主体（好果<42 才拦设卡），不再像旧值 90 近乎不设卡。旋钮：回 90 即
 # 一键退化到近乎不设卡。
@@ -82,6 +85,8 @@ class CombatStrategy(Strategy):
             intents.append(main)
 
         squad = self._propose_squad_weaken(state)
+        if squad is None:
+            squad = self._propose_squad_reinforce(state)
         if squad is None:
             squad = self._propose_squad_scout(state)
         if squad is not None:
@@ -244,6 +249,34 @@ class CombatStrategy(Strategy):
         return Intent(kind="combat.squad", priority=PRIORITY_SQUAD_WEAKEN,
                       actions=[action], note=f"小分队削卡@{me.next_node_id}")
 
+    def _propose_squad_reinforce(self, state: GameState) -> Intent | None:
+        """G3 维持拦截卡：己方仍挡在对手前面的有效卡被削/风化到低于上限时，
+        SQUAD_REINFORCE(+2/次，不限距离) 补回来——前压后仍能远程增援身后冻结卡。
+        只补"仍是对手必经咽喉"的卡（对手已越过的卡补了白费）。"""
+        me = state.me
+        if state.phase == "RUSH":
+            return None
+        if me.squad_available < 2 + REINFORCE_SQUAD_FLOOR:
+            return None
+        my_team = state.my_team_id or state.me.team_id
+        for node_id, ns in state.node_states.items():
+            guard = ns.guard
+            if not (guard and guard.active and guard.defense > 0
+                    and guard.owner_team_id == my_team):
+                continue
+            target = pathing.guard_max_defense(state, node_id)
+            if guard.defense >= target:
+                continue
+            if not self._is_opponent_choke(state, node_id):
+                continue
+            needed = ceil((target - int(guard.defense)) / 2)
+            if me.squad_in_flight >= needed:
+                return None
+            action = {"action": "SQUAD_REINFORCE", "targetNodeId": node_id}
+            return Intent(kind="combat.squad", priority=PRIORITY_SQUAD_REINFORCE,
+                          actions=[action], note=f"小分队增援@{node_id}")
+        return None
+
     def _propose_squad_scout(self, state: GameState) -> Intent | None:
         me = state.me
         if state.phase == "RUSH":
@@ -313,7 +346,9 @@ class CombatStrategy(Strategy):
             order = ("XIAN_GONG", "BING_ZHENG", "YAN_DIE")
             default = self._first_playable_card(state, contest, order)
         else:
-            order = ("BING_ZHENG", "YAN_DIE", "XIAN_GONG")
+            # G7 默认三联献贡（献贡赢验牒+兵征、只输强行）；鲜度<80 或好果≤1 时
+            # _can_play_card(XIAN_GONG) 自动退化到兵征/验牒
+            order = ("XIAN_GONG", "BING_ZHENG", "YAN_DIE")
             default = self._first_playable_card(state, contest, order)
             if default == "ABSTAIN" and self._can_play_free_qiang_xing(state):
                 default = "QIANG_XING"
