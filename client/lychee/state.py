@@ -587,6 +587,9 @@ class GameState:
         self.events: list[Event] = []
         self.action_results: list[ActionResult] = []
         self.score_preview: dict[str, int] = {}
+        # 本地裁判 contests 只发空壳 [{}]（现网为全量对象）——从事件流合成开窗兜底，
+        # 否则本地对局窗口全盲（S02 同帧 PROCESS 镜像互平 0:0 的暴露路径）
+        self._synth_contests: dict[str, Contest] = {}
 
     # -- start --
 
@@ -658,6 +661,50 @@ class GameState:
         self.events = [Event.from_dict(x) for x in data.get("events") or []]
         self.action_results = [ActionResult.from_dict(x) for x in data.get("actionResults") or []]
         self.score_preview = dict(data.get("scorePreview") or {})
+        self._update_synth_contests()
+
+    def _update_synth_contests(self) -> None:
+        """事件流合成窗口：WINDOW_CONTEST_START 开窗 / CARD_REVEAL 推进拍数 / END 收窗。
+
+        仅补充 contests 字段缺失的窗口（现网字段全量、合成恒为空集补充；本地裁判
+        字段为空壳 [{}]，合成是出牌层唯一的窗口来源）。red/blue playerId 事件里没有，
+        按双方 teamId 回填——mirror 破对称的 switcher 判定依赖它。
+        """
+        for e in self.events:
+            cid = e.payload.get("contestId") or ""
+            if not cid:
+                continue
+            if e.type == "WINDOW_CONTEST_START":
+                red_id = blue_id = 0
+                for pid, ps in self.players.items():
+                    if ps.team_id == "RED":
+                        red_id = pid
+                    elif ps.team_id == "BLUE":
+                        blue_id = pid
+                self._synth_contests[cid] = Contest(
+                    contest_id=cid,
+                    contest_type=e.payload.get("contestType") or "",
+                    target_node_id=e.payload.get("targetNodeId") or "",
+                    resource_type=e.payload.get("resourceType") or "",
+                    task_id=e.payload.get("taskId") or "",
+                    red_player_id=red_id,
+                    blue_player_id=blue_id,
+                    round_index=1,
+                    total_rounds=int(e.payload.get("totalRounds") or 3),
+                    deadline_round=self.round + 8,   # 兜底 GC：END/REVEAL 全丢也不悬挂
+                    raw=dict(e.payload),
+                )
+            elif e.type == "WINDOW_CARD_REVEAL":
+                contest = self._synth_contests.get(cid)
+                if contest is not None:
+                    contest.round_index = int(e.payload.get("roundIndex") or 0) + 1
+                    if contest.round_index > contest.total_rounds:
+                        self._synth_contests.pop(cid, None)
+            elif e.type == "WINDOW_CONTEST_END":
+                self._synth_contests.pop(cid, None)
+        for cid in [cid for cid, c in self._synth_contests.items()
+                    if self.round > c.deadline_round]:
+            self._synth_contests.pop(cid, None)
 
     # -- 常用派生查询 --
 
@@ -744,8 +791,11 @@ class GameState:
         return guarded[0] if len(guarded) == 1 else None
 
     def my_contests(self) -> list[Contest]:
-        """本方在场且未结算、未被抑制的窗口。"""
-        return [c for c in self.contests
+        """本方在场且未结算、未被抑制的窗口（contests 字段优先，事件合成补缺）。"""
+        field_ids = {c.contest_id for c in self.contests if c.contest_id}
+        merged = self.contests + [c for cid, c in self._synth_contests.items()
+                                  if cid not in field_ids]
+        return [c for c in merged
                 if c.involves(self.player_id) and not c.resolved and c.status != "SUPPRESSED"]
 
     def my_open_contests(self) -> list[Contest]:

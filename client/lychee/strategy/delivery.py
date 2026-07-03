@@ -53,6 +53,12 @@ class DeliveryStrategy(Strategy):
                     cp.object_key.startswith(("PROCESS:", "GATE:")):
                 self._saw_processing = True
             return []
+        if me.state == "CONTESTING":
+            # 窗口争夺中：主车队动作全禁——本地裁判对"卡牌+非法主动作"同帧会把
+            # 整帧降级 WAIT（牌被吞记 ABSTAIN，S02 镜像 0:0 局实证）；出牌归 combat。
+            # PROCESS 受理即开窗 ≠ 读条开始，平/负后需重新 PROCESS，撤销受理误标
+            self._saw_processing = False
+            return []
         if me.state in ("MOVING", "RESTING") or me.next_node_id:
             return []
 

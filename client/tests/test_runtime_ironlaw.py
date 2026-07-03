@@ -94,5 +94,52 @@ class IronLawTests(unittest.TestCase):
         self.assert_one_action_per_round(conn, 2)
 
 
+class CardStrategy(Strategy):
+    def propose(self, state):
+        return [Intent(kind="w", priority=1, actions=[
+            {"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}])]
+
+
+class CardFieldFallbackTests(unittest.TestCase):
+    """本地裁判旧 schema（cardType）自适应：空 error 紧跟含牌发包 → 一次性切换。"""
+
+    def setUp(self) -> None:
+        from lychee import protocol
+        protocol.reset_card_field()
+
+    tearDown = setUp
+
+    @staticmethod
+    def _cards(conn: FakeConn) -> list[dict]:
+        return [a for m in conn.sent if m["msg_name"] == "action"
+                for a in m["msg_data"]["actions"] if a.get("action") == "WINDOW_CARD"]
+
+    def test_empty_error_after_card_switches_to_card_type(self) -> None:
+        msgs = make_messages(2)
+        msgs.insert(2, {"msg_name": "error", "msg_data": {}})   # 本地裁判空回执
+        conn = run_with(CardStrategy(), msgs)
+        cards = self._cards(conn)
+        self.assertEqual(2, len(cards))
+        self.assertIn("card", cards[0])            # 第 1 帧仍是现网格式
+        self.assertNotIn("card", cards[1])         # error 后切换旧 schema
+        self.assertEqual("BING_ZHENG", cards[1]["cardType"])
+
+    def test_error_with_fields_keeps_live_format(self) -> None:
+        # 现网 error 带字段（如 ACTION_TOO_LATE）：不触发切换
+        msgs = make_messages(2)
+        msgs.insert(2, {"msg_name": "error",
+                        "msg_data": {"round": 1, "errorCode": "ACTION_TOO_LATE"}})
+        conn = run_with(CardStrategy(), msgs)
+        self.assertTrue(all("card" in c for c in self._cards(conn)))
+
+    def test_empty_error_without_card_send_keeps_live_format(self) -> None:
+        msgs = make_messages(2)
+        msgs.insert(2, {"msg_name": "error", "msg_data": {}})
+        conn = run_with(NoopStrategy(), msgs)      # 从未发过牌 → 不切换
+        from lychee import protocol
+        self.assertEqual("card", protocol.window_card_field())
+        self.assertEqual(2, len([m for m in conn.sent if m["msg_name"] == "action"]))
+
+
 if __name__ == "__main__":
     unittest.main()

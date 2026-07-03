@@ -40,6 +40,7 @@ class Runtime:
         self._match_id = ""
         self._budget_sec = int(os.environ.get("LYCHEE_BUDGET_MS", DEFAULT_BUDGET_MS)) / 1000.0
         self._error_count = 0
+        self._last_sent_had_card = False   # 上一发 action 是否含 WINDOW_CARD（牌字段自适应用）
 
     def run(self) -> int:
         self._send(protocol.build_registration(self._player_id, self._player_name, self._version))
@@ -76,6 +77,11 @@ class Runtime:
             self._error_count += 1
             _log(f"收到 error（第{self._error_count}次，继续比赛）: "
                  f"code={data.get('errorCode')} round={data.get('round')} msg={data.get('message')}")
+            # 本地裁判旧 schema 自适应：空 error 回执（本地 exe 独有签名，现网 error 带字段）
+            # 紧跟含 WINDOW_CARD 的发包 → 牌字段 card→cardType 一次性切换。现网永不触发
+            if not data and self._last_sent_had_card and protocol.window_card_field() == "card":
+                protocol.use_card_type_field()
+                _log("WINDOW_CARD 被判 PROTOCOL_ERROR：切换旧 schema 字段 cardType（本地裁判）")
         else:
             _log(f"忽略未知消息: msg_name={name!r}")
         return None
@@ -131,3 +137,7 @@ class Runtime:
     def _send(self, message: dict) -> None:
         self._conn.write(message)
         self._recorder.send(message)
+        if message.get("msg_name") == "action":
+            self._last_sent_had_card = any(
+                a.get("action") == "WINDOW_CARD"
+                for a in message.get("msg_data", {}).get("actions") or [])

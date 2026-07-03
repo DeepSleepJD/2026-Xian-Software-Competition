@@ -243,5 +243,76 @@ class CombatHelperTests(unittest.TestCase):
         self.assertEqual(["C1"], [c.contest_id for c in self.state.my_open_contests()])
 
 
+class SynthContestTests(unittest.TestCase):
+    """本地裁判 contests 只发空壳 [{}] → 事件流合成窗口（现网字段全量时合成不重复）。"""
+
+    PLAYERS = [{"playerId": MY_ID, "teamId": "RED", "state": "CONTESTING"},
+               {"playerId": 2002, "teamId": "BLUE", "state": "CONTESTING"}]
+
+    def setUp(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(COMBAT_START)
+
+    def _start_window(self, rnd: int = 44) -> None:
+        self.state.update_inquire({
+            "round": rnd, "players": self.PLAYERS, "contests": [{}],
+            "events": [{"eventId": "EV1", "type": "WINDOW_CONTEST_START", "round": rnd - 1,
+                        "payload": {"contestId": "C_043_001", "contestType": "DOCK",
+                                    "targetNodeId": "S02"}}],
+        })
+
+    def test_synth_from_start_event_when_field_is_empty_shell(self) -> None:
+        self._start_window()
+        contests = self.state.my_open_contests()
+        self.assertEqual(1, len(contests))
+        c = contests[0]
+        self.assertEqual(("C_043_001", "DOCK", "S02", 1), (c.contest_id, c.contest_type,
+                                                           c.target_node_id, c.round_index))
+        # 事件缺 playerId：按 teamId 回填，破对称 switcher 依赖
+        self.assertEqual((MY_ID, 2002), (c.red_player_id, c.blue_player_id))
+
+    def test_reveals_advance_round_index_then_close(self) -> None:
+        self._start_window()
+        reveal = lambda idx, rnd: {"round": rnd, "players": self.PLAYERS, "contests": [{}],
+                                   "events": [{"eventId": f"R{idx}", "type": "WINDOW_CARD_REVEAL",
+                                               "round": rnd - 1,
+                                               "payload": {"contestId": "C_043_001",
+                                                           "roundIndex": idx,
+                                                           "redCard": "ABSTAIN",
+                                                           "blueCard": "ABSTAIN"}}]}
+        self.state.update_inquire(reveal(1, 45))
+        self.assertEqual(2, self.state.my_open_contests()[0].round_index)
+        self.state.update_inquire(reveal(2, 46))
+        self.assertEqual(3, self.state.my_open_contests()[0].round_index)
+        self.state.update_inquire(reveal(3, 47))   # 第 3 拍揭示 → 窗口结束
+        self.assertEqual([], self.state.my_open_contests())
+
+    def test_end_event_closes_window(self) -> None:
+        self._start_window()
+        self.state.update_inquire({
+            "round": 45, "players": self.PLAYERS, "contests": [{}],
+            "events": [{"eventId": "E2", "type": "WINDOW_CONTEST_END", "round": 44,
+                        "payload": {"contestId": "C_043_001"}}],
+        })
+        self.assertEqual([], self.state.my_open_contests())
+
+    def test_field_contest_shadows_synth_duplicate(self) -> None:
+        self._start_window()
+        # 现网形态：字段带同 id 全量对象（roundIndex=2）→ 用字段版，不重复
+        self.state.update_inquire({
+            "round": 45, "players": self.PLAYERS,
+            "contests": [{"contestId": "C_043_001", "contestType": "DOCK",
+                          "redPlayerId": MY_ID, "bluePlayerId": 2002, "roundIndex": 2}],
+        })
+        contests = self.state.my_open_contests()
+        self.assertEqual(1, len(contests))
+        self.assertEqual(2, contests[0].round_index)
+
+    def test_stale_synth_contest_garbage_collected(self) -> None:
+        self._start_window(rnd=44)
+        self.state.update_inquire({"round": 60, "players": self.PLAYERS, "contests": [{}]})
+        self.assertEqual([], self.state.my_open_contests())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -142,7 +142,7 @@ class _StationGate:
                     cp.object_key.startswith(("PROCESS:", "GATE:")):
                 self._saw = True
             return
-        if me.state in ("MOVING", "RESTING") or me.next_node_id:
+        if me.state in ("MOVING", "RESTING", "CONTESTING") or me.next_node_id:
             return
         cur = me.current_node_id
         if not cur:
@@ -215,7 +215,8 @@ class EconomyStrategy(Strategy):
         if me.state == "MOVING" or me.next_node_id:
             horse = self._propose_horse_use(state, me.current_node_id, me.next_node_id)
             return [horse] if horse is not None and me.state == "MOVING" else []
-        if me.state in ("MOVING", "RESTING") or me.next_node_id:
+        if me.state in ("MOVING", "RESTING", "CONTESTING") or me.next_node_id:
+            # CONTESTING：窗口期主车队动作会污染出牌帧（本地裁判整帧降级 WAIT）
             return []
         cur = me.current_node_id
         if not cur:

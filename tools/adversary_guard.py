@@ -198,6 +198,10 @@ def main(argv: list[str]) -> int:
     # 默认 1：忠实复现现网「单卡风化」死局。8 支小分队只够削一个 6 防守卫
     # （削 1 次耗 2 支降 2 防），默认 2 会把修好的客户端也逼进无解局
     parser.add_argument("--max-guards", type=int, default=1)
+    # 默认 1=晚我方 1 帧发车，破同帧到 S02 的镜像 DOCK 死锁。本想让客户端出牌打赢
+    # （陪练无出牌策略），但本地裁判 exe 对自定义客户端的 WINDOW_CARD 一律判
+    # PROTOCOL_ERROR/INVALID_JSON（card/cardType 两种字段名均试过；现网 card 字段
+    # 有逐拍实证可用）——本地无法验证窗口对抗，出牌层只能靠单测+现网。调 0 可复现死锁
     parser.add_argument("--depart-delay", type=int, default=1)
     args = parser.parse_args(argv)
 
