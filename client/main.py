@@ -37,12 +37,18 @@ def main(argv: list[str]) -> int:
     conn = Connection.open(args.host, args.port)
     try:
         economy = EconomyStrategy()
+        if os.environ.get("LYCHEE_FROZEN_PROBE"):
+            # P4m-M2 一次性冻结逃生实验：不注册 CombatStrategy（防削卡拆掉陪练的卡）
+            from lychee.strategy.frozen_probe import FrozenProbeStrategy
+            strategies = [FrozenProbeStrategy(), DeliveryStrategy(), economy]
+        else:
+            strategies = [CombatStrategy(economy=economy), DeliveryStrategy(), economy]
         runtime = Runtime(
             conn,
             player_id=args.player_id,
             player_name=player_name,
             version=VERSION,
-            strategies=[CombatStrategy(economy=economy), DeliveryStrategy(), economy],
+            strategies=strategies,
             recorder=Recorder.from_env(args.player_id),
         )
         return runtime.run()
