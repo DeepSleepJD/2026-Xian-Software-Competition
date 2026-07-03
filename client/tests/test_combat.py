@@ -40,6 +40,8 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
             nodes: list | None = None, phase: str = "NORMAL",
             next_node: str = "", move_dir: str = "", squad_available: int = 8,
             squad_in_flight: int = 0, opp_node: str = "S10",
+            opp_next: str = "", opp_state: str = "IDLE",
+            opp_progress_ms: int = 0, opp_total_ms: int = 0,
             resources: dict | None = None, events: list | None = None,
             buffs: list | None = None, tasks: list | None = None,
             task_score: int = 0, total_score: int = 0,
@@ -56,13 +58,21 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
                      "squadInFlight": squad_in_flight,
                      "resources": resources or {}, "buffs": buffs or [],
                      "taskScore": task_score, "totalScore": total_score},
-                    {"playerId": OPP_ID, "teamId": "BLUE", "state": "IDLE",
-                     "currentNodeId": opp_node, "totalScore": opp_total_score}],
+                    {"playerId": OPP_ID, "teamId": "BLUE", "state": opp_state,
+                     "currentNodeId": opp_node, "nextNodeId": opp_next,
+                     "edgeProgressMs": opp_progress_ms, "edgeTotalMs": opp_total_ms,
+                     "totalScore": opp_total_score}],
         "nodes": nodes or [],
         "contests": contests or [],
         "events": events or [],
         "tasks": tasks or [],
     }
+
+
+def opp_committed_to_s10(progress_ms: int = 0, total_ms: int = 30000) -> dict:
+    """对手已 commit 上 S09→S10 边（MOVING、剩余边帧充裕）→ freeze_window_open。"""
+    return {"opp_node": "S09", "opp_next": "S10", "opp_state": "MOVING",
+            "opp_progress_ms": progress_ms, "opp_total_ms": total_ms}
 
 
 def guard_s10(defense: int = 6) -> list[dict]:
@@ -217,12 +227,24 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(320, nodes=guard_s10(), good=0, bad=0))
         self.assertEqual([], [a for a in acts if a["action"] in ("BREAK_GUARD", "WAIT")])
 
-    def test_sets_guard_on_opponent_choke_when_ahead(self) -> None:
-        intents = self.intents(inquire(200, node="S10", opp_node="S09"))
+    def test_sets_guard_on_commit_when_ahead(self) -> None:
+        # 我 camp 在 S10，对手已 commit 上 S09→S10 边（MOVING、剩余边帧充裕）→ 冻结窗口开
+        intents = self.intents(inquire(200, node="S10", **opp_committed_to_s10()))
         guard = [it for it in intents if it.kind == "combat.guard"][0]
         self.assertEqual(PRIORITY_SET_GUARD, guard.priority)
         self.assertEqual({"action": "SET_GUARD", "targetNodeId": "S10",
                           "extraGoodFruit": 2}, guard.actions[0])
+
+    def test_no_guard_before_opponent_commits(self) -> None:
+        # 对手停在相邻节点 S09（未上边、可强通）→ set-on-commit 时序闸不放行，继续 camp
+        acts = self.actions(inquire(200, node="S10", opp_node="S09"))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
+
+    def test_no_guard_when_freeze_window_too_narrow(self) -> None:
+        # 对手已上边但只剩 4 帧（< 设卡读条4+安全2）→ 到站前设不完，别设
+        acts = self.actions(inquire(200, node="S10",
+                                    **opp_committed_to_s10(progress_ms=26000, total_ms=30000)))
+        self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 
     def test_set_guard_yields_to_onnode_task_claim(self) -> None:
         # A2：同帧 economy 抢脚下任务(110) 与 combat 设卡(108) → 仲裁选抢任务
@@ -253,9 +275,18 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(200, node="S10", opp_node="S10"))
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 
-    def test_does_not_set_guard_when_strictly_ahead_on_score(self) -> None:
-        acts = self.actions(inquire(200, node="S10", opp_node="S09",
-                                    total_score=10, opp_total_score=0))
+    def test_sets_guard_when_ahead_on_score_with_freeze_window(self) -> None:
+        # G6 放宽领先闸：领先分 + 冻结窗口开 + 对手仍能完赛 → 仍设卡（freeze EV > 悬赏喂分）
+        intents = self.intents(inquire(200, node="S10", total_score=10, opp_total_score=0,
+                                        **opp_committed_to_s10()))
+        guard = [it for it in intents if it.kind == "combat.guard"]
+        self.assertEqual(1, len(guard))
+
+    def test_no_guard_when_deadline_or_opponent_doomed(self) -> None:
+        # 临近死线（must_rush）时即使冻结窗口开也不设卡——让路直冲；此帧对手同时判死，
+        # 覆盖"领先且对手判死不徒增悬赏"的弱化领先闸（二者在近终点同时成立）
+        acts = self.actions(inquire(585, node="S10", total_score=10, opp_total_score=0,
+                                    **opp_committed_to_s10()))
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 
     def test_does_not_set_guard_when_two_friendly_guards_active(self) -> None:
@@ -269,8 +300,14 @@ class CombatStrategyTests(unittest.TestCase):
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
 
     def test_does_not_set_guard_below_good_fruit_floor(self) -> None:
-        acts = self.actions(inquire(200, node="S10", opp_node="S09", good=91))
+        # 好果 < 地板 40（烧 3 好果后跌破）→ 护交付好果，不设卡（冻结窗口开也不设）
+        acts = self.actions(inquire(200, node="S10", good=41, **opp_committed_to_s10()))
         self.assertNotIn("SET_GUARD", [a["action"] for a in acts])
+
+    def test_sets_guard_above_good_fruit_floor(self) -> None:
+        # 好果 50（烧 3 后 47 ≥ 40）→ 冻结窗口开时设满防卡
+        intents = self.intents(inquire(200, node="S10", good=50, **opp_committed_to_s10()))
+        self.assertEqual(1, len([it for it in intents if it.kind == "combat.guard"]))
 
     def test_break_guard_blocked_when_paused_mid_edge(self) -> None:
         # P4d 死锁根因①：半路被守卫暂停（WAITING+PAUSED+nextNodeId 保留）不是可攻坚状态，

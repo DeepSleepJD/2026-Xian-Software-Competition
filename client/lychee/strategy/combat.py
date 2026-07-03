@@ -45,7 +45,10 @@ SQUAD_RESERVE_GUARDER = 6      # 削穿一张满防卡（防御 6）需 6 支（
 SQUAD_RESERVE_FOR_WEAKEN = SQUAD_RESERVE_GUARDER
 SQUAD_RELAX_ROUND = 150
 SQUAD_SPEND_ALL_ROUND = 350
-GUARD_GOOD_FLOOR = 90
+# G6 动态好果地板（拦截封锁流 §6.5）：满防卡仅烧 ≤3 好果，freeze EV 远超好果分损；
+# 40 保护交付好果主体（好果<42 才拦设卡），不再像旧值 90 近乎不设卡。旋钮：回 90 即
+# 一键退化到近乎不设卡。
+GUARD_GOOD_FLOOR = 40
 GUARD_GOOD_FRAME_COST = 15
 GUARD_MIN_NET_FRAMES = 30
 
@@ -71,8 +74,8 @@ class CombatStrategy(Strategy):
         main = self._propose_break_guard(state)
         if main is None:
             main = self._propose_clear_obstacle(state)
-        if main is None and not safety.must_rush(state):
-            # 送达优先：时间账吃紧时设卡（4 帧架设+果子）纯刷分，让路；
+        if main is None and not safety.delivery_deadline_hit(state):
+            # 送达死线（路程线∪鲜度线）：吃紧时设卡（4 帧架设+烧好果）纯亏，让路直冲；
             # 攻坚/削卡/清障/探路保留——只处理终点路径上的阻挡，是送达的一部分
             main = self._propose_set_guard(state)
         if main is not None:
@@ -189,8 +192,10 @@ class CombatStrategy(Strategy):
             return None
         if me.current_process is not None or me.state != "IDLE":
             return None
-        if me.total_score > state.opponent.total_score:
-            return None     # 压低悬赏喂分概率：严格领先时不主动造可攻破悬赏
+        # G6 放宽领先闸（拦截封锁流 §1 EV：领先也要拦，freeze 远值过 10/18 悬赏喂分）；
+        # 只保留"已领先且对手已判死"时不再徒增悬赏的弱化版
+        if me.total_score > state.opponent.total_score and safety.opponent_cannot_finish(state):
+            return None
         cur = me.current_node_id
         if not cur or self._is_terminal(state, cur) or self._has_active_guard(state, cur):
             return None
@@ -202,6 +207,10 @@ class CombatStrategy(Strategy):
         if not self._ahead_of_opponent(state, cur):
             return None
         if not self._is_opponent_choke(state, cur):
+            return None
+        # set-on-commit 时序闸（§6.4）：只在对手已 commit 上边、到站前设卡能生效时才设。
+        # 早设（对手还停在相邻节点）会让他停节点上强通逃脱——继续 camp 别设。
+        if not safety.freeze_window_open(state, cur):
             return None
 
         extra, defense, good_cost = self._guard_investment(state, cur)

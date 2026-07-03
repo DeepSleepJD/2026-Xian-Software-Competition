@@ -393,5 +393,146 @@ class FreshnessDeadlineTests(unittest.TestCase):
             self.load(deadline_inquire(100, me_good=1, me_fresh=90.0))))
 
 
+# 拦截控制器测试图：A —(ROAD d=10, 14帧)— B(KEY_PASS 咽喉) — C(终点)
+# 进入 B 的边够长（14>GUARD_SETUP 4），可表达"我先到咽喉+对手上边冻结窗口"
+INTERCEPT_START = {
+    "matchId": "intercept-test",
+    "durationRound": 600,
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True},
+        {"nodeId": "B", "nodeType": "KEY_PASS"},
+        {"nodeId": "C", "nodeType": "FINISH", "terminal": True},
+    ],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+         "routeType": "ROAD", "distance": 10, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+    "map": {"gameplay": {"roles": {"startNodeId": "A", "terminalNodeIds": ["C"]}}},
+}
+
+# B 有旁路 A—D—C → 不是咽喉
+INTERCEPT_BYPASS = {
+    **INTERCEPT_START,
+    "matchId": "intercept-bypass",
+    "nodes": INTERCEPT_START["nodes"] + [{"nodeId": "D", "nodeType": "STATION"}],
+    "edges": INTERCEPT_START["edges"] + [
+        {"edgeId": "E3", "fromNodeId": "A", "toNodeId": "D",
+         "routeType": "ROAD", "distance": 10, "bidirectional": True},
+        {"edgeId": "E4", "fromNodeId": "D", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+}
+
+
+def intercept_inquire(round_no: int = 200, *, me_node: str = "A", me_next: str = "",
+                      opp_node: str = "A", opp_next: str = "", opp_state: str = "IDLE",
+                      opp_progress_ms: int = 0, opp_total_ms: int = 0,
+                      me_buffs: list | None = None, opp_resources: dict | None = None,
+                      nodes: list | None = None) -> dict:
+    return {
+        "round": round_no,
+        "players": [
+            {"playerId": MY_ID, "teamId": "RED", "state": "IDLE",
+             "currentNodeId": me_node, "nextNodeId": me_next, "goodFruit": 50,
+             "freshness": 90.0, "buffs": me_buffs or []},
+            {"playerId": OPP_ID, "teamId": "BLUE", "state": opp_state,
+             "currentNodeId": opp_node, "nextNodeId": opp_next,
+             "edgeProgressMs": opp_progress_ms, "edgeTotalMs": opp_total_ms,
+             "resources": opp_resources or {}},
+        ],
+        "nodes": nodes or [],
+    }
+
+
+def friendly_guard_node(node_id: str, defense: int = 6) -> list[dict]:
+    return [{"nodeId": node_id,
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": defense,
+                       "initialDefense": defense, "maxDefense": 7}}]
+
+
+class EtaTests(unittest.TestCase):
+    def load(self, start: dict, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(start)
+        state.update_inquire(inq)
+        return state
+
+    def test_me_eta_pure_frames(self) -> None:
+        state = self.load(INTERCEPT_START, intercept_inquire(me_node="A"))
+        self.assertEqual(14, safety.me_eta(state, "B"))     # A→B = 14 帧
+        self.assertEqual(17, safety.me_eta(state, "C"))     # +B→C 3 帧
+
+    def test_opp_eta_faster_with_horse(self) -> None:
+        base = self.load(INTERCEPT_START, intercept_inquire(opp_node="A"))
+        horsed = self.load(INTERCEPT_START,
+                           intercept_inquire(opp_node="A", opp_resources={"FAST_HORSE": 1}))
+        self.assertLess(safety.opp_eta(horsed, "B"), safety.opp_eta(base, "B"))
+
+
+class InterceptionNodeTests(unittest.TestCase):
+    def load(self, start: dict, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(start)
+        state.update_inquire(inq)
+        return state
+
+    def test_ahead_returns_opponent_choke(self) -> None:
+        # 我在咽喉 B、对手在 A：me_eta(B)=0 +4 ≤ opp_eta(B)=14 → 拦截点 B
+        state = self.load(INTERCEPT_START, intercept_inquire(me_node="B", opp_node="A"))
+        self.assertEqual("B", safety.interception_node(state))
+
+    def test_behind_returns_none(self) -> None:
+        # 我在 A、对手在 B：我到 B 反而更晚 → 无拦截点
+        state = self.load(INTERCEPT_START, intercept_inquire(me_node="A", opp_node="B"))
+        self.assertIsNone(safety.interception_node(state))
+
+    def test_no_choke_returns_none(self) -> None:
+        state = self.load(INTERCEPT_BYPASS, intercept_inquire(me_node="B", opp_node="A"))
+        self.assertIsNone(safety.interception_node(state))
+
+    def test_already_blocking_returns_none(self) -> None:
+        # 对手前方已有我方有效卡 → 一张卡已冻死他，别再滚动 camp
+        state = self.load(INTERCEPT_START, intercept_inquire(
+            me_node="B", opp_node="A", nodes=friendly_guard_node("B")))
+        self.assertIsNone(safety.interception_node(state))
+
+    def test_opponent_absent_returns_none(self) -> None:
+        inq = intercept_inquire(me_node="B", opp_node="A")
+        inq["players"] = inq["players"][:1]
+        state = self.load(INTERCEPT_START, inq)
+        self.assertIsNone(safety.interception_node(state))
+
+
+class FreezeWindowTests(unittest.TestCase):
+    def load(self, inq: dict) -> GameState:
+        state = GameState(MY_ID)
+        state.update_start(INTERCEPT_START)
+        state.update_inquire(inq)
+        return state
+
+    def test_open_when_committed_with_margin(self) -> None:
+        # 对手 MOVING A→B，剩余 10000ms=10 帧 ≥ 6 → 窗口开
+        state = self.load(intercept_inquire(
+            opp_node="A", opp_next="B", opp_state="MOVING",
+            opp_progress_ms=4000, opp_total_ms=14000))
+        self.assertTrue(safety.freeze_window_open(state, "B"))
+
+    def test_closed_when_not_committed(self) -> None:
+        # 对手停在 A（未上边）→ 窗口关，早设会被强通
+        state = self.load(intercept_inquire(opp_node="A"))
+        self.assertFalse(safety.freeze_window_open(state, "B"))
+
+    def test_closed_when_window_too_narrow(self) -> None:
+        # 剩余 4000ms=4 帧 < 6 → 到站前设不完
+        state = self.load(intercept_inquire(
+            opp_node="A", opp_next="B", opp_state="MOVING",
+            opp_progress_ms=10000, opp_total_ms=14000))
+        self.assertFalse(safety.freeze_window_open(state, "B"))
+
+
 if __name__ == "__main__":
     unittest.main()
