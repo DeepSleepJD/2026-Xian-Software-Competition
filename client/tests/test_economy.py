@@ -65,6 +65,12 @@ def opp_player(node: str, *, state: str = "IDLE", next_node: str = "",
             "delivered": delivered, "verified": verified}
 
 
+def seen_enemy_guard(node_id: str = "C") -> dict:
+    return {"nodeId": node_id,
+            "guard": {"active": False, "ownerTeamId": "BLUE", "defense": 0,
+                      "initialDefense": 4, "maxDefense": 6}}
+
+
 def feas(key: str, spot: str, to_frames: int, *, raw: int = 30) -> tuple:
     """构造 _pick_target 口径的 feasible 元组（_contest_factors 白盒测试用）。"""
     return (_Target(key=key, value=30.0, proc_frames=3, claim_nodes=[spot],
@@ -304,6 +310,20 @@ class EconomyTaskTests(unittest.TestCase):
         self.assertEqual([{"action": "WAIT"}], self.acts(inquire(1, node="A", tasks=t)))
         acts = self.acts(inquire(2, node="A", tasks=t, resources={"SHORT_HORSE": 1}))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
+
+    def test_hold_filter_reselects_on_node_task(self) -> None:
+        # N1：当前承诺目标的第一跳被 hold 时，只剔除该方向候选；
+        # 脚下任务不应被 economy 整层 return None 饿死。
+        self.strategy._cur_target_key = "T_blocked"
+        inq = inquire(100, node="A",
+                      tasks=[task("T_here", "A", score=15),
+                             task("T_blocked", "B", score=30)],
+                      nodes=[seen_enemy_guard()])
+        op = opp_player("B")
+        op["guardActionPoint"] = 4
+        inq["players"].append(op)
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_here"}],
+                         self.acts(inq))
 
 
 class EconomyIceBoxTests(unittest.TestCase):

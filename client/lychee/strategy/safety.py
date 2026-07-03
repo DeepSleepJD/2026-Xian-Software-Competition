@@ -10,15 +10,18 @@
 """
 
 from math import ceil
+from weakref import WeakKeyDictionary
 
 from .. import pathing
 from ..state import GameState
 
 GUARD_SETUP_FRAMES = 4
+HOLD_MAX_FRAMES = 12
 RUSH_SAFETY_MARGIN = 60   # 帧。覆盖削卡等待+验核读条+处理中断重来+暂停损耗+抖动；
                           # 比经济层候选级 ENDGAME_MARGIN=40 更保守（全局最后防线），
                           # P5 自对弈可调；置 0 即近似退化为无兜底
 _INF = 10 ** 9
+_HOLD_MEMORY: "WeakKeyDictionary[GameState, dict]" = WeakKeyDictionary()
 
 
 def _terminals(state: GameState) -> list[str]:
@@ -120,6 +123,44 @@ def _can_opponent_set_guard_before_arrival(state: GameState, next_node: str) -> 
     return opp_eta + GUARD_SETUP_FRAMES <= my_eta
 
 
+def _hold_memory(state: GameState) -> dict:
+    mem = _HOLD_MEMORY.get(state)
+    if mem is None or mem.get("match_id") != state.match_id:
+        mem = {"match_id": state.match_id, "guard_ever_seen": False, "streaks": {}}
+        _HOLD_MEMORY[state] = mem
+    return mem
+
+
+def _observe_enemy_guard(state: GameState, mem: dict) -> None:
+    if mem.get("guard_ever_seen"):
+        return
+    my_team = state.my_team_id or state.me.team_id
+    for ns in state.node_states.values():
+        guard = ns.guard
+        if guard and guard.owner_team_id and guard.owner_team_id != my_team:
+            mem["guard_ever_seen"] = True
+            return
+
+
+def _hold_streak_allows(state: GameState, next_node: str, mem: dict) -> bool:
+    streaks = mem.setdefault("streaks", {})
+    count, last_round = streaks.get(next_node, (0, -1))
+    if last_round == state.round:
+        return count <= HOLD_MAX_FRAMES
+    if last_round == state.round - 1:
+        count += 1
+    else:
+        count = 1
+    streaks[next_node] = (count, state.round)
+    return count <= HOLD_MAX_FRAMES
+
+
+def _clear_hold_streak(state: GameState, next_node: str) -> None:
+    mem = _HOLD_MEMORY.get(state)
+    if mem is not None:
+        mem.setdefault("streaks", {}).pop(next_node, None)
+
+
 def hold_before_choke(state: GameState, next_node: str) -> bool:
     """防陷阱闸门（P4e）：True = 本帧别提交进入 next_node 的 MOVE，原地等。
 
@@ -129,21 +170,35 @@ def hold_before_choke(state: GameState, next_node: str) -> bool:
     走人：亮卡则停稳攻坚当帧清（坏果 3 攻坚值/篓），没设卡照走，最多亏它的
     停站帧数。
 
-    无状态：对手停站时长天然有界（它也要赶路）；恶意长蹲由 must_rush 兜底强行进。
+    有界状态：只在本局已见过对手设卡后启用，且同一咽喉最多连续 hold 12 帧。
     """
     if not next_node:
         return False
+    mem = _hold_memory(state)
+    _observe_enemy_guard(state, mem)
     if must_rush(state):                 # 时间账吃紧：接受风化风险也要走（保底交付）
+        _clear_hold_streak(state, next_node)
         return False
     if not _can_opponent_set_guard_before_arrival(state, next_node):
+        _clear_hold_streak(state, next_node)
         return False                     # 对手不能抢先在下一跳完成设卡
+    if not mem.get("guard_ever_seen"):
+        _clear_hold_streak(state, next_node)
+        return False                     # 本局从未见对手设卡：按刷任务对手处理，别自冻
     if state.enemy_guard_at(next_node) is not None:
+        _clear_hold_streak(state, next_node)
         return False                     # 已亮卡：停稳攻坚链接管，蹲着反而白等
     if state.me.squad_available >= pathing.guard_max_defense(state, next_node):
+        _clear_hold_streak(state, next_node)
         return False                     # 半路被设卡也削得穿，进边风险可控
     cur = state.me.current_node_id
     if not cur:
+        _clear_hold_streak(state, next_node)
         return False
     # 咽喉过滤：非咽喉对手不值得设卡，不过滤会在它每个处理站后面跟停
-    return any(next_node in pathing.choke_nodes(state, cur, terminal)
-               for terminal in _terminals(state))
+    is_choke = any(next_node in pathing.choke_nodes(state, cur, terminal)
+                   for terminal in _terminals(state))
+    if not is_choke:
+        _clear_hold_streak(state, next_node)
+        return False
+    return _hold_streak_allows(state, next_node, mem)

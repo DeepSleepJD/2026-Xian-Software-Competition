@@ -103,6 +103,9 @@ class DeliveryStateMachineTests(unittest.TestCase):
         inq["players"].append({"playerId": 2002, "teamId": "BLUE", "state": "IDLE",
                                "currentNodeId": opp_node, "nextNodeId": opp_next,
                                "guardActionPoint": opp_ap})
+        inq["nodes"] = [{"nodeId": "C",
+                         "guard": {"active": False, "ownerTeamId": "BLUE",
+                                   "defense": 0, "initialDefense": 4}}]
         return inq
 
     def test_holds_move_while_opponent_squats_choke(self) -> None:

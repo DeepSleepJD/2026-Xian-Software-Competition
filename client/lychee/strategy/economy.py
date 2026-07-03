@@ -311,10 +311,6 @@ class EconomyStrategy(Strategy):
             return None
         path = pathing.shortest_path(state, cur, spot)
         if path and len(path) >= 2:
-            # 防陷阱闸门（P4e）：经济赶路与主线走位同受约束，否则高优先级
-            # MOVE 会把 delivery 侧的等待直接顶掉
-            if safety.hold_before_choke(state, path[1]):
-                return None
             return Intent(kind="economy", priority=PRIORITY_ECONOMY,
                           actions=[{"action": "MOVE", "targetNodeId": path[1]}],
                           note=f"赶路→{target.note}")
@@ -338,6 +334,11 @@ class EconomyStrategy(Strategy):
             spot, to_frames = "", _INF
             for s in cand.claim_nodes:
                 f = from_cur.get(s, (0.0, _INF))[1]
+                if f >= _INF:
+                    continue
+                path = pathing.shortest_path(state, cur, s)
+                if path and len(path) >= 2 and safety.hold_before_choke(state, path[1]):
+                    continue
                 if f < to_frames:
                     spot, to_frames = s, f
             if not spot or to_frames >= _INF:

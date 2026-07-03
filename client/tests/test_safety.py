@@ -115,6 +115,12 @@ def enemy_guard(node_id: str, defense: int = 6) -> list[dict]:
                        "initialDefense": defense, "maxDefense": 7}}]
 
 
+def seen_enemy_guard(node_id: str = "C") -> list[dict]:
+    return [{"nodeId": node_id,
+             "guard": {"active": False, "ownerTeamId": "BLUE", "defense": 0,
+                       "initialDefense": 4, "maxDefense": 6}}]
+
+
 class TrapGateTests(unittest.TestCase):
     """防陷阱闸门（P4e）：现网 match_2751 r361 败因场景的最小复刻。
 
@@ -129,16 +135,20 @@ class TrapGateTests(unittest.TestCase):
         return state
 
     def test_holds_when_opponent_squats_choke_with_guard_points(self) -> None:
-        state = self.load(TRAP_START, trap_inquire(100))
+        state = self.load(TRAP_START, trap_inquire(100, nodes=seen_enemy_guard()))
         self.assertTrue(safety.hold_before_choke(state, "B"))
 
+    def test_no_hold_before_any_enemy_guard_seen(self) -> None:
+        state = self.load(TRAP_START, trap_inquire(100))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+
     def test_no_hold_without_opponent_guard_points(self) -> None:
-        state = self.load(TRAP_START, trap_inquire(100, opp_ap=0))
+        state = self.load(TRAP_START, trap_inquire(100, opp_ap=0, nodes=seen_enemy_guard()))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
     def test_no_hold_when_opponent_already_en_route(self) -> None:
         # 对手已上边离站（半路）：设卡窗口已过，亮没亮卡都不该再蹲
-        state = self.load(TRAP_START, trap_inquire(100, opp_next="C"))
+        state = self.load(TRAP_START, trap_inquire(100, opp_next="C", nodes=seen_enemy_guard()))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
     def test_holds_when_opponent_will_reach_choke_first(self) -> None:
@@ -146,14 +156,14 @@ class TrapGateTests(unittest.TestCase):
         # 此时我方进边会在半路撞卡，必须等在 A，亮卡后停稳攻坚。
         state = self.load(LONG_TRAP_START, trap_inquire(
             100, opp_node="A", opp_next="B", opp_state="MOVING",
-            opp_progress_ms=4000, opp_total_ms=8000))
+            opp_progress_ms=4000, opp_total_ms=8000, nodes=seen_enemy_guard()))
         self.assertTrue(safety.hold_before_choke(state, "B"))
 
     def test_no_hold_when_opponent_cannot_finish_guard_before_us(self) -> None:
         # 对手也在去 B，但剩余到站+设卡读条晚于我方到站，继续走不会半路冻住。
         state = self.load(LONG_TRAP_START, trap_inquire(
             100, opp_node="A", opp_next="B", opp_state="MOVING",
-            opp_progress_ms=0, opp_total_ms=15000))
+            opp_progress_ms=0, opp_total_ms=15000, nodes=seen_enemy_guard()))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
     def test_no_hold_when_guard_already_visible(self) -> None:
@@ -163,23 +173,32 @@ class TrapGateTests(unittest.TestCase):
 
     def test_no_hold_with_enough_squads_to_weaken_through(self) -> None:
         # STATION 最大防御 6 → 6 支小分队可半路削穿，进边风险可控
-        state = self.load(TRAP_START, trap_inquire(100, squads=6))
+        state = self.load(TRAP_START, trap_inquire(100, squads=6, nodes=seen_enemy_guard()))
         self.assertFalse(safety.hold_before_choke(state, "B"))
-        state = self.load(TRAP_START, trap_inquire(100, squads=5))
+        state = self.load(TRAP_START, trap_inquire(100, squads=5, nodes=seen_enemy_guard()))
         self.assertTrue(safety.hold_before_choke(state, "B"))
 
     def test_no_hold_when_must_rush(self) -> None:
         # 时间账吃紧：接受风化风险也要走，保底交付
-        state = self.load(TRAP_START, trap_inquire(590))
+        state = self.load(TRAP_START, trap_inquire(590, nodes=seen_enemy_guard()))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
     def test_no_hold_on_non_choke_node(self) -> None:
         # B 有旁路 → 对手不值得在此设卡，跟停会在它每个处理站后面白等
-        state = self.load(BYPASS_START, trap_inquire(100))
+        state = self.load(BYPASS_START, trap_inquire(100, nodes=seen_enemy_guard()))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
     def test_no_hold_when_opponent_delivered(self) -> None:
-        state = self.load(TRAP_START, trap_inquire(100, opp_delivered=True))
+        state = self.load(TRAP_START, trap_inquire(100, opp_delivered=True, nodes=seen_enemy_guard()))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+
+    def test_hold_cap_releases_after_twelve_frames(self) -> None:
+        state = GameState(MY_ID)
+        state.update_start(TRAP_START)
+        for round_no in range(100, 112):
+            state.update_inquire(trap_inquire(round_no, nodes=seen_enemy_guard()))
+            self.assertTrue(safety.hold_before_choke(state, "B"))
+        state.update_inquire(trap_inquire(112, nodes=seen_enemy_guard()))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
 
