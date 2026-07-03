@@ -75,10 +75,17 @@ def opp_committed_to_s10(progress_ms: int = 0, total_ms: int = 30000) -> dict:
             "opp_progress_ms": progress_ms, "opp_total_ms": total_ms}
 
 
-def guard_s10(defense: int = 6) -> list[dict]:
+def guard_s10(defense: int = 6, age: int = 0) -> list[dict]:
     return [{"nodeId": "S10", "guard": {"active": True, "ownerTeamId": "BLUE",
                                          "defense": defense, "initialDefense": defense,
-                                         "maxDefense": 7}}]
+                                         "maxDefense": 7, "ageRound": age}}]
+
+
+def reinforce_dispatch_event(round_no: int) -> list[dict]:
+    """对手派 SQUAD_REINFORCE 的公开事件（13:22 局 r296 形态）。"""
+    return [{"eventId": f"EV_{round_no}", "type": "SQUAD_DISPATCH", "round": round_no,
+             "payload": {"playerId": OPP_ID, "action": "SQUAD_REINFORCE",
+                         "targetNodeId": "S10", "orderId": f"SQ_{round_no}"}}]
 
 
 def obstacle_s10() -> list[dict]:
@@ -348,6 +355,41 @@ class CombatStrategyTests(unittest.TestCase):
         # P4d 死锁根因②：被暂停成 WAITING 后削卡不能熄火——它是唯一快速清卡手段
         acts = self.actions(inquire(320, state="WAITING", next_node="S10",
                                     move_dir="PAUSED", nodes=guard_s10()))
+        self.assertIn({"action": "SQUAD_WEAKEN", "targetNodeId": "S10"}, acts)
+
+    def test_weaken_stops_after_reinforce_dispatch_evidence(self) -> None:
+        # P4m 止损：对手派增援的事件一出现（不等落地），削卡战即停——消耗战必败
+        self.intents(inquire(319, events=reinforce_dispatch_event(318), opp_squads=6))
+        acts = self.actions(inquire(320, state="WAITING", next_node="S10",
+                                    move_dir="PAUSED", nodes=guard_s10(), opp_squads=6))
+        self.assertNotIn("SQUAD_WEAKEN", [a["action"] for a in acts])
+
+    def test_weaken_resumes_when_reinforcer_out_of_squads(self) -> None:
+        # 证据在册但对手兵尽（<2）→ 增援威胁消失，削卡恢复
+        self.intents(inquire(319, events=reinforce_dispatch_event(318), opp_squads=6))
+        acts = self.actions(inquire(320, state="WAITING", next_node="S10",
+                                    move_dir="PAUSED", nodes=guard_s10(), opp_squads=1))
+        self.assertIn({"action": "SQUAD_WEAKEN", "targetNodeId": "S10"}, acts)
+
+    def test_defense_rise_on_aged_guard_sets_evidence(self) -> None:
+        # 兜底探测：非新设敌卡（age>0）防值 2→4 = 增援落地（13:22 局 r317 形态）
+        self.intents(inquire(318, state="WAITING", next_node="S10",
+                             move_dir="PAUSED", nodes=guard_s10(defense=2, age=20),
+                             opp_squads=6, squad_in_flight=1))
+        acts = self.actions(inquire(320, state="WAITING", next_node="S10",
+                                    move_dir="PAUSED", nodes=guard_s10(defense=4, age=22),
+                                    opp_squads=6))
+        self.assertNotIn("SQUAD_WEAKEN", [a["action"] for a in acts])
+
+    def test_fresh_guard_defense_track_no_false_positive(self) -> None:
+        # 同点卡消亡后重设（防值 0→新卡 age=0）不误判为增援，首支探针照发
+        self.intents(inquire(318, state="WAITING", next_node="S10",
+                             move_dir="PAUSED", nodes=guard_s10(defense=2, age=29),
+                             opp_squads=6, squad_in_flight=1))
+        self.intents(inquire(319, state="WAITING", next_node="S10", opp_squads=6))
+        acts = self.actions(inquire(320, state="WAITING", next_node="S10",
+                                    move_dir="PAUSED", nodes=guard_s10(defense=4, age=0),
+                                    opp_squads=6))
         self.assertIn({"action": "SQUAD_WEAKEN", "targetNodeId": "S10"}, acts)
 
     def test_reinforces_own_choke_guard_below_max(self) -> None:

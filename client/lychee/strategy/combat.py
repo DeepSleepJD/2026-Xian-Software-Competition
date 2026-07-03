@@ -67,6 +67,9 @@ class CombatStrategy(Strategy):
         self._last_window_cards: dict[str, tuple[int, str, str]] = {}
         self._opponent_card_counts: dict[str, int] = {}
         self._opponent_card_total = 0
+        # P4m 削卡止损：对手会增援的证据（本局粘滞）+ 敌卡防值追踪（兜底探测）
+        self._opp_reinforces = False
+        self._enemy_guard_defense: dict[str, int] = {}
         self._economy = economy
 
     def propose(self, state: GameState) -> list[Intent]:
@@ -259,6 +262,11 @@ class CombatStrategy(Strategy):
             return None
         guard = state.enemy_guard_at(me.next_node_id)
         if guard is None or me.squad_available < 2:
+            return None
+        # P4m 止损闸：对手已证实会增援且还有兵——削卡消耗战必败（同帧序增援(1)
+        # 先于削弱(2)落地，13:22 局 6 支白扔反把卡续长 60 帧）。首支削卡照常放行
+        # 当探针，对手的增援反应会置位 _opp_reinforces
+        if self._opp_reinforces and self._opp_can_repump(state):
             return None
         needed = ceil(guard.defense / 2)
         if me.squad_in_flight >= needed:
@@ -462,6 +470,34 @@ class CombatStrategy(Strategy):
     def _read_events(self, state: GameState) -> None:
         self._read_scout_events(state)
         self._read_window_card_reveals(state)
+        self._read_reinforce_evidence(state)
+
+    def _read_reinforce_evidence(self, state: GameState) -> None:
+        """P4m：对手'会增援'证据探测（本局粘滞）。
+
+        证据一（事件流，派出即证据不等落地）：对手 SQUAD_REINFORCE 派遣/落地事件；
+        证据二（兜底）：非新设的敌卡防值不降反升（13:22 局 r317 形态 2→4）。
+        """
+        if not self._opp_reinforces:
+            my_id = state.player_id
+            for e in state.events:
+                if e.payload.get("playerId") == my_id:
+                    continue
+                if "REINFORCE" in (e.type or "") \
+                        or e.payload.get("action") == "SQUAD_REINFORCE":
+                    self._opp_reinforces = True
+                    break
+        my_team = state.my_team_id or state.me.team_id
+        for node_id, ns in state.node_states.items():
+            guard = ns.guard
+            if guard and guard.active and guard.defense > 0 \
+                    and guard.owner_team_id and guard.owner_team_id != my_team:
+                prev = self._enemy_guard_defense.get(node_id)
+                if prev is not None and guard.defense > prev and guard.age_round > 0:
+                    self._opp_reinforces = True
+                self._enemy_guard_defense[node_id] = int(guard.defense)
+            else:
+                self._enemy_guard_defense.pop(node_id, None)
 
     def _read_scout_events(self, state: GameState) -> None:
         for node_id, expire in list(self._scout_markers.items()):
