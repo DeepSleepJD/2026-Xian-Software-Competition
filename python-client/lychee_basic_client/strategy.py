@@ -54,6 +54,7 @@ class Strategy:
         # obstacle nodes we've dispatched a squad to clear (avoid re-dispatch)
         self._squad_sent: set[str] = set()
         self._guard_blocked: set[str] = set()   # enemy guards blocking us
+        self.route_avoid: set[str] = set()       # nodes to route around (variants/testing)
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -256,7 +257,8 @@ class Strategy:
         # route around obstacle nodes (they carry a time tax); only cross one when
         # it's unavoidable (e.g. an obstacle sitting on a choke).
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
-        nxt = self.graph.fastest_hop(node, dest, avoid=self._guard_blocked, obstacles=obstacles) \
+        avoid = self._guard_blocked | self.route_avoid
+        nxt = self.graph.fastest_hop(node, dest, avoid=avoid, obstacles=obstacles) \
             or self.graph.fastest_hop(node, dest, obstacles=obstacles)
         if not nxt:
             return []
