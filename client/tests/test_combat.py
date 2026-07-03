@@ -489,18 +489,21 @@ class CombatStrategyTests(unittest.TestCase):
         acts = self.actions(inquire(44, contests=contests, freshness=70.0, guard_points=1))
         self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "BING_ZHENG"}, acts)
 
-    def test_plays_xian_gong_against_bing_zheng_tendency(self) -> None:
+    def test_forced_xian_gong_ignores_opponent_card_history(self) -> None:
+        # G7 强制献贡：不看对手出牌历史，能出献贡就一律献贡（旧倾向自适应已删）
         contests = [{"contestId": "C3", "contestType": "PASS", "targetNodeId": "S10",
                      "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
         reveals = [
             {"eventId": "R1", "type": "WINDOW_CARD_REVEAL", "round": 40,
              "payload": {"contestId": "C1", "roundIndex": 1,
-                         "redCard": "YAN_DIE", "blueCard": "BING_ZHENG"}},
+                         "redCard": "YAN_DIE", "blueCard": "XIAN_GONG"}},
             {"eventId": "R2", "type": "WINDOW_CARD_REVEAL", "round": 41,
              "payload": {"contestId": "C2", "roundIndex": 1,
-                         "redCard": "YAN_DIE", "blueCard": "BING_ZHENG"}},
+                         "redCard": "YAN_DIE", "blueCard": "XIAN_GONG"}},
         ]
-        acts = self.actions(inquire(44, contests=contests, events=reveals))
+        acts = self.actions(inquire(44, contests=contests, events=reveals,
+                                    resources={"FAST_HORSE": 1}))
+        # 对手连出献贡，旧逻辑会切 QIANG_XING 反制；强制版仍出献贡（接受平局）
         self.assertIn({"action": "WINDOW_CARD", "contestId": "C3", "card": "XIAN_GONG"}, acts)
 
     def test_mirror_same_card_high_id_switches_to_counter(self) -> None:
@@ -534,21 +537,6 @@ class CombatStrategyTests(unittest.TestCase):
                                     guard_points=0,
                                     buffs=[{"type": "FAST_HORSE", "remainingRound": 3}]))
         self.assertIn({"action": "WINDOW_CARD", "contestId": "C1", "card": "QIANG_XING"}, acts)
-
-    def test_plays_qiang_xing_against_xian_gong_tendency(self) -> None:
-        contests = [{"contestId": "C3", "contestType": "PASS", "targetNodeId": "S10",
-                     "redPlayerId": MY_ID, "bluePlayerId": OPP_ID}]
-        reveals = [
-            {"eventId": "R1", "type": "WINDOW_CARD_REVEAL", "round": 40,
-             "payload": {"contestId": "C1", "roundIndex": 1,
-                         "redCard": "BING_ZHENG", "blueCard": "XIAN_GONG"}},
-            {"eventId": "R2", "type": "WINDOW_CARD_REVEAL", "round": 41,
-             "payload": {"contestId": "C2", "roundIndex": 1,
-                         "redCard": "BING_ZHENG", "blueCard": "XIAN_GONG"}},
-        ]
-        acts = self.actions(inquire(44, contests=contests, events=reveals,
-                                    resources={"FAST_HORSE": 1}))
-        self.assertIn({"action": "WINDOW_CARD", "contestId": "C3", "card": "QIANG_XING"}, acts)
 
     def test_qiang_xing_needs_buff_or_horse(self) -> None:
         contests = [{"contestId": "C1", "contestType": "DOCK", "targetNodeId": "S10",

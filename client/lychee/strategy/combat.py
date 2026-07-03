@@ -62,8 +62,6 @@ class CombatStrategy(Strategy):
         self._scout_pending: dict[str, int] = {}
         self._seen_window_reveals: set[str] = set()
         self._last_window_cards: dict[str, tuple[int, str, str]] = {}
-        self._opponent_card_counts: dict[str, int] = {}
-        self._opponent_card_total = 0
         self._opponent_ever_set_guard = False
         self._economy = economy
 
@@ -339,19 +337,15 @@ class CombatStrategy(Strategy):
         return [{"action": "WINDOW_CARD", "contestId": contest.contest_id, "card": card}]
 
     def _choose_window_card(self, state: GameState, contest: Contest) -> str:
-        if self._opponent_xian_gong_tendency():
-            order = ("QIANG_XING", "XIAN_GONG", "BING_ZHENG")
-            default = self._first_playable_card(state, contest, order)
-        elif self._opponent_bing_zheng_tendency():
-            order = ("XIAN_GONG", "BING_ZHENG", "YAN_DIE")
-            default = self._first_playable_card(state, contest, order)
-        else:
-            # G7 默认三联献贡（献贡赢验牒+兵征、只输强行）；鲜度<80 或好果≤1 时
-            # _can_play_card(XIAN_GONG) 自动退化到兵征/验牒
-            order = ("XIAN_GONG", "BING_ZHENG", "YAN_DIE")
-            default = self._first_playable_card(state, contest, order)
-            if default == "ABSTAIN" and self._can_play_free_qiang_xing(state):
-                default = "QIANG_XING"
+        """G7 强制三联献贡（用户决策 2026-07-03）：能出献贡就一律出，不再按对手出牌
+        倾向切走（献贡赢验牒+兵征、只输强行；对手要强行须有马/疾行令，出不了几次）。
+        仅保留 mirror-break switcher 作镜像同牌死锁（S02 DOCK 0:0，见 [[mirror-dock-deadlock]]）
+        的破对称安全阀。鲜度<80 或好果≤1 献贡出不了时退化尽量出牌。"""
+        if self._can_play_card(state, contest, "XIAN_GONG"):
+            return self._mirror_break_card(state, contest, "XIAN_GONG")
+        default = self._first_playable_card(state, contest, ("BING_ZHENG", "YAN_DIE"))
+        if default == "ABSTAIN" and self._can_play_free_qiang_xing(state):
+            default = "QIANG_XING"
         return self._mirror_break_card(state, contest, default)
 
     def _first_playable_card(self, state: GameState, contest: Contest,
@@ -405,16 +399,6 @@ class CombatStrategy(Strategy):
     def _document_resource_count(state: GameState) -> int:
         return sum(state.me.resources.get(resource_type, 0) for resource_type in DOCUMENT_RESOURCES)
 
-    def _opponent_bing_zheng_tendency(self) -> bool:
-        if self._opponent_card_total < 2:
-            return False
-        return self._opponent_card_counts.get("BING_ZHENG", 0) / self._opponent_card_total >= 0.60
-
-    def _opponent_xian_gong_tendency(self) -> bool:
-        if self._opponent_card_total < 2:
-            return False
-        return self._opponent_card_counts.get("XIAN_GONG", 0) / self._opponent_card_total >= 0.60
-
     def _read_events(self, state: GameState) -> None:
         self._observe_opponent_guard(state)
         self._read_scout_events(state)
@@ -452,7 +436,6 @@ class CombatStrategy(Strategy):
                 self._scout_pending.pop(event.target_node_id, None)
 
     def _read_window_card_reveals(self, state: GameState) -> None:
-        my_team = state.my_team_id or state.me.team_id
         for reveal in state.window_card_reveals():
             key = reveal.event_id or f"{reveal.contest_id}:{reveal.round_index}"
             if key in self._seen_window_reveals:
@@ -460,11 +443,6 @@ class CombatStrategy(Strategy):
             self._seen_window_reveals.add(key)
             self._last_window_cards[reveal.contest_id] = (
                 reveal.round_index, reveal.red_card, reveal.blue_card)
-            card = reveal.blue_card if my_team == "RED" else reveal.red_card
-            if not card:
-                continue
-            self._opponent_card_counts[card] = self._opponent_card_counts.get(card, 0) + 1
-            self._opponent_card_total += 1
 
     def _has_scout_marker(self, state: GameState, node_id: str) -> bool:
         expire = self._scout_markers.get(node_id, 0)
