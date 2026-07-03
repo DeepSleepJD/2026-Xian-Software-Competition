@@ -179,6 +179,22 @@ class Graph:
             path.append(prev[path[-1]])
         return path[-2]
 
+    def fastest_path(
+        self, src: str, dst: str, avoid: Optional[set] = None,
+        obstacles: Optional[set] = None, obstacle_penalty: int = 40,
+    ) -> Optional[list[str]]:
+        """Node list of the fewest-frames (obstacle-aware) route, or None."""
+        if src == dst:
+            return [src]
+        dist, prev = self._frame_dijkstra(src, 1.0, avoid, obstacles, obstacle_penalty)
+        if dst not in dist:
+            return None
+        path = [dst]
+        while path[-1] != src:
+            path.append(prev[path[-1]])
+        path.reverse()
+        return path
+
     def _reachable(self, src: str, dst: str, blocked: set) -> bool:
         if src == dst:
             return True

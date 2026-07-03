@@ -53,15 +53,21 @@ class BlockadeTests(unittest.TestCase):
         # heads deeper toward the choke, not idling
         self.assertEqual("MOVE", act[0]["action"])
 
-    def test_guards_when_opponent_commits(self) -> None:
-        s = _line_strategy(gate="S04")
-        choke = s._active_choke(_opp("S01"))
-        # we are parked on the choke; opponent just departed onto an edge toward it
-        me = _me(choke)
-        opp = _opp("S01", state="MOVING", nextNodeId="S02", routeEdgeId="E1")
+    def test_guards_a_choke_it_passes_while_opponent_is_behind(self) -> None:
+        s = _line_strategy(gate="S04")  # chokes S02, S03 on the line
+        self.assertIn("S02", s.chokes)
+        me = _me("S02", goodFruit=20)      # standing on a choke
+        opp = _opp("S01")                   # opponent still behind it
         act = s.decide(_inq(50, me, opp))
         self.assertEqual("SET_GUARD", act[0]["action"])
-        self.assertEqual(choke, act[0]["targetNodeId"])
+        self.assertEqual("S02", act[0]["targetNodeId"])
+
+    def test_does_not_guard_a_choke_opponent_already_passed(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S02", goodFruit=20)
+        opp = _opp("S03")  # opponent already past S02 -> guarding it is pointless
+        act = s.decide(_inq(50, me, opp))
+        self.assertNotEqual("SET_GUARD", act[0]["action"])
 
     def test_must_deliver_overrides_blocking_near_deadline(self) -> None:
         s = _line_strategy(gate="S04")

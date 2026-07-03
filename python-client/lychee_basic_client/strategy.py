@@ -48,6 +48,8 @@ class Strategy:
         self._opp_prev_edge: Optional[str] = None
         # guards we've placed this visit (nodeId) so we don't spam SET_GUARD
         self._guarded_round: dict[str, int] = {}
+        # obstacle nodes we've dispatched a squad to clear (avoid re-dispatch)
+        self._squad_sent: set[str] = set()
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -97,16 +99,21 @@ class Strategy:
         # window card rides alongside the main action (separate quota)
         card = self._card(me, contests, round_no)
 
+        # squad pre-clears obstacles ahead (separate quota) so the main car never
+        # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
+        squad = self._squad_action(node, me, nodes_by_id)
+
         # once verified we've committed to the delivery run -> always finish it
         # (we only ever VERIFY during our own delivery push).
         if me.get("verified"):
-            return card + self._advance_to(self.terminal_node, me, node, state, phase, nodes_by_id)
+            return card + squad + self._advance_to(self.terminal_node, me, node, state, phase, nodes_by_id)
 
         # delivery safety: if we can't afford to block any longer, go to the gate.
         if self._must_deliver(node, me, round_no):
-            return card + self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
+            return card + squad + self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
 
         main = self._blockade(me, opp, node, state, phase, round_no, tasks, nodes_by_id)
+        main = squad + main
         # remember opponent position for next-frame "just departed" detection
         if opp is not None:
             self._opp_prev_node = opp.get("currentNodeId")
@@ -115,67 +122,66 @@ class Strategy:
 
     # ---- blockade / phase logic ----
     def _blockade(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id):
+        """We race ahead to the gate; at every choke we pass we drop a guard behind
+        us (a guard blocks the *enemy*, never us), forcing the opponent to detour
+        the slow mountain route while we deliver. We never babysit our own guard."""
         if state in BUSY_STATES:
             return []
 
-        choke = self._active_choke(opp)
-        if choke is None:
-            # nothing to hold (opponent past every choke, or no choke) -> just deliver
-            return self._advance_to(self.terminal_node if me.get("verified") else self.gate_node,
-                                    me, node, state, phase, nodes_by_id)
+        # standing on a choke the opponent still has to cross -> guard it, then move on
+        if node in self.chokes and self._worth_guarding(node, opp, nodes_by_id, me):
+            self._guarded_round[node] = round_no
+            return [M.set_guard(node, extra_good_fruit=self._guard_fruit(me))]
 
-        # not at the choke yet: race there (fastest, ignore tasks)
-        if node != choke:
-            step = self._advance_to(choke, me, node, state, phase, nodes_by_id)
-            return step
+        # at the gate but can't VERIFY until RUSH: use the wait for a nearby task
+        if node == self.gate_node and not me.get("verified") and phase != "RUSH":
+            return self._slack_task(node, tasks, me, round_no, nodes_by_id) or [M.wait()]
 
-        # parked on the choke -> guard it when the opponent commits toward it
-        if self._should_guard(choke, opp, nodes_by_id, round_no):
-            self._guarded_round[choke] = round_no
-            return [M.set_guard(choke, extra_good_fruit=self._guard_fruit(me))]
+        # if we're comfortably ahead of schedule, grab a task sitting right here
+        if self._time_slack(node, me, round_no) > 0:
+            here = self._slack_task(node, tasks, me, round_no, nodes_by_id)
+            if here:
+                return here
 
-        # holding: use slack to grab a nearby task, else wait on the choke
-        task_step = self._slack_task(node, tasks, me, round_no, nodes_by_id)
-        return task_step or [M.wait()]
+        # otherwise keep advancing toward the gate (through the chokes)
+        return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
 
-    def _active_choke(self, opp) -> Optional[str]:
-        """The nearest-gate choke the opponent has NOT yet cleared."""
-        if not self.chokes:
-            return None
-        opp_node = opp.get("currentNodeId") if opp else None
-        for choke in reversed(self.chokes):  # start-side first
-            # still relevant if the opponent can't yet be past it toward the gate
-            if opp_node is None:
-                return choke
-            if self.graph.path_frames(opp_node, self.gate_node, avoid={choke}) == float("inf") \
-               or self.graph.path_frames(opp_node, choke) > 0:
-                return choke
-        return self.chokes[0]
-
-    def _should_guard(self, choke, opp, nodes_by_id, round_no) -> bool:
+    def _worth_guarding(self, choke, opp, nodes_by_id, me) -> bool:
+        """Guard this choke if the opponent still has to cross it, we're not already
+        holding it, and we can spare the fruit."""
         if opp is None:
             return False
         g = nodes_by_id.get(choke, {}).get("guard") or {}
         if g.get("active") and g.get("ownerTeamId") == self._my_team and g.get("defense", 0) > 0:
-            return False  # already holding it
-        # opponent just committed onto an edge heading toward this choke
-        opp_edge = opp.get("routeEdgeId")
-        just_departed = opp_edge and opp_edge != self._opp_prev_edge
-        heading_here = self._heading_toward(opp, choke)
-        return bool((just_departed and heading_here) or heading_here)
-
-    def _heading_toward(self, opp, choke) -> bool:
+            return False  # already held
+        if me.get("goodFruit", 0) <= GUARD_KEEP_FRUIT:
+            return False  # keep enough fruit to deliver
         opp_node = opp.get("currentNodeId")
-        nxt = opp.get("nextNodeId") or opp_node
-        if not nxt:
-            return False
-        # the choke is on the opponent's fastest remaining route to the gate
-        return self.graph.path_frames(nxt, self.gate_node, avoid={choke}) == float("inf") \
-            or choke == nxt
+        if not opp_node:
+            return True
+        # opponent must still pass this cut-vertex to reach the gate
+        return self.graph.path_frames(opp_node, self.gate_node, avoid={choke}) == float("inf")
 
     def _guard_fruit(self, me) -> int:
         spare = me.get("goodFruit", 0) - GUARD_KEEP_FRUIT
         return max(0, min(2, spare))
+
+    def _squad_action(self, node, me, nodes_by_id) -> list:
+        """Dispatch a squad to clear the next unavoidable obstacle on our route to
+        the gate, so we MOVE through it instead of chaining FORCED_PASS."""
+        if me.get("squadAvailable", 0) < 2:
+            return []
+        obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
+        path = self.graph.fastest_path(node, self.gate_node, obstacles=obstacles) or []
+        for nid in path[1:]:
+            if nid in obstacles and nid not in self._squad_sent:
+                self._squad_sent.add(nid)
+                return [M.squad_clear(nid)]
+        return []
+
+    def _time_slack(self, node, me, round_no) -> float:
+        """Frames to spare before we must head for delivery (>0 means we can dawdle)."""
+        return TOTAL_ROUNDS - DELIVER_MARGIN - round_no - self._frames_to_deliver(node, me)
 
     # ---- navigation ----
     def _advance_to(self, dest, me, node, state, phase, nodes_by_id):
