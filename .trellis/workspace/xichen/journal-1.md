@@ -140,3 +140,37 @@ economy 进边 MOVE 双接线）；②经济慢边禁令（交付路径外 MOUNT
 ### Status
 
 [OK] **Completed**
+
+
+## Session 4: P4k/P4k-2：半路派队掉帧修复 + 窗口对抗本地全盲修复
+
+**Date**: 2026-07-03
+**Task**: P4k/P4k-2：半路派队掉帧修复 + 窗口对抗本地全盲修复
+**Branch**: `xichen`
+
+### Summary
+
+日志实证未文档化服务器行为：边上单发 SQUAD_* 掉 1 tick(187/187)，arbiter 加护航 MOVE 捆绑免暂停(每局省 2-6 帧)；修复暴露同帧到 S02 的镜像 DOCK 死锁，追查出本地裁判 contests 只发空壳→state 事件流合成窗口、delivery/economy 补 CONTESTING 忙闸、protocol 牌字段自适应(现网 card 实证/本地 exe 旧 schema)；本地 exe 实测不收任何客户端 WINDOW_CARD，窗口对抗验证=单测+现网，陪练 --depart-delay 1 错峰。回归 demo 772/设卡陪练 766 全持平，单测 230。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `4132e5c` | (see git log) |
+| `f394527` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
