@@ -7,6 +7,8 @@ from lychee.state import GameState
 from lychee.strategy import Intent
 from lychee.strategy.combat import (
     CombatStrategy, PRIORITY_COMBAT_MAIN, PRIORITY_SET_GUARD, PRIORITY_SQUAD_SCOUT,
+    SCOUT_PENDING_TIMEOUT, SQUAD_RESERVE_EARLY, SQUAD_RESERVE_GUARDER,
+    SQUAD_RESERVE_RELAXED,
 )
 
 MY_ID = 1001
@@ -93,15 +95,68 @@ SCOUT_START = {
     "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
                 {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
     "nodes": [
-        {"nodeId": "A", "nodeType": "START", "start": True},
-        {"nodeId": "B", "nodeType": "STATION"},
-        {"nodeId": "C", "nodeType": "FINISH", "terminal": True},
+        {"nodeId": "A", "nodeType": "START", "start": True, "x": 0, "y": 0},
+        {"nodeId": "B", "nodeType": "STATION", "x": 6, "y": 0},
+        {"nodeId": "C", "nodeType": "FINISH", "terminal": True, "x": 8, "y": 0},
     ],
     "edges": [
         {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
-         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+         "routeType": "ROAD", "distance": 4, "bidirectional": True},
         {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
          "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+    "map": {"gameplay": {
+        "roles": {"startNodeId": "A", "terminalNodeIds": ["C"]},
+        "processNodes": [
+            {"nodeId": "B", "processType": "TRANSFER", "processRound": 5,
+             "canWindow": True},
+        ],
+    }},
+}
+
+GATE_SCOUT_START = {
+    "matchId": "gate-scout-test",
+    "durationRound": 600,
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True, "x": 0, "y": 0},
+        {"nodeId": "B", "nodeType": "GATE", "x": 6, "y": 0},
+        {"nodeId": "C", "nodeType": "FINISH", "terminal": True, "x": 8, "y": 0},
+    ],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+         "routeType": "ROAD", "distance": 4, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+    ],
+    "map": {"gameplay": {
+        "roles": {"startNodeId": "A", "gateNodeId": "B", "terminalNodeIds": ["C"]},
+        "processNodes": [
+            {"nodeId": "B", "processType": "VERIFY", "processRound": 6,
+             "canWindow": True},
+        ],
+    }},
+}
+
+ECON_SCOUT_START = {
+    "matchId": "economy-scout-test",
+    "durationRound": 600,
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True, "x": 0, "y": 0},
+        {"nodeId": "B", "nodeType": "STATION", "x": 6, "y": 0},
+        {"nodeId": "D", "nodeType": "STATION", "x": 6, "y": 2},
+        {"nodeId": "C", "nodeType": "FINISH", "terminal": True, "x": 8, "y": 0},
+    ],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+         "routeType": "ROAD", "distance": 4, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "C",
+         "routeType": "ROAD", "distance": 2, "bidirectional": True},
+        {"edgeId": "E3", "fromNodeId": "A", "toNodeId": "D",
+         "routeType": "ROAD", "distance": 4, "bidirectional": True},
     ],
     "map": {"gameplay": {
         "roles": {"startNodeId": "A", "terminalNodeIds": ["C"]},
@@ -125,6 +180,13 @@ class CombatStrategyTests(unittest.TestCase):
 
     def actions(self, inq: dict) -> list[dict]:
         return [a for it in self.intents(inq) for a in it.actions]
+
+    def scout_actions_with_eta(self, start: dict, eta: int) -> list[dict]:
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        self.strategy = CombatStrategy()
+        self.strategy._eta_to_path_index = lambda _state, _prefix: eta
+        return self.actions(inquire(10, node="A", opp_node="C"))
 
     def test_breaks_adjacent_enemy_guard_with_bad_fruit_first(self) -> None:
         intents = self.intents(inquire(320, nodes=guard_s10()))
@@ -473,23 +535,146 @@ class CombatStrategyTests(unittest.TestCase):
         self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "B"},
                       self.actions(inquire(13, node="A", opp_node="C", events=consume)))
 
-    def test_squad_scout_reserves_weaken_budget(self) -> None:
+    def test_squad_scout_pending_timeout_covers_full_dispatch_delay(self) -> None:
         self.state = GameState(MY_ID)
         self.state.update_start(SCOUT_START)
         self.strategy = CombatStrategy()
-        acts = self.actions(inquire(10, node="A", squad_available=4, opp_node="C"))
+        self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "B"},
+                      self.actions(inquire(10, node="A", opp_node="C")))
+        acts = self.actions(inquire(20, node="A", opp_node="C"))
+        self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
+        acts = self.actions(inquire(10 + SCOUT_PENDING_TIMEOUT, node="A", opp_node="C"))
+        self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
+        acts = self.actions(inquire(10 + SCOUT_PENDING_TIMEOUT + 1, node="A", opp_node="C"))
+        self.assertIn("SQUAD_SCOUT", [a["action"] for a in acts])
+
+    def test_squad_reserve_curve_relaxes_and_spends_down(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(SCOUT_START)
+        self.strategy = CombatStrategy()
+        self.state.update_inquire(inquire(100, node="A", opp_node="C"))
+        self.assertEqual(SQUAD_RESERVE_EARLY, self.strategy._squad_reserve(self.state))
+        self.state.update_inquire(inquire(200, node="A", opp_node="C"))
+        self.assertEqual(SQUAD_RESERVE_RELAXED, self.strategy._squad_reserve(self.state))
+        self.state.update_inquire(inquire(360, node="A", opp_node="C"))
+        self.assertEqual(0, self.strategy._squad_reserve(self.state))
+
+    def test_squad_reserve_sticks_to_guarder_after_enemy_guard_seen(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(SCOUT_START)
+        self.strategy = CombatStrategy()
+        nodes = [{"nodeId": "B", "guard": {"active": True, "ownerTeamId": "BLUE",
+                                            "defense": 6, "initialDefense": 6}}]
+        self.actions(inquire(100, node="A", nodes=nodes, opp_node="C"))
+        self.state.update_inquire(inquire(360, node="A", opp_node="C"))
+        self.assertEqual(SQUAD_RESERVE_GUARDER, self.strategy._squad_reserve(self.state))
+
+    def test_squad_scout_reserves_adaptive_budget(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(SCOUT_START)
+        self.strategy = CombatStrategy()
+        acts = self.actions(inquire(100, node="A", squad_available=4, opp_node="C"))
+        self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
+        self.strategy = CombatStrategy()
+        acts = self.actions(inquire(100, node="A", squad_available=5, opp_node="C"))
+        self.assertIn("SQUAD_SCOUT", [a["action"] for a in acts])
+        self.strategy = CombatStrategy()
+        acts = self.actions(inquire(200, node="A", squad_available=3, opp_node="C"))
+        self.assertIn("SQUAD_SCOUT", [a["action"] for a in acts])
+        self.strategy = CombatStrategy()
+        acts = self.actions(inquire(360, node="A", squad_available=1, opp_node="C"))
+        self.assertIn("SQUAD_SCOUT", [a["action"] for a in acts])
+
+    def test_squad_scout_guarder_reserve_covers_full_weaken(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(SCOUT_START)
+        self.strategy = CombatStrategy()
+        nodes = [{"nodeId": "B", "guard": {"active": True, "ownerTeamId": "BLUE",
+                                            "defense": 6, "initialDefense": 6}}]
+        acts = self.actions(inquire(100, node="A", nodes=nodes,
+                                    squad_available=6, opp_node="C"))
+        self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
+        self.strategy = CombatStrategy()
+        acts = self.actions(inquire(100, node="A", nodes=nodes,
+                                    squad_available=7, opp_node="C"))
+        self.assertIn("SQUAD_SCOUT", [a["action"] for a in acts])
+
+    def test_squad_actions_stop_in_rush_phase(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(SCOUT_START)
+        self.strategy = CombatStrategy()
+        acts = self.actions(inquire(400, node="A", phase="RUSH", opp_node="C"))
         self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
 
-    def test_squad_scout_reserve_covers_full_weaken(self) -> None:
-        # P4e：保留量 6 = 削穿一张满防卡（防御 6）的兵力；剩 6 支不派侦察，7 支可派
         self.state = GameState(MY_ID)
-        self.state.update_start(SCOUT_START)
+        self.state.update_start(START)
         self.strategy = CombatStrategy()
-        acts = self.actions(inquire(10, node="A", squad_available=6, opp_node="C"))
+        acts = self.actions(inquire(400, state="WAITING", phase="RUSH",
+                                    next_node="S10", move_dir="PAUSED",
+                                    nodes=guard_s10()))
+        self.assertNotIn("SQUAD_WEAKEN", [a["action"] for a in acts])
+
+    def test_squad_scout_requires_landing_margin_before_arrival(self) -> None:
+        acts = self.scout_actions_with_eta(SCOUT_START, eta=4)
         self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
-        self.strategy = CombatStrategy()
-        acts = self.actions(inquire(11, node="A", squad_available=7, opp_node="C"))
-        self.assertIn("SQUAD_SCOUT", [a["action"] for a in acts])
+        acts = self.scout_actions_with_eta(SCOUT_START, eta=5)
+        self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "B"}, acts)
+
+    def test_squad_scout_applies_regular_eta_cap(self) -> None:
+        acts = self.scout_actions_with_eta(SCOUT_START, eta=25)
+        self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "B"}, acts)
+        acts = self.scout_actions_with_eta(SCOUT_START, eta=26)
+        self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
+
+    def test_squad_scout_allows_gate_marker_up_to_lifetime_window(self) -> None:
+        acts = self.scout_actions_with_eta(GATE_SCOUT_START, eta=48)
+        self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "B"}, acts)
+        acts = self.scout_actions_with_eta(GATE_SCOUT_START, eta=49)
+        self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
+
+    def test_squad_scout_uses_economy_current_plan_when_worthwhile(self) -> None:
+        class StubEconomy:
+            current_plan = ("D", 5)
+
+        start = {**ECON_SCOUT_START, "map": {"gameplay": {
+            "roles": {"startNodeId": "A", "terminalNodeIds": ["C"]},
+            "processNodes": [],
+        }}}
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        self.strategy = CombatStrategy(economy=StubEconomy())
+        acts = self.actions(inquire(10, node="A", opp_node="C"))
+        self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "D"}, acts)
+
+    def test_squad_scout_ignores_low_value_economy_plan(self) -> None:
+        class StubEconomy:
+            current_plan = ("D", 2)
+
+        start = {**ECON_SCOUT_START, "map": {"gameplay": {
+            "roles": {"startNodeId": "A", "terminalNodeIds": ["C"]},
+            "processNodes": [],
+        }}}
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        self.strategy = CombatStrategy(economy=StubEconomy())
+        acts = self.actions(inquire(10, node="A", opp_node="C"))
+        self.assertNotIn("SQUAD_SCOUT", [a["action"] for a in acts])
+
+    def test_squad_scout_picks_nearest_candidate_between_route_and_economy(self) -> None:
+        class StubEconomy:
+            current_plan = ("D", 5)
+
+        self.state = GameState(MY_ID)
+        self.state.update_start(ECON_SCOUT_START)
+        self.strategy = CombatStrategy(economy=StubEconomy())
+        self.strategy._eta_to_path_index = lambda _state, prefix: 6 if prefix[-1] == "D" else 8
+        acts = self.actions(inquire(10, node="A", opp_node="C"))
+        self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "D"}, acts)
+
+        self.strategy = CombatStrategy(economy=StubEconomy())
+        self.strategy._eta_to_path_index = lambda _state, prefix: 9 if prefix[-1] == "D" else 5
+        acts = self.actions(inquire(11, node="A", opp_node="C"))
+        self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "B"}, acts)
 
     def test_squad_weaken_wins_over_scout(self) -> None:
         self.state = GameState(MY_ID)

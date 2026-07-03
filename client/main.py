@@ -36,12 +36,13 @@ def main(argv: list[str]) -> int:
     player_name = os.environ.get("LYCHEE_PLAYER_NAME", DEFAULT_PLAYER_NAME)
     conn = Connection.open(args.host, args.port)
     try:
+        economy = EconomyStrategy()
         runtime = Runtime(
             conn,
             player_id=args.player_id,
             player_name=player_name,
             version=VERSION,
-            strategies=[CombatStrategy(), DeliveryStrategy(), EconomyStrategy()],
+            strategies=[CombatStrategy(economy=economy), DeliveryStrategy(), economy],
             recorder=Recorder.from_env(args.player_id),
         )
         return runtime.run()

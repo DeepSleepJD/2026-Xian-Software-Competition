@@ -196,6 +196,7 @@ class EconomyStrategy(Strategy):
         self._last_stationary_node = ""
         self._previous_stationary_node = ""
         self._pending_use_resource = ""
+        self.current_plan: tuple[str, int] | None = None
 
     def propose(self, state: GameState) -> list[Intent]:
         me = state.me
@@ -228,7 +229,10 @@ class EconomyStrategy(Strategy):
 
         # 送达优先（P4d 兜底）：时间账吃紧时任务/冰鉴候选与 WAIT 蹲守全停；
         # 冰鉴/马匹/情报使用保留（保交付有效性 + 助攻直奔终点）
-        eco = None if safety.must_rush(state) else self._propose_economy(state, cur)
+        must_rush = safety.must_rush(state)
+        if must_rush:
+            self.current_plan = None
+        eco = None if must_rush else self._propose_economy(state, cur)
         if eco is not None:
             intents.append(eco)
             # 冰鉴上边预判只看本帧真会走的边：economy 出 MOVE 用其目标，
@@ -285,12 +289,14 @@ class EconomyStrategy(Strategy):
     def _propose_economy(self, state: GameState, cur: str) -> Intent | None:
         me = state.me
         if state.phase != "NORMAL" or me.verified:
+            self.current_plan = None
             return None
         # 任务分闸门只挡任务候选（见 _candidates），不连坐冰鉴领取——
         # P2/P3-1 实测：raw 拿满后整体闭嘴导致脚下 0 绕路的 S07 冰鉴都不领
 
         target, spot = self._pick_target(state, cur)
         self._cur_target_key = target.key if target else ""
+        self.current_plan = (spot, target.proc_frames) if target is not None else None
         if target is None:
             # 无候选：离终局截止尚早就原地蹲守刷新（任务只在刷新后才可见）。
             # 只为未拿到的里程碑档（<110）蹲；110 后边际最多 +10，

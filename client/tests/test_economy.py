@@ -122,6 +122,26 @@ class EconomyTaskTests(unittest.TestCase):
         acts = self.acts(inquire(2, node="B", tasks=[task("T_1", "B")]))
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_1"}], acts)
 
+    def test_current_plan_tracks_selected_economy_target(self) -> None:
+        self.acts(inquire(1, node="A", tasks=[task("T_1", "B", proc=4)]))
+        self.assertEqual(("B", 4), self.strategy.current_plan)
+
+    def test_current_plan_clears_without_candidate(self) -> None:
+        self.strategy.current_plan = ("B", 4)
+        self.step(inquire(1, node="A", resources={"ICE_BOX": 2}))
+        self.assertIsNone(self.strategy.current_plan)
+
+    def test_current_plan_clears_when_must_rush(self) -> None:
+        self.strategy.current_plan = ("B", 4)
+        self.step(inquire(525, node="A", tasks=[task("T_1", "B")]))
+        self.assertIsNone(self.strategy.current_plan)
+
+    def test_current_plan_survives_moving_early_return(self) -> None:
+        self.strategy.current_plan = ("B", 4)
+        self.step(inquire(2, node="A", state="MOVING", next_node="B",
+                          tasks=[task("T_1", "B")]))
+        self.assertEqual(("B", 4), self.strategy.current_plan)
+
     def test_priority_is_economy(self) -> None:
         intents = self.step(inquire(1, node="A", tasks=[task("T_1", "B")]))
         self.assertEqual(1, len(intents))

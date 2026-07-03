@@ -35,22 +35,31 @@ CARD_COUNTERS = {
     "BING_ZHENG": ("XIAN_GONG",),
 }
 SCOUT_MIN_PROC_FRAMES = 4
-SCOUT_ETA_MAX = 40
-SCOUT_PENDING_TIMEOUT = 8
-SQUAD_RESERVE_FOR_WEAKEN = 6   # 削穿一张满防卡（防御 6）需 6 支（2 支/次削 2 点，P4e 实证）
+SCOUT_ETA_MAX = 25
+SCOUT_GATE_ETA_SLACK = 45
+SCOUT_LAND_MARGIN = 2
+SCOUT_PENDING_TIMEOUT = 16
+SQUAD_RESERVE_EARLY = 4        # 开局留两波削卡，剩余人手优先转化为探路收益
+SQUAD_RESERVE_RELAXED = 2      # 150 帧未见设卡后降低对手设卡先验
+SQUAD_RESERVE_GUARDER = 6      # 削穿一张满防卡（防御 6）需 6 支（2 支/次削 2 点）
+SQUAD_RESERVE_FOR_WEAKEN = SQUAD_RESERVE_GUARDER
+SQUAD_RELAX_ROUND = 150
+SQUAD_SPEND_ALL_ROUND = 350
 GUARD_GOOD_FLOOR = 90
 GUARD_GOOD_FRAME_COST = 15
 GUARD_MIN_NET_FRAMES = 30
 
 
 class CombatStrategy(Strategy):
-    def __init__(self) -> None:
+    def __init__(self, economy=None) -> None:
         self._scout_markers: dict[str, int] = {}
         self._scout_pending: dict[str, int] = {}
         self._seen_window_reveals: set[str] = set()
         self._last_window_cards: dict[str, tuple[int, str, str]] = {}
         self._opponent_card_counts: dict[str, int] = {}
         self._opponent_card_total = 0
+        self._opponent_ever_set_guard = False
+        self._economy = economy
 
     def propose(self, state: GameState) -> list[Intent]:
         if state.me.delivered or state.me.retired:
@@ -208,6 +217,8 @@ class CombatStrategy(Strategy):
 
     def _propose_squad_weaken(self, state: GameState) -> Intent | None:
         me = state.me
+        if state.phase == "RUSH":
+            return None
         # 被守卫拦停（WAITING+PAUSED）时削卡是唯一快速清卡手段，只认 MOVING
         # 会导致只剩干等风化（P4d 死锁根因②）
         en_route = bool(me.next_node_id) and (
@@ -226,28 +237,53 @@ class CombatStrategy(Strategy):
 
     def _propose_squad_scout(self, state: GameState) -> Intent | None:
         me = state.me
-        if me.squad_available - 1 < SQUAD_RESERVE_FOR_WEAKEN:
+        if state.phase == "RUSH":
+            return None
+        if me.squad_available - 1 < self._squad_reserve(state):
             return None
         cur = me.current_node_id
         if not cur:
             return None
+
+        candidates: list[tuple[int, str]] = []
+        seen: set[str] = set()
+
         path = self._terminal_path(state, cur)
-        if not path or len(path) < 2:
-            return None
-        for idx, node_id in enumerate(path[1:], start=1):
-            proc = state.process_nodes.get(node_id)
-            if proc is None or proc.process_round < SCOUT_MIN_PROC_FRAMES:
-                continue
-            prefix = path[:idx + 1]
-            if self._eta_to_path_index(state, prefix) > SCOUT_ETA_MAX:
-                continue
+        if path and len(path) >= 2:
+            for idx, node_id in enumerate(path[1:], start=1):
+                proc = state.process_nodes.get(node_id)
+                if proc is None or proc.process_round < SCOUT_MIN_PROC_FRAMES:
+                    continue
+                candidates.append((self._eta_to_path_index(state, path[:idx + 1]), node_id))
+                seen.add(node_id)
+
+        plan = getattr(self._economy, "current_plan", None)
+        if plan:
+            spot, proc_frames = plan
+            if spot not in seen and proc_frames >= SCOUT_MIN_PROC_FRAMES:
+                spot_path = pathing.shortest_path(state, cur, spot)
+                if spot_path and len(spot_path) >= 2:
+                    candidates.append((self._eta_to_path_index(state, spot_path), spot))
+
+        best: tuple[int, str] | None = None
+        for eta, node_id in candidates:
             if self._has_scout_marker(state, node_id) or self._has_pending_scout(state, node_id):
                 continue
-            self._scout_pending[node_id] = state.round
-            action = {"action": "SQUAD_SCOUT", "targetNodeId": node_id}
-            return Intent(kind="combat.squad", priority=PRIORITY_SQUAD_SCOUT,
-                          actions=[action], note=f"小分队探路@{node_id}")
-        return None
+            delay = self._squad_delay(state, cur, node_id)
+            eta_cap = delay + SCOUT_GATE_ETA_SLACK if self._is_gate_like(state, node_id) \
+                else SCOUT_ETA_MAX
+            if not (delay + SCOUT_LAND_MARGIN <= eta <= eta_cap):
+                continue
+            if best is None or eta < best[0]:
+                best = (eta, node_id)
+
+        if best is None:
+            return None
+        node_id = best[1]
+        self._scout_pending[node_id] = state.round
+        action = {"action": "SQUAD_SCOUT", "targetNodeId": node_id}
+        return Intent(kind="combat.squad", priority=PRIORITY_SQUAD_SCOUT,
+                      actions=[action], note=f"小分队探路@{node_id}")
 
     def _propose_window_cards(self, state: GameState) -> list[dict]:
         contests = [c for c in state.my_open_contests() if c.contest_id]
@@ -336,8 +372,20 @@ class CombatStrategy(Strategy):
         return self._opponent_card_counts.get("XIAN_GONG", 0) / self._opponent_card_total >= 0.60
 
     def _read_events(self, state: GameState) -> None:
+        self._observe_opponent_guard(state)
         self._read_scout_events(state)
         self._read_window_card_reveals(state)
+
+    def _observe_opponent_guard(self, state: GameState) -> None:
+        if self._opponent_ever_set_guard:
+            return
+        my_team = state.my_team_id or state.me.team_id
+        for ns in state.node_states.values():
+            guard = ns.guard
+            if guard and guard.owner_team_id and guard.owner_team_id != my_team \
+                    and (guard.active or guard.defense > 0):
+                self._opponent_ever_set_guard = True
+                return
 
     def _read_scout_events(self, state: GameState) -> None:
         for node_id, expire in list(self._scout_markers.items()):
@@ -392,6 +440,30 @@ class CombatStrategy(Strategy):
     def _has_pending_scout(self, state: GameState, node_id: str) -> bool:
         dispatch_round = self._scout_pending.get(node_id)
         return dispatch_round is not None and dispatch_round + SCOUT_PENDING_TIMEOUT >= state.round
+
+    def _squad_reserve(self, state: GameState) -> int:
+        if self._opponent_ever_set_guard:
+            return SQUAD_RESERVE_GUARDER
+        if state.round >= SQUAD_SPEND_ALL_ROUND:
+            return 0
+        if state.round >= SQUAD_RELAX_ROUND:
+            return SQUAD_RESERVE_RELAXED
+        return SQUAD_RESERVE_EARLY
+
+    @staticmethod
+    def _squad_delay(state: GameState, cur: str, target: str) -> int:
+        a, b = state.nodes.get(cur), state.nodes.get(target)
+        if a is None or b is None:
+            return 15
+        d = max(abs(a.x - b.x), abs(a.y - b.y))
+        return min(15, max(3, ceil(d / 3)))
+
+    @staticmethod
+    def _is_gate_like(state: GameState, node_id: str) -> bool:
+        if node_id == state.roles.gate_node_id:
+            return True
+        proc = state.process_nodes.get(node_id)
+        return bool(proc and proc.process_type == "VERIFY")
 
     @staticmethod
     def _eta_to_path_index(state: GameState, prefix: list[str]) -> int:
