@@ -53,27 +53,27 @@ class BlockadeTests(unittest.TestCase):
         # heads deeper toward the choke, not idling
         self.assertEqual("MOVE", act[0]["action"])
 
-    def test_freezes_when_opponent_commits_onto_the_edge(self) -> None:
-        s = _line_strategy(gate="S04")  # chokes S02, S03; first intercept = S02
-        me = _me("S02", goodFruit=20)   # camped on the intercept choke
-        # opponent has committed onto S01->S02 with the whole edge still ahead
-        opp = _opp("S01", state="MOVING", nextNodeId="S02", edgeProgressPermille=0)
+    def test_guards_choke_as_we_pass_when_opponent_must_cross(self) -> None:
+        s = _line_strategy(gate="S04")  # chokes S02, S03 on the line
+        me = _me("S02", goodFruit=20)   # standing on a choke
+        opp = _opp("S01")               # opponent still behind -> must cross S02
         act = s.decide(_inq(50, me, opp))
         self.assertIn({"action": "SET_GUARD", "targetNodeId": "S02", "extraGoodFruit": 2}, act)
 
-    def test_waits_on_choke_until_opponent_commits(self) -> None:
+    def test_does_not_guard_choke_opponent_already_passed(self) -> None:
         s = _line_strategy(gate="S04")
         me = _me("S02", goodFruit=20)
-        opp = _opp("S01")  # still parked, not committed -> we hold, don't set early
+        opp = _opp("S03")  # opponent already past S02 -> pointless to guard it
         act = s.decide(_inq(50, me, opp))
         self.assertNotIn("SET_GUARD", [a["action"] for a in act])
 
-    def test_no_freeze_when_opponent_almost_across(self) -> None:
+    def test_no_node_action_while_mid_edge(self) -> None:
         s = _line_strategy(gate="S04")
-        me = _me("S02", goodFruit=20)
-        # 99% across the edge -> not enough time for the guard to activate
-        opp = _opp("S01", state="MOVING", nextNodeId="S02", edgeProgressPermille=990)
-        self.assertFalse(s._freeze_window_open(opp, "S02"))
+        # on the edge into S02 (currentNodeId still S02) -> must only MOVE, never SET_GUARD
+        me = _me("S02", goodFruit=20, routeEdgeId="E1", nextNodeId="S03")
+        opp = _opp("S01")
+        act = s.decide(_inq(50, me, opp))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
     def test_must_deliver_overrides_blocking_near_deadline(self) -> None:
         s = _line_strategy(gate="S04")

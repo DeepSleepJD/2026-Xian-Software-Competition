@@ -49,6 +49,7 @@ class Strategy:
         self._last_node: Optional[str] = None
         self._my_team: Optional[str] = None
         self._contest_played: set[tuple] = set()
+        self._first_guard_node: Optional[str] = None   # decoy guard (not reinforced)
         # opponent tracking (previous frame)
         self._opp_prev_node: Optional[str] = None
         self._opp_prev_edge: Optional[str] = None
@@ -109,7 +110,7 @@ class Strategy:
 
         # squad pre-clears obstacles ahead (separate quota) so the main car never
         # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
-        squad = self._squad_action(node, me, nodes_by_id)
+        squad = self._squad_action(node, me, opp, nodes_by_id)
 
         # once verified we've committed to the delivery run -> always finish it
         # (we only ever VERIFY during our own delivery push).
@@ -141,26 +142,22 @@ class Strategy:
         if state in BUSY_STATES:
             return []
 
-        N = self._intercept_choke(opp, nodes_by_id)
-        # Phase A: lock down the freeze at the first intercept choke
-        if N is not None and not self._we_hold(N, nodes_by_id):
-            if node == N:
-                if self._freeze_window_open(opp, N) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
-                    self._guarded_round[N] = round_no
-                    return [M.set_guard(N, extra_good_fruit=self._guard_fruit(me))]
-                # opponent not committed onto the edge yet -> hold the choke and wait
-                # (grab a freebie task only if this is a station we'd process anyway)
-                if self._stopped_anyway(node, me, phase, nodes_by_id):
-                    t = self._free_task_here(node, tasks, me)
-                    if t:
-                        return t
-                return [M.wait()]
-            return self._advance_to(N, me, node, state, phase, nodes_by_id)
+        # MID-EDGE: never attempt a node action -- SET_GUARD/PROCESS while travelling
+        # are rejected MOVING_ACTION_FORBIDDEN, which once stalled us dead on the edge
+        # spamming SET_GUARD. currentNodeId still reads the edge's start node, so gate
+        # this on routeEdgeId, not on `node`. Just push to the far end.
+        if me.get("routeEdgeId") and me.get("nextNodeId"):
+            return [M.move(me["nextNodeId"])]
 
-        # Phase B: opponent frozen (or nothing to intercept) -> deliver. Drop an extra
-        # guard only where the opponent is already committing onto that choke's edge.
-        if node in self.chokes and self._we_hold(node, nodes_by_id) is False \
-           and self._freeze_window_open(opp, node) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
+        # GUARD-AS-WE-PASS: drop a guard on every choke we stand on that the opponent
+        # must still cross, then keep moving. We never camp waiting for the perfect
+        # commit moment (that once stalled us past our own delivery deadline); the
+        # freeze still happens -- the opponent freezes mid-edge whenever they arrive
+        # while the guard is up. First guard = decoy (see _squad_action).
+        if node in self.chokes and not self._we_hold(node, nodes_by_id) \
+           and self._opp_must_cross(node, opp) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
+            if self._first_guard_node is None:
+                self._first_guard_node = node
             self._guarded_round[node] = round_no
             return [M.set_guard(node, extra_good_fruit=self._guard_fruit(me))]
 
@@ -172,19 +169,14 @@ class Strategy:
             return [M.wait()]
         return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
 
-    def _intercept_choke(self, opp, nodes_by_id):
-        """First (start-side) choke the opponent still must cross and that we can hold
-        (not already opponent-passed). None if the opponent is past every choke."""
-        if not self.chokes or opp is None:
-            return None
+    def _opp_must_cross(self, node, opp) -> bool:
+        """True if this cut-vertex is still on the opponent's only way to the gate."""
+        if opp is None:
+            return False
         opp_node = opp.get("currentNodeId")
         if not opp_node:
-            return self.chokes[-1]
-        for c in reversed(self.chokes):  # start-side first
-            # opponent must still pass this cut-vertex to reach the gate
-            if self.graph.path_frames(opp_node, self.gate_node, avoid={c}) == float("inf"):
-                return c
-        return None
+            return True
+        return self.graph.path_frames(opp_node, self.gate_node, avoid={node}) == float("inf")
 
     def _we_hold(self, node, nodes_by_id) -> bool:
         g = nodes_by_id.get(node, {}).get("guard") or {}
@@ -233,23 +225,28 @@ class Strategy:
                     return [M.claim_resource(node, h)]
         return None
 
-    def _squad_action(self, node, me, nodes_by_id) -> list:
-        """Squad is a separate quota and a scarce budget. Priorities:
-        1) REINFORCE our own guard the opponent is squad-weakening (heal the freeze,
-           any distance -- no backtrack); 2) pre-CLEAR the next unavoidable obstacle
-        on our route so we never chain FORCED_PASS."""
+    def _squad_action(self, node, me, opp, nodes_by_id) -> list:
+        """Squad is a separate quota (rides alongside the main action) and a scarce
+        budget. Priorities:
+        1) REINFORCE a weakened guard -- but NOT the first (decoy) guard: let it soak
+           the opponent's squad and fall; heal the LATER guards, which the (now
+           squad-poor) opponent can no longer break. Any distance, no backtrack.
+        2) pre-CLEAR the next obstacle -- but ONLY if we're not already ahead (if we
+           lead, keep the squad for reinforcing; clearing just speeds a race we win)."""
         if me.get("squadAvailable", 0) < 2:
             return []
-        # 1) heal a guard that's been knocked down (>=2 below its cap = a weaken hit,
-        # not just one weathering tick) so the opponent can never break through
+        # 1) heal a knocked-down guard (a weaken hit = >=2 below cap), except the decoy
         for nid, n in nodes_by_id.items():
+            if nid == self._first_guard_node:
+                continue  # decoy: don't reinforce, let it draw their squad
             g = n.get("guard") or {}
             if g.get("active") and g.get("ownerTeamId") == self._my_team:
                 cap = g.get("maxDefense", g.get("initialDefense", 0))
                 if 0 < g.get("defense", 0) <= cap - 2:
                     return [M.squad_reinforce(nid)]
-        # 2) pre-clear the next obstacle on our path -- but only ones close enough
-        # ahead to matter (don't waste a squad clearing the far destination at r1)
+        # 2) pre-clear obstacles only when NOT already ahead (else save squad for guards)
+        if self._ahead_of(node, opp):
+            return []
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         path = self.graph.fastest_path(node, self.gate_node, obstacles=obstacles) or []
         for nid in path[1:]:
@@ -259,6 +256,15 @@ class Strategy:
                 self._squad_sent.add(nid)
                 return [M.squad_clear(nid)]
         return []
+
+    def _ahead_of(self, node, opp) -> bool:
+        """True if we're closer to the gate (in frames) than the opponent."""
+        if opp is None:
+            return True
+        opp_node = opp.get("currentNodeId")
+        if not opp_node:
+            return True
+        return self.graph.path_frames(node, self.gate_node) < self.graph.path_frames(opp_node, self.gate_node)
 
     # ---- navigation ----
     def _advance_to(self, dest, me, node, state, phase, nodes_by_id):
