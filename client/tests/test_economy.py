@@ -906,6 +906,14 @@ class FirstCommonRushEconomyTests(unittest.TestCase):
         acts = [a for it in EconomyStrategy().propose(state) for a in it.actions]
         self.assertNotIn({"action": "CLAIM_TASK", "taskId": "T_near"}, acts)
 
+    def test_on_node_task_still_yields_when_opponent_eta_is_better(self) -> None:
+        # 22:50 败局同型：当前 ETA 看起来已经抢不过时，也不能取消公共目标去吃脚下分。
+        inq = inquire(100, node="B", tasks=[task("T_near", "B", score=30)])
+        inq["players"].append(opp_player("C"))
+        state = self.load(inq)
+        acts = [a for it in EconomyStrategy().propose(state) for a in it.actions]
+        self.assertNotIn({"action": "CLAIM_TASK", "taskId": "T_near"}, acts)
+
 
 if __name__ == "__main__":
     unittest.main()

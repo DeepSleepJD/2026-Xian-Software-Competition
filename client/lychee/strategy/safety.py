@@ -10,6 +10,7 @@
 """
 
 from math import ceil
+from weakref import WeakKeyDictionary
 
 from .. import pathing
 from ..state import GameState
@@ -34,6 +35,7 @@ _RUSH_PER_FRAME = 1300
 # 否则站桩等不到设卡=自冻）
 _GUARD_NODE_TYPES = ("KEY_PASS", "PASS")
 _INF = 10 ** 9
+_first_common_rush_targets = WeakKeyDictionary()
 
 
 def _terminals(state: GameState) -> list[str]:
@@ -346,6 +348,66 @@ def _friendly_guard_on(state: GameState, node_id: str) -> bool:
     return bool(guard and guard.active and guard.defense > 0 and guard.owner_team_id == my_team)
 
 
+def _node_on_min_frame_route(
+        state: GameState, src: str, node_id: str, dst: str,
+        move_per_frame: int = pathing.BASE_MOVE_PER_FRAME) -> bool:
+    head = pathing.min_frames(state, src, node_id, move_per_frame)
+    tail = pathing.min_frames(state, node_id, dst, move_per_frame)
+    total = pathing.min_frames(state, src, dst, move_per_frame)
+    return head < pathing.INF_FRAMES and tail < pathing.INF_FRAMES and head + tail == total
+
+
+def _rush_anchor_from_start(state: GameState) -> tuple[str, str] | None:
+    start = state.roles.start_node_id or state.me.current_node_id
+    if not start:
+        return None
+    best_terminal = ""
+    best_frames = pathing.INF_FRAMES
+    for terminal in _terminals(state):
+        frames = pathing.min_frames(state, start, terminal)
+        if frames < best_frames:
+            best_terminal, best_frames = terminal, frames
+    if not best_terminal or best_frames >= pathing.INF_FRAMES:
+        return None
+    return start, best_terminal
+
+
+def _theoretical_first_common_rush_node(state: GameState) -> str | None:
+    """Map-derived first frames-shortest guard point; ignores current ETA noise after kickoff."""
+    anchor = _rush_anchor_from_start(state)
+    if anchor is None:
+        return None
+    start, terminal = anchor
+    excluded = set(state.roles.rush_excluded_node_ids)
+    best_node: str | None = None
+    best_head = pathing.INF_FRAMES
+    for node_id, node in state.nodes.items():
+        if node_id in excluded or node.node_type not in _GUARD_NODE_TYPES:
+            continue
+        if _friendly_guard_on(state, node_id):
+            continue
+        if not _node_on_min_frame_route(state, start, node_id, terminal):
+            continue
+        head = pathing.min_frames(state, start, node_id)
+        if head < best_head:
+            best_node, best_head = node_id, head
+    return best_node
+
+
+def _rush_target_still_ahead(state: GameState, target: str) -> bool:
+    """True while the locked target is still on our frames-shortest route to a terminal."""
+    cur = state.me.next_node_id or state.me.current_node_id
+    if not cur:
+        return False
+    if cur == target:
+        return True
+    speed = me_move_per_frame(state)
+    for terminal in _terminals(state):
+        if _node_on_min_frame_route(state, cur, target, terminal, speed):
+            return True
+    return False
+
+
 def interception_node(state: GameState) -> str | None:
     """对手到终点路径上、我能先到且可设卡的第一个必经咽喉（camp 目标，§6.2）。
 
@@ -383,54 +445,38 @@ def interception_node(state: GameState) -> str | None:
 
 
 def first_common_rush_node(state: GameState) -> str | None:
-    """我方应抢先抵达并设卡的第一个公共节点。
-
-    与旧 `interception_node` 的"对手必经割点"口径不同，这里按双方最快到同一终点
-    的路线求公共点：节点必须同时位于双方最快路径上、可设卡（KEY_PASS/PASS），且
-    我方 ETA + 设卡 4 帧不晚于对手 ETA。返回后由 economy 让路、delivery 先开过去；
-    到点后不 camp，combat 若本帧能设卡会压住 MOVE，下一帧继续前压/送达。
-    """
+    """锁定本局第一个公共抢点；到达前把它当硬目标，不随单帧 ETA 翻转取消。"""
     if delivery_deadline_hit(state):
+        _first_common_rush_targets.pop(state, None)
         return None
     opp = state.opponent
     if opp is None or opp.delivered or opp.retired:
-        return None
-    if opponent_locked(state):
+        _first_common_rush_targets.pop(state, None)
         return None
     if not (state.me.current_node_id or state.me.next_node_id):
         return None
     if not (opp.current_node_id or opp.next_node_id):
         return None
+    entry = _first_common_rush_targets.get(state)
+    locked = entry[1] if entry and entry[0] == state.match_id else None
+    if entry and locked is None:
+        _first_common_rush_targets.pop(state, None)
+    if locked:
+        if locked not in state.nodes or _friendly_guard_on(state, locked) or opponent_locked(state):
+            _first_common_rush_targets.pop(state, None)
+            return None
+        if not _rush_target_still_ahead(state, locked):
+            _first_common_rush_targets.pop(state, None)
+            return None
+        return locked
 
-    terminals = _terminals(state)
-    if not terminals:
+    if opponent_locked(state):
         return None
-    me_speed = me_move_per_frame(state)
-    opp_speed = opp_move_per_frame(state)
-    anchor = min(terminals, key=lambda t: me_eta(state, t))
-    me_total = me_eta(state, anchor)
-    opp_total = opp_eta(state, anchor)
-    if me_total >= _INF or opp_total >= _INF:
+    target = _theoretical_first_common_rush_node(state)
+    if target is None or not _rush_target_still_ahead(state, target):
         return None
-
-    best_node: str | None = None
-    best_opp_eta: int | None = None
-    for node_id, node in state.nodes.items():
-        if node.node_type not in _GUARD_NODE_TYPES or _friendly_guard_on(state, node_id):
-            continue
-        mt = me_eta(state, node_id)
-        ot = opp_eta(state, node_id)
-        if mt >= _INF or ot >= _INF or mt + GUARD_SETUP_FRAMES > ot:
-            continue
-        me_tail = pathing.min_frames(state, node_id, anchor, me_speed)
-        opp_tail = pathing.min_frames(state, node_id, anchor, opp_speed)
-        if me_tail >= pathing.INF_FRAMES or opp_tail >= pathing.INF_FRAMES:
-            continue
-        if mt + me_tail != me_total or ot + opp_tail != opp_total:
-            continue
-        if best_opp_eta is None or ot < best_opp_eta:
-            best_node, best_opp_eta = node_id, ot
-    return best_node
+    _first_common_rush_targets[state] = (state.match_id, target)
+    return target
 
 
 def opponent_locked(state: GameState) -> bool:

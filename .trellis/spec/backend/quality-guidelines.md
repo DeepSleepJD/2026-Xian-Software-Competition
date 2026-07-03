@@ -107,21 +107,26 @@ def first_common_rush_node(state: GameState) -> str | None:
 ```
 
 **Contracts**:
-- Return a node only when it is a current-state, map-derived common point on both sides' fastest route to the selected terminal; do not hard-code map node IDs.
-- The returned node must be actionable for interception: currently `KEY_PASS` or `PASS`, no active friendly guard already on it, and `me_eta(node) + GUARD_SETUP_FRAMES <= opp_eta(node)`.
-- The helper is a rush target, not a camp order. `economy` should yield while the target is pending; `delivery` should route toward it, but once `current_node_id == target`, delivery must continue forward instead of suppressing movement.
+- Return the first map-derived guard point on the frames-shortest route from the start node to the selected terminal; do not hard-code map node IDs.
+- The returned node must be actionable for interception: currently `KEY_PASS` or `PASS`, no active friendly guard already on it, and not listed in `rushExcludedNodeIds`.
+- Once a target is selected for a `GameState`, keep returning it while it remains ahead on our frames-shortest route. Do not cancel it just because current `me_eta(node) + GUARD_SETUP_FRAMES > opp_eta(node)` after economy or movement has shifted the race.
+- The helper is a rush target, not a camp order. `economy` should yield while the target is pending; `delivery` should route toward it by frames-first shortest path, but once `current_node_id == target`, delivery must continue forward instead of suppressing movement.
 - `combat` may treat the returned node as a valid guard target so the sequence is "arrive, set guard, move on" even when the node is a fastest-path common point rather than a strict topology cut.
-- Disable the target when a delivery deadline is active, the opponent is absent/delivered/retired, or `opponent_locked(state)` is already true.
+- Disable the target when a delivery deadline is active, the opponent is absent/delivered/retired, `opponent_locked(state)` is already true, a friendly guard is active on the target, or the target is no longer ahead on our frames-shortest route.
 
 **Good/Base/Bad Cases**:
-- Good: skipping an on-node 30-point task at `B` because `C` is the first common `KEY_PASS` and we can finish setup before the opponent arrives.
+- Good: skipping an on-node 30-point task at `B` because `C` is the first common `KEY_PASS`, even if the opponent's current ETA to `C` has become better.
 - Base: after `SET_GUARD` succeeds at the common node, delivery continues toward the terminal on the next frame.
+- Base: active use of held rush-helpful resources (`ICE_BOX`, horses, `INTEL` on its true consumer) may still compete by priority; claiming new resources/tasks must yield.
 - Bad: returning `""` from delivery just because `interception_node(state) == cur`; that recreates the old long-camp/self-freeze behavior.
+- Bad: recomputing the target from current ETA every frame and releasing it when the opponent briefly appears closer; that recreates the 22:50 loss where `S10` was dropped at round 80.
 
 **Tests Required**:
 - Safety regression for a common fastest-path `KEY_PASS` / `PASS` that is not necessarily a topology choke.
+- Safety regression proving current ETA disadvantage does not cancel the map-derived rush target.
 - Economy regression proving task/resource claims yield before the rush target.
 - Delivery regression proving arrival at the target does not camp.
+- Delivery regression proving the rush target overrides `hold_before_choke` before arrival.
 - Integration regression proving `SET_GUARD` still wins same-frame arbitration over delivery movement.
 
 ### Lychee Resource And Tempo Contracts

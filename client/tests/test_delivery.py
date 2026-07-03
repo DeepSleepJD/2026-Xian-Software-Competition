@@ -296,6 +296,12 @@ class InterceptionCampTests(unittest.TestCase):
             me_node="A", opp_node="B", opp_next="D", opp_state="MOVING"))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
 
+    def test_rush_target_overrides_hold_before_choke(self) -> None:
+        # 抢点目标未到达前，delivery 不再被防陷阱 hold 闸门按住；
+        # 目标 B 已由地图理论最短路定下，本帧即使对手停在 B，也继续向 B 冲。
+        acts = self.step(self.camp_inquire(me_node="A", opp_node="B"))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
+
 
 # 冻结逃生地图：A —E1(d=20 长边)— B —E2(d=2)— D(终点)，旁路 A —E3(d=2)— E —E4(d=6)— D
 ESCAPE_START = {

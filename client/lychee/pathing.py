@@ -278,6 +278,39 @@ def min_frames(state: GameState, src: str, dst: str,
     return INF_FRAMES
 
 
+def min_frame_path(state: GameState, src: str, dst: str,
+                   move_per_frame: int = BASE_MOVE_PER_FRAME) -> list[str] | None:
+    """Frames-first shortest path. Use for tempo races; delivery's normal path stays freshness-first."""
+    if src not in state.nodes or dst not in state.nodes:
+        return None
+    if src == dst:
+        return [src]
+    dist: dict[str, int] = {src: 0}
+    prev: dict[str, str] = {}
+    heap: list[tuple[int, str]] = [(0, src)]
+    visited: set[str] = set()
+    while heap:
+        d, node = heapq.heappop(heap)
+        if node in visited:
+            continue
+        visited.add(node)
+        if node == dst:
+            path = [dst]
+            while path[-1] != src:
+                path.append(prev[path[-1]])
+            path.reverse()
+            return path
+        for nxt, edge in state.neighbors(node):
+            if nxt in visited:
+                continue
+            cand = d + _frames_step_cost(state, edge, nxt, move_per_frame)
+            if nxt not in dist or cand < dist[nxt]:
+                dist[nxt] = cand
+                prev[nxt] = node
+                heapq.heappush(heap, (cand, nxt))
+    return None
+
+
 def min_frames_from(state: GameState, src: str,
                     move_per_frame: int = BASE_MOVE_PER_FRAME) -> dict[str, int]:
     """单源到全图各节点的理论最短帧数（多目标估值共用），语义同 min_frames。"""

@@ -191,12 +191,8 @@ class DeliveryStrategy(Strategy):
         # camp，交给 combat 当帧设卡，下一帧继续送达/前压。
         rush = safety.first_common_rush_node(state)
         if rush and rush != cur:
-            path = pathing.shortest_path(state, cur, rush, avoid)
-            if path is None and avoid:
-                path = pathing.shortest_path(state, cur, rush)
+            path = pathing.min_frame_path(state, cur, rush, safety.me_move_per_frame(state))
             if path and len(path) >= 2:
-                if safety.hold_before_choke(state, path[1]):
-                    return ""
                 return path[1]
 
         best: list[str] | None = None

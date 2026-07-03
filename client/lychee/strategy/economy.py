@@ -809,7 +809,7 @@ class EconomyStrategy(Strategy):
         """economy 静默期估计 delivery 下一跳（用于冰鉴上长边预判）。"""
         rush = safety.first_common_rush_node(state)
         if rush and rush != cur:
-            p = pathing.shortest_path(state, cur, rush)
+            p = pathing.min_frame_path(state, cur, rush, safety.me_move_per_frame(state))
             return p[1] if p and len(p) >= 2 else ""
         terminal = self._nearest_terminal(state, cur)
         if not terminal:

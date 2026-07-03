@@ -516,6 +516,16 @@ class InterceptionNodeTests(unittest.TestCase):
         state = self.load(INTERCEPT_BYPASS, intercept_inquire(me_node="B", opp_node="A"))
         self.assertEqual("B", safety.first_common_rush_node(state))
 
+    def test_first_common_rush_node_ignores_current_eta_flip(self) -> None:
+        # 新口径：地图理论最短路上的第一个可设卡公共点一旦存在，就是硬目标；
+        # 即使当前帧对手已经更近，也不能像 22:50 现网局那样取消 rush 去做经济。
+        state = self.load(INTERCEPT_START, intercept_inquire(me_node="A", opp_node="B"))
+        self.assertEqual("B", safety.first_common_rush_node(state))
+
+    def test_first_common_rush_node_does_not_pull_back_after_passing_target(self) -> None:
+        state = self.load(INTERCEPT_START, intercept_inquire(me_node="C", opp_node="A"))
+        self.assertIsNone(safety.first_common_rush_node(state))
+
     def test_first_common_rush_node_respects_delivery_deadline(self) -> None:
         state = self.load(INTERCEPT_BYPASS,
                           intercept_inquire(round_no=590, me_node="B", opp_node="A"))
