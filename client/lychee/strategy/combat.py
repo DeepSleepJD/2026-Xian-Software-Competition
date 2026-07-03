@@ -12,7 +12,7 @@ from math import ceil
 from .. import pathing
 from ..state import Contest, GameState
 from . import Intent, Strategy, safety
-from .economy import RESOURCE_BASE_VALUES, RESOURCE_CLAIM_CAPS, _task_points
+from .economy import HORSE_DURATION, HORSE_MOVE_PER_FRAME, RESOURCE_BASE_VALUES, RESOURCE_CLAIM_CAPS, _task_points
 
 PRIORITY_COMBAT_MAIN = 130
 # 拦截设卡属于关键主车队动作：必须压过 economy(110)，否则会先做任务/资源而错过
@@ -202,7 +202,12 @@ class CombatStrategy(Strategy):
         if target != cur:
             if not self._can_spend_guard_time(state, target, 0, my_eta):
                 return None
-            path = self._fastest_path(state, cur, target)
+            horse = self._horse_for_intercept(state)
+            if horse:
+                return Intent(kind="combat.guard.horse", priority=PRIORITY_SET_GUARD,
+                              actions=[{"action": "USE_RESOURCE", "resourceType": horse}],
+                              note=f"rush intercept guard@{target}")
+            path = self._fastest_path(state, cur, target, self._my_intercept_move_per_frame(state))
             if path and len(path) >= 2:
                 return Intent(kind="combat.guard.move", priority=PRIORITY_SET_GUARD,
                               actions=[{"action": "MOVE", "targetNodeId": path[1]}],
@@ -245,11 +250,15 @@ class CombatStrategy(Strategy):
                 state, opp.current_node_id, OPPONENT_FAST_MOVE_PER_FRAME)
         if not opp_path or len(opp_path) < 2:
             return None
-        my_path = self._fastest_terminal_path(state, cur)
+        horse_type = self._horse_for_intercept(state)
+        my_move_per_frame = self._my_intercept_move_per_frame(state)
+        my_horse_start = 1 if horse_type else 0
+        my_path = self._fastest_terminal_path(state, cur, my_move_per_frame)
         if not my_path:
             return None
         my_intersections = set(my_path[:-1])
-        my_costs = self._fastest_costs(state, cur)
+        my_costs = self._fastest_costs(state, cur, my_move_per_frame)
+        my_base_costs = None
         opp_elapsed = 0
         for index, node_id in enumerate(opp_path[1:-1], start=1):
             if index == 1 and opp.next_node_id == node_id:
@@ -268,6 +277,14 @@ class CombatStrategy(Strategy):
             my_eta = my_costs.get(node_id, _INF)
             if my_eta >= _INF:
                 return None
+            if horse_type and my_eta > HORSE_DURATION.get(horse_type, 0):
+                if my_base_costs is None:
+                    my_base_costs = self._fastest_costs(state, cur)
+                my_eta = my_base_costs.get(node_id, _INF)
+                if my_eta >= _INF:
+                    return None
+            else:
+                my_eta += my_horse_start
             if my_eta + GUARD_INTERCEPT_LEAD > opp_elapsed:
                 return None
             if not self._can_spend_guard_time(state, node_id, 0, my_eta):
@@ -296,6 +313,32 @@ class CombatStrategy(Strategy):
         if target_index <= 0 or opp.current_node_id != opp_path[target_index - 1]:
             return False
         return max(0, opp_eta - safety.GUARD_SETUP_FRAMES) <= GUARD_WAIT_MAX_FRAMES
+
+
+    @staticmethod
+    def _active_horse_move_per_frame(state: GameState) -> int:
+        best = 0
+        for buff in state.me.buffs:
+            if buff.remaining_round <= 0:
+                continue
+            best = max(best, HORSE_MOVE_PER_FRAME.get(buff.type, 0))
+            if buff.type == "RUSH_SPEED":
+                best = max(best, OPPONENT_FAST_MOVE_PER_FRAME)
+        return best
+
+    def _my_intercept_move_per_frame(self, state: GameState) -> int:
+        active = self._active_horse_move_per_frame(state)
+        usable = [HORSE_MOVE_PER_FRAME[t] for t in HORSE_RESOURCES
+                  if state.me.resources.get(t, 0) > 0]
+        return max([pathing.BASE_MOVE_PER_FRAME, active, *usable])
+
+    def _horse_for_intercept(self, state: GameState) -> str:
+        if self._active_horse_move_per_frame(state) > pathing.BASE_MOVE_PER_FRAME:
+            return ""
+        for resource_type in HORSE_RESOURCES:
+            if state.me.resources.get(resource_type, 0) > 0:
+                return resource_type
+        return ""
 
     def _can_spend_guard_time(
             self, state: GameState, guard_node: str, good_cost: int, travel_to_guard: int) -> bool:

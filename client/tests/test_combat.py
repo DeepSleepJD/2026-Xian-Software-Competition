@@ -198,11 +198,44 @@ class CombatStrategyTests(unittest.TestCase):
 
         self.assertIn({"action": "MOVE", "targetNodeId": "B"}, acts)
 
+    def test_uses_horse_to_reach_first_intersection_before_opponent(self) -> None:
+        start = {
+            "matchId": "intercept-horse-test",
+            "durationRound": 600,
+            "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                        {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+            "nodes": [
+                {"nodeId": "A", "nodeType": "START", "start": True},
+                {"nodeId": "O", "nodeType": "START", "start": True},
+                {"nodeId": "B", "nodeType": "KEY_PASS"},
+                {"nodeId": "C", "nodeType": "FINISH", "terminal": True},
+            ],
+            "edges": [
+                {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B",
+                 "routeType": "ROAD", "distance": 10, "bidirectional": True},
+                {"edgeId": "E2", "fromNodeId": "O", "toNodeId": "B",
+                 "routeType": "ROAD", "distance": 15, "bidirectional": True},
+                {"edgeId": "E3", "fromNodeId": "B", "toNodeId": "C",
+                 "routeType": "ROAD", "distance": 2, "bidirectional": True},
+            ],
+            "map": {"gameplay": {"roles": {"terminalNodeIds": ["C"]}}},
+        }
+        self.state = GameState(MY_ID)
+        self.state.update_start(start)
+        self.strategy = CombatStrategy()
+
+        intents = self.intents(inquire(100, node="A", opp_node="O",
+                                      resources={"FAST_HORSE": 1}))
+        horse = [it for it in intents if it.kind == "combat.guard.horse"][0]
+
+        self.assertEqual(PRIORITY_SET_GUARD, horse.priority)
+        self.assertEqual([{"action": "USE_RESOURCE", "resourceType": "FAST_HORSE"}],
+                         horse.actions)
+
     def test_sets_guard_when_opponent_has_just_left_previous_station(self) -> None:
         acts = self.actions(inquire(200, node="S10", opp_node="S09",
                                     opp_state="MOVING", opp_next="S10",
                                     opp_edge_progress=1000, opp_edge_total=41400))
-
         self.assertIn({"action": "SET_GUARD", "targetNodeId": "S10",
                        "extraGoodFruit": 2}, acts)
 
