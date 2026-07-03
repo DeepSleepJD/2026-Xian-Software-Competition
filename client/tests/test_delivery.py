@@ -302,6 +302,11 @@ class InterceptionCampTests(unittest.TestCase):
         acts = self.step(self.camp_inquire(me_node="A", opp_node="B"))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
 
+    def test_rush_target_waits_when_next_hop_has_obstacle(self) -> None:
+        nodes = [{"nodeId": "B", "hasObstacle": True, "obstacleType": "ROCKFALL"}]
+        acts = self.step(self.camp_inquire(me_node="A", opp_node="B", nodes=nodes))
+        self.assertEqual([], acts)
+
 
 # 冻结逃生地图：A —E1(d=20 长边)— B —E2(d=2)— D(终点)，旁路 A —E3(d=2)— E —E4(d=6)— D
 ESCAPE_START = {

@@ -205,7 +205,7 @@ class CombatStrategy(Strategy):
         cur = me.current_node_id
         if not cur or state.my_good < 1:
             return None
-        path = self._terminal_path(state, cur)
+        path = self._rush_path(state, cur) or self._terminal_path(state, cur)
         if not path or len(path) < 2:
             return None
         target = path[1]
@@ -343,7 +343,7 @@ class CombatStrategy(Strategy):
         cur = me.current_node_id
         if not cur:
             return None
-        path = self._terminal_path(state, cur)
+        path = self._rush_path(state, cur) or self._terminal_path(state, cur)
         if not path or len(path) < 3:
             return None
         for node_id in path[2:]:
@@ -662,6 +662,16 @@ class CombatStrategy(Strategy):
     @staticmethod
     def _is_neighbor(state: GameState, cur: str, target: str) -> bool:
         return any(node_id == target for node_id, _ in state.neighbors(cur))
+
+    @staticmethod
+    def _rush_path(state: GameState, cur: str) -> list[str] | None:
+        rush = safety.first_common_rush_node(state)
+        if not rush or rush == cur:
+            return None
+        path = pathing.min_frame_path(state, cur, rush, safety.me_move_per_frame(state))
+        if path and len(path) >= 2:
+            return path
+        return None
 
     @staticmethod
     def _terminal_path(state: GameState, cur: str) -> list[str] | None:

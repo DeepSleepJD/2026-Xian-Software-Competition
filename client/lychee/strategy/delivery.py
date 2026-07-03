@@ -193,6 +193,8 @@ class DeliveryStrategy(Strategy):
         if rush and rush != cur:
             path = pathing.min_frame_path(state, cur, rush, safety.me_move_per_frame(state))
             if path and len(path) >= 2:
+                if self._has_obstacle(state, path[1]):
+                    return ""
                 return path[1]
 
         best: list[str] | None = None
@@ -207,10 +209,17 @@ class DeliveryStrategy(Strategy):
                     best, best_cost = path, cost
         if best is None:
             return ""
+        if self._has_obstacle(state, best[1]):
+            return ""
         # 防陷阱闸门（P4e）：对手蹲在咽喉上且可设卡时不进边，原地等它走人
         if safety.hold_before_choke(state, best[1]):
             return ""
         return best[1]
+
+    @staticmethod
+    def _has_obstacle(state: GameState, node_id: str) -> bool:
+        ns = state.node_states.get(node_id)
+        return bool(ns and ns.has_obstacle)
 
     def _intent(self, action: dict, note: str) -> Intent:
         return Intent(kind="delivery", priority=PRIORITY_DELIVERY, actions=[action], note=note)

@@ -32,6 +32,35 @@ START = {
     "map": {"gameplay": {"roles": {"terminalNodeIds": ["S15"]}}},
 }
 
+RUSH_OBSTACLE_START = {
+    "matchId": "rush-obstacle-test",
+    "durationRound": 600,
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "me"},
+                {"playerId": OPP_ID, "teamId": "BLUE", "name": "op"}],
+    "nodes": [
+        {"nodeId": "S01", "nodeType": "START", "start": True},
+        {"nodeId": "S06", "nodeType": "STATION"},
+        {"nodeId": "S02", "nodeType": "STATION"},
+        {"nodeId": "S10", "nodeType": "KEY_PASS"},
+        {"nodeId": "S15", "nodeType": "FINISH", "terminal": True},
+    ],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "S01", "toNodeId": "S06",
+         "routeType": "MOUNTAIN", "distance": 1, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "S06", "toNodeId": "S10",
+         "routeType": "MOUNTAIN", "distance": 1, "bidirectional": True},
+        {"edgeId": "E3", "fromNodeId": "S10", "toNodeId": "S15",
+         "routeType": "MOUNTAIN", "distance": 1, "bidirectional": True},
+        {"edgeId": "E4", "fromNodeId": "S01", "toNodeId": "S02",
+         "routeType": "WATER", "distance": 3, "bidirectional": True},
+        {"edgeId": "E5", "fromNodeId": "S02", "toNodeId": "S15",
+         "routeType": "WATER", "distance": 3, "bidirectional": True},
+    ],
+    "map": {"gameplay": {
+        "roles": {"startNodeId": "S01", "terminalNodeIds": ["S15"]},
+    }},
+}
+
 
 def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
             good: int = 98, bad: int = 2, freshness: float = 85.0,
@@ -486,6 +515,15 @@ class CombatStrategyTests(unittest.TestCase):
         clear = [it for it in intents if it.kind == "combat.clear"][0]
         self.assertEqual(PRIORITY_COMBAT_MAIN, clear.priority)
         self.assertEqual({"action": "CLEAR", "targetNodeId": "S10"}, clear.actions[0])
+
+    def test_clears_obstacle_on_first_common_rush_next_hop(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(RUSH_OBSTACLE_START)
+        self.strategy = CombatStrategy()
+        nodes = [{"nodeId": "S06", "hasObstacle": True, "obstacleType": "ROCKFALL"}]
+        intents = self.intents(inquire(1, node="S01", opp_node="S01", nodes=nodes))
+        clear = [it for it in intents if it.kind == "combat.clear"][0]
+        self.assertEqual({"action": "CLEAR", "targetNodeId": "S06"}, clear.actions[0])
 
     def test_clear_beats_delivery_move_in_arbiter(self) -> None:
         intents = self.intents(inquire(100, nodes=obstacle_s10()))
