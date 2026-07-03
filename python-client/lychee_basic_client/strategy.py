@@ -236,27 +236,16 @@ class Strategy:
         return None
 
     def _squad_action(self, node, me, opp, nodes_by_id) -> list:
-        """Squad is a separate quota (rides alongside the main action) and a scarce
-        budget. Priorities:
-        1) REINFORCE a weakened guard -- but NOT the first (decoy) guard: let it soak
-           the opponent's squad and fall; heal the LATER guards, which the (now
-           squad-poor) opponent can no longer break. Any distance, no backtrack.
-        2) pre-CLEAR the next obstacle -- but ONLY if we're not already ahead (if we
-           lead, keep the squad for reinforcing; clearing just speeds a race we win)."""
+        """Squad CLEARS obstacles on our path so the main car MOVEs through (we never
+        FORCED_PASS). Dispatch to the nearest uncleared obstacle ahead (clears in
+        parallel as we race).
+
+        NOTE: guard reinforcement (SQUAD_REINFORCE) is intentionally REMOVED for now
+        -- to be re-added separately. The blockade relies on freeze timing (fresh
+        max-defense guard set at the last moment) so a squad-poor opponent can't
+        weaken through it, not on healing."""
         if me.get("squadAvailable", 0) < 2:
             return []
-        # 1) heal a knocked-down guard (a weaken hit = >=2 below cap), except the decoy
-        for nid, n in nodes_by_id.items():
-            if nid == self._first_guard_node:
-                continue  # decoy: don't reinforce, let it draw their squad
-            g = n.get("guard") or {}
-            if g.get("active") and g.get("ownerTeamId") == self._my_team:
-                cap = g.get("maxDefense", g.get("initialDefense", 0))
-                if 0 < g.get("defense", 0) <= cap - 2:
-                    return [M.squad_reinforce(nid)]
-        # 2) clear obstacles on our path -- REQUIRED now that we never FORCED_PASS: the
-        # main car MOVEs through only once a squad has cleared the obstacle. Dispatch to
-        # the nearest uncleared obstacle within reach (clears in parallel as we race).
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         path = self.graph.fastest_path(node, self.gate_node, obstacles=obstacles) or []
         for nid in path[1:]:
