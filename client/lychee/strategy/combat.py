@@ -15,11 +15,9 @@ from . import Intent, Strategy, safety
 from .economy import RESOURCE_BASE_VALUES, RESOURCE_CLAIM_CAPS, _task_points
 
 PRIORITY_COMBAT_MAIN = 130
-# 设卡让位经济动作（P4/07-03 复盘：现网两连败均在咽喉先 SET_GUARD 再抢任务，
-# 30 分任务被对手先锁；设卡本身两局 bounty=0 纯亏）。落在 economy(110) 与
-# delivery(100) 之间：有抢任务/领资源/用冰鉴/用马时先做，无经济动作时（raw 拿满/
-# 无可行任务）设卡仍先于纯走位触发，保留巡航中在咽喉设卡的能力。破卡/削卡/清障不动。
-PRIORITY_SET_GUARD = 108
+# 拦截设卡属于关键主车队动作：必须压过 economy(110)，否则会先做任务/资源而错过
+# 抢先抵达交汇点或对手刚离站后的设卡窗口。破卡/削卡/清障仍保持更高优先级。
+PRIORITY_SET_GUARD = 122
 PRIORITY_SQUAD_WEAKEN = 128
 PRIORITY_SQUAD_SCOUT = 127
 PRIORITY_WINDOW_CARD = 125
@@ -246,7 +244,7 @@ class CombatStrategy(Strategy):
             return None
         my_costs = self._fastest_costs(state, cur)
         opp_elapsed = 0
-        best: tuple[int, int, str] | None = None
+        best: tuple[int, int, int, str] | None = None
         for index, node_id in enumerate(opp_path[1:-1], start=1):
             if index == 1 and opp.next_node_id == node_id:
                 edge_frames = safety.remaining_edge_frames(state, opp)
@@ -266,12 +264,12 @@ class CombatStrategy(Strategy):
                 continue
             if not self._can_spend_guard_time(state, node_id, 0, my_eta):
                 continue
-            candidate = (opp_elapsed - my_eta, -my_eta, node_id)
+            candidate = (-opp_elapsed, opp_elapsed - my_eta, -my_eta, node_id)
             if best is None or candidate > best:
                 best = candidate
         if best is None:
             return None
-        _, neg_my_eta, target = best
+        _, _, neg_my_eta, target = best
         target_index = opp_path.index(target)
         if state.opponent.next_node_id == target and target_index == 1:
             opp_eta = safety.remaining_edge_frames(state, state.opponent)
