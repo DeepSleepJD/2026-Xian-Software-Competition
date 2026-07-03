@@ -138,13 +138,16 @@ class TrapGateTests(unittest.TestCase):
         state = self.load(TRAP_START, trap_inquire(100, nodes=seen_enemy_guard()))
         self.assertTrue(safety.hold_before_choke(state, "B"))
 
-    def test_no_hold_before_any_enemy_guard_seen(self) -> None:
+    def test_holds_even_before_any_enemy_guard_seen(self) -> None:
+        # P4m：13:22 现网局对手全场第一张卡就是杀招——"见过卡才防"先验已删
         state = self.load(TRAP_START, trap_inquire(100))
-        self.assertFalse(safety.hold_before_choke(state, "B"))
+        self.assertTrue(safety.hold_before_choke(state, "B"))
 
-    def test_no_hold_without_opponent_guard_points(self) -> None:
+    def test_holds_regardless_of_guard_action_points(self) -> None:
+        # P4m 勘误：guardActionPoint 是兵争牌货币（任务书 3.3.5），与设卡无关；
+        # GAP=0 的对手好果充足照样能关门
         state = self.load(TRAP_START, trap_inquire(100, opp_ap=0, nodes=seen_enemy_guard()))
-        self.assertFalse(safety.hold_before_choke(state, "B"))
+        self.assertTrue(safety.hold_before_choke(state, "B"))
 
     def test_no_hold_when_opponent_already_en_route(self) -> None:
         # 对手已上边离站（半路）：设卡窗口已过，亮没亮卡都不该再蹲
@@ -171,11 +174,10 @@ class TrapGateTests(unittest.TestCase):
         state = self.load(TRAP_START, trap_inquire(100, nodes=enemy_guard("B")))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
-    def test_no_hold_with_enough_squads_to_weaken_through(self) -> None:
-        # STATION 最大防御 6 → 6 支小分队可半路削穿，进边风险可控
-        state = self.load(TRAP_START, trap_inquire(100, squads=6, nodes=seen_enemy_guard()))
-        self.assertFalse(safety.hold_before_choke(state, "B"))
-        state = self.load(TRAP_START, trap_inquire(100, squads=5, nodes=seen_enemy_guard()))
+    def test_holds_even_with_full_squads(self) -> None:
+        # P4m：削卡消耗战对会增援的对手必败（同帧序增援先落地，13:22 局实证
+        # 削卡反把卡续长 60 帧）——"够兵可削穿"是伪安全放行，已删
+        state = self.load(TRAP_START, trap_inquire(100, squads=8, nodes=seen_enemy_guard()))
         self.assertTrue(safety.hold_before_choke(state, "B"))
 
     def test_no_hold_when_must_rush(self) -> None:
@@ -192,14 +194,22 @@ class TrapGateTests(unittest.TestCase):
         state = self.load(TRAP_START, trap_inquire(100, opp_delivered=True, nodes=seen_enemy_guard()))
         self.assertFalse(safety.hold_before_choke(state, "B"))
 
-    def test_hold_cap_releases_after_twelve_frames(self) -> None:
+    def test_hold_time_budget(self) -> None:
+        # P4m：12 帧死等上限 → 时间预算制。A 到终点 6 帧，预算线 =
+        # 600 - 6 - FP_TAX_RESERVE(50) - RUSH_SAFETY_MARGIN(60) = 484：
+        # r483 还等得起，r484 起必须动身（真被关门还有改道+强通税已预留）
+        state = self.load(TRAP_START, trap_inquire(483, nodes=seen_enemy_guard()))
+        self.assertTrue(safety.hold_before_choke(state, "B"))
+        state = self.load(TRAP_START, trap_inquire(484, nodes=seen_enemy_guard()))
+        self.assertFalse(safety.hold_before_choke(state, "B"))
+
+    def test_hold_persists_beyond_twelve_frames_within_budget(self) -> None:
+        # 13:22 局需要连续等 62 帧（对手 r291 到站、r317 才离开）——旧 12 帧上限杯水车薪
         state = GameState(MY_ID)
         state.update_start(TRAP_START)
-        for round_no in range(100, 112):
+        for round_no in range(100, 170):
             state.update_inquire(trap_inquire(round_no, nodes=seen_enemy_guard()))
             self.assertTrue(safety.hold_before_choke(state, "B"))
-        state.update_inquire(trap_inquire(112, nodes=seen_enemy_guard()))
-        self.assertFalse(safety.hold_before_choke(state, "B"))
 
 
 class AheadOfOpponentTests(unittest.TestCase):
@@ -532,6 +542,56 @@ class FreezeWindowTests(unittest.TestCase):
             opp_node="A", opp_next="B", opp_state="MOVING",
             opp_progress_ms=10000, opp_total_ms=14000))
         self.assertFalse(safety.freeze_window_open(state, "B"))
+
+
+KEYPASS_START = {
+    **TRAP_START,
+    "matchId": "weathering-test",
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True},
+        {"nodeId": "B", "nodeType": "KEY_PASS"},
+        {"nodeId": "C", "nodeType": "FINISH", "terminal": True},
+    ],
+}
+
+
+def guard_obj(defense: int, initial: int, age: int):
+    state = GameState(MY_ID)
+    state.update_start(KEYPASS_START)
+    state.update_inquire({
+        "round": 100,
+        "players": [{"playerId": MY_ID, "teamId": "RED", "state": "IDLE",
+                     "currentNodeId": "A"}],
+        "nodes": [{"nodeId": "B",
+                   "guard": {"active": True, "ownerTeamId": "BLUE",
+                             "defense": defense, "initialDefense": initial,
+                             "maxDefense": 7, "ageRound": age}}],
+    })
+    return state, state.enemy_guard_at("B")
+
+
+class GuardWeatheringRemainingTests(unittest.TestCase):
+    """任务书 924-936：KEY_PASS 且设卡防值 ≥4 首损 45 帧，否则 30；之后每 30 帧 -1。"""
+
+    def test_fresh_keypass_full_defense(self) -> None:
+        state, guard = guard_obj(defense=4, initial=4, age=0)
+        # 首损还差 45，之后 3 次 × 30
+        self.assertEqual(safety.guard_weathering_remaining(state, "B", guard), 45 + 90)
+
+    def test_keypass_low_initial_uses_30(self) -> None:
+        state, guard = guard_obj(defense=2, initial=2, age=10)
+        # 初始防 <4 → 首损 30；age 10 → 还差 20；再 1 次 × 30
+        self.assertEqual(safety.guard_weathering_remaining(state, "B", guard), 20 + 30)
+
+    def test_after_first_decay_cycles_of_30(self) -> None:
+        state, guard = guard_obj(defense=5, initial=6, age=70)
+        # 首损 45 已过，(70-45)%30=25 → 下次风化差 5；再 4 次 × 30
+        self.assertEqual(safety.guard_weathering_remaining(state, "B", guard), 5 + 120)
+
+    def test_zero_defense_is_zero(self) -> None:
+        state, guard = guard_obj(defense=1, initial=4, age=0)
+        guard.defense = 0
+        self.assertEqual(safety.guard_weathering_remaining(state, "B", guard), 0)
 
 
 if __name__ == "__main__":

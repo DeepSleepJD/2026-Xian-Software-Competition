@@ -21,6 +21,8 @@ PRIORITY_DELIVERY = 100
 # MOVE 连续被拒此数后，临时绕开该节点重新寻路（持续 AVOID_ROUNDS 帧）
 MOVE_REJECT_LIMIT = 5
 AVOID_ROUNDS = 30
+# 冻结改道逃生（P4m-M2）：改道总帧数须比"等风化+走完本边"至少快这么多才动
+FROZEN_ESCAPE_SLACK = 8
 # MOVE 拒因明确在目标侧（协议第 11 章错误码）→ 与本站处理无关，不重置处理簿记
 _TARGET_SIDE_REJECTS = frozenset({
     "MOVE_BLOCKED_BY_GUARD", "MOVE_EDGE_NOT_FOUND", "MOVE_MISSING_TARGET",
@@ -59,7 +61,11 @@ class DeliveryStrategy(Strategy):
             # PROCESS 受理即开窗 ≠ 读条开始，平/负后需重新 PROCESS，撤销受理误标
             self._saw_processing = False
             return []
-        if me.state in ("MOVING", "RESTING") or me.next_node_id:
+        if me.next_node_id:
+            # 半路被敌卡冻结 → 改道逃生（P4m-M2 实证唯一可用的冻结态动作）
+            escape = self._propose_frozen_escape(state)
+            return [escape] if escape is not None else []
+        if me.state in ("MOVING", "RESTING"):
             return []
 
         cur = me.current_node_id
@@ -101,6 +107,45 @@ class DeliveryStrategy(Strategy):
         return []
 
     # -- 内部 --
+
+    def _propose_frozen_escape(self, state: GameState) -> Intent | None:
+        """半路被敌卡冻结的改道逃生（P4m-M2 实验实证）。
+
+        冻结形态三变体统一判据：在边上（nextNodeId 非空）且下一跳有敌方有效卡——
+        此时 MOVE(next)/WAIT 被拒、FORCED_PASS/BREAK_GUARD 判 MOVING_ACTION_FORBIDDEN，
+        唯一被服务器受理的是任务书 4.2 的改道：MOVE 到本段起点的其他合法相邻节点，
+        当帧解冻、旧边进度作废（13:22 现网局被钉 193 帧期间每帧都有这张脱困票）。
+
+        决策：min(改道邻居 + 该点到终点) 与 "等风化 + 走完本边 + 下一跳到终点" 比较，
+        改道明显更快（差 > FROZEN_ESCAPE_SLACK）才动——风化只剩几十帧时原地等更优。
+        寻路成本已含在场敌卡的攻坚/风化惩罚，绕回原路还是绕开由成本模型自己定。
+        """
+        me = state.me
+        target = me.next_node_id
+        guard = state.enemy_guard_at(target)
+        if guard is None:
+            return None
+        cur = me.current_node_id
+        if not cur:
+            return None
+        onward = safety.frames_from_node(state, target)
+        stay = safety.guard_weathering_remaining(state, target, guard) \
+            + safety.remaining_edge_frames(state, me) \
+            + (onward if onward < 10 ** 8 else 10 ** 8)
+        best_alt, best_cost = "", None
+        for alt, edge in state.neighbors(cur):
+            if alt == target:
+                continue
+            alt_onward = safety.frames_from_node(state, alt)
+            if alt_onward >= 10 ** 8:
+                continue
+            cost = pathing.edge_frames_for_state(state, edge) + alt_onward
+            if best_cost is None or cost < best_cost:
+                best_alt, best_cost = alt, cost
+        if not best_alt or best_cost + FROZEN_ESCAPE_SLACK >= stay:
+            return None
+        return self._intent({"action": "MOVE", "targetNodeId": best_alt},
+                            f"冻结改道逃生→{best_alt}")
 
     def _read_feedback(self, state: GameState) -> None:
         """读上一帧动作结果：处理被拒重试、移动被拒计数绕行。"""

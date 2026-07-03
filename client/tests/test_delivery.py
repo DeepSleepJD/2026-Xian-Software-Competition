@@ -247,6 +247,7 @@ class InterceptionCampTests(unittest.TestCase):
 
     def camp_inquire(self, round_no: int = 200, *, me_node: str = "B",
                      opp_node: str = "A", opp_retired: bool = False,
+                     opp_next: str = "", opp_state: str = "IDLE",
                      good_fruit: int = 50, freshness: float = 90.0,
                      nodes: list | None = None) -> dict:
         return {
@@ -255,8 +256,9 @@ class InterceptionCampTests(unittest.TestCase):
                 {"playerId": MY_ID, "teamId": "RED", "state": "IDLE",
                  "currentNodeId": me_node, "nextNodeId": "", "verified": False,
                  "goodFruit": good_fruit, "freshness": freshness},
-                {"playerId": 2002, "teamId": "BLUE", "state": "IDLE",
-                 "currentNodeId": opp_node, "retired": opp_retired},
+                {"playerId": 2002, "teamId": "BLUE", "state": opp_state,
+                 "currentNodeId": opp_node, "nextNodeId": opp_next,
+                 "retired": opp_retired},
             ],
             "nodes": nodes or [],
         }
@@ -287,9 +289,95 @@ class InterceptionCampTests(unittest.TestCase):
         self.assertEqual([{"action": "MOVE", "targetNodeId": "D"}], acts)
 
     def test_no_camp_when_behind_opponent(self) -> None:
-        # 我在 A、对手在 B（我到咽喉更晚）→ 无拦截点，正常走位
-        acts = self.step(self.camp_inquire(me_node="A", opp_node="B"))
+        # 我在 A、对手已越过咽喉 B 正驶向 D（我到咽喉更晚）→ 无拦截点，正常走位；
+        # 对手已上边离开 B，也不构成 hold_before_choke 的关门威胁（P4m）
+        acts = self.step(self.camp_inquire(
+            me_node="A", opp_node="B", opp_next="D", opp_state="MOVING"))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], acts)
+
+
+# 冻结逃生地图：A —E1(d=20 长边)— B —E2(d=2)— D(终点)，旁路 A —E3(d=2)— E —E4(d=6)— D
+ESCAPE_START = {
+    "matchId": "escape-test",
+    "round": 1,
+    "durationRound": 600,
+    "players": [{"playerId": MY_ID, "teamId": "RED", "name": "t"},
+                {"playerId": 2002, "teamId": "BLUE", "name": "o"}],
+    "nodes": [
+        {"nodeId": "A", "nodeType": "START", "start": True},
+        {"nodeId": "B", "nodeType": "STATION"},
+        {"nodeId": "D", "nodeType": "FINISH", "terminal": True},
+        {"nodeId": "E", "nodeType": "STATION"},
+    ],
+    "edges": [
+        {"edgeId": "E1", "fromNodeId": "A", "toNodeId": "B", "routeType": "ROAD", "distance": 20, "bidirectional": True},
+        {"edgeId": "E2", "fromNodeId": "B", "toNodeId": "D", "routeType": "ROAD", "distance": 2, "bidirectional": True},
+        {"edgeId": "E3", "fromNodeId": "A", "toNodeId": "E", "routeType": "ROAD", "distance": 2, "bidirectional": True},
+        {"edgeId": "E4", "fromNodeId": "E", "toNodeId": "D", "routeType": "ROAD", "distance": 6, "bidirectional": True},
+    ],
+    "map": {"gameplay": {"roles": {"startNodeId": "A", "terminalNodeIds": ["D"]}}},
+}
+
+
+def frozen_inquire(round_no: int, *, guard: dict | None,
+                   state: str = "WAITING", move_dir: str = "FORWARD") -> dict:
+    """我方冻在 A→B 边上 40%处；guard=None 表示单纯半路（无卡）。"""
+    nodes = []
+    if guard is not None:
+        nodes = [{"nodeId": "B", "guard": guard}]
+    return {
+        "round": round_no,
+        "players": [{"playerId": MY_ID, "teamId": "RED", "state": state,
+                     "currentNodeId": "A", "nextNodeId": "B",
+                     "moveDirection": move_dir,
+                     "edgeProgressMs": 8000, "edgeTotalMs": 20000},
+                    {"playerId": 2002, "teamId": "BLUE", "state": "IDLE",
+                     "currentNodeId": "D"}],
+        "nodes": nodes,
+    }
+
+
+class FrozenEscapeTests(unittest.TestCase):
+    """P4m-M2 实证：半路被敌卡冻结时改道 MOVE 是唯一被受理的动作。
+
+    13:22 现网局形态：被钉 193 帧、每帧 WAIT 被拒；本地陪练局 r275 发改道
+    r276 当帧解冻。逃生决策=改道总帧数明显小于等风化才动。
+    """
+
+    def setUp(self) -> None:
+        self.state = GameState(MY_ID)
+        self.state.update_start(ESCAPE_START)
+        self.strategy = DeliveryStrategy()
+
+    def step(self, inq: dict) -> list[dict]:
+        self.state.update_inquire(inq)
+        intents = self.strategy.propose(self.state)
+        return [a for it in intents for a in it.actions]
+
+    def test_escapes_via_alt_neighbor_when_weathering_far(self) -> None:
+        # 新卡防 6（普通站首损 30 + 5×30 = 180 帧风化）→ 改道 A→E→D（约 10 帧）碾压
+        guard = {"active": True, "ownerTeamId": "BLUE", "defense": 6,
+                 "initialDefense": 6, "maxDefense": 6, "ageRound": 0}
+        acts = self.step(frozen_inquire(100, guard=guard))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "E"}], acts)
+
+    def test_stays_when_weathering_nearly_done(self) -> None:
+        # 卡只剩防 1 且 age 29 → 1 帧后自然消亡，原地等更优
+        guard = {"active": True, "ownerTeamId": "BLUE", "defense": 1,
+                 "initialDefense": 2, "maxDefense": 6, "ageRound": 29}
+        self.assertEqual([], self.step(frozen_inquire(100, guard=guard)))
+
+    def test_plain_mid_edge_keeps_heartbeat(self) -> None:
+        # 无卡的普通半路（MOVING）：行为不变，空心跳
+        self.assertEqual([], self.step(frozen_inquire(
+            100, guard=None, state="MOVING")))
+
+    def test_escapes_in_moving_frozen_variant(self) -> None:
+        # 冻结第三变体（本地陪练实测）：state=MOVING+FORWARD+进度冻死
+        guard = {"active": True, "ownerTeamId": "BLUE", "defense": 6,
+                 "initialDefense": 6, "maxDefense": 6, "ageRound": 0}
+        acts = self.step(frozen_inquire(100, guard=guard, state="MOVING"))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "E"}], acts)
 
 
 if __name__ == "__main__":

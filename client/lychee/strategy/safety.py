@@ -10,16 +10,17 @@
 """
 
 from math import ceil
-from weakref import WeakKeyDictionary
 
 from .. import pathing
 from ..state import GameState
 
 GUARD_SETUP_FRAMES = 4
-HOLD_MAX_FRAMES = 12
 RUSH_SAFETY_MARGIN = 60   # 帧。覆盖削卡等待+验核读条+处理中断重来+暂停损耗+抖动；
                           # 比经济层候选级 ENDGAME_MARGIN=40 更保守（全局最后防线），
                           # P5 自对弈可调；置 0 即近似退化为无兜底
+FP_TAX_RESERVE = 50       # P4m hold 时间预算里预留的强通税上界（任务书 6.3.2 关隘
+                          # min(50,15+防值×5)）：预算耗尽被迫进边、真被关门时还能
+                          # 强通/改道脱困赶上交付
 
 # 拦截层交付死线旋钮（拦截封锁流设计 §6.3/§6.6，出问题逐个回退）
 FRESH_MIN_AT_DELIVER = 5   # 预计交付鲜度低于此 → 弃拦直冲（逼近报废悬崖）
@@ -33,7 +34,6 @@ _RUSH_PER_FRAME = 1300
 # 否则站桩等不到设卡=自冻）
 _GUARD_NODE_TYPES = ("KEY_PASS", "PASS")
 _INF = 10 ** 9
-_HOLD_MEMORY: "WeakKeyDictionary[GameState, dict]" = WeakKeyDictionary()
 
 
 def _terminals(state: GameState) -> list[str]:
@@ -83,6 +83,31 @@ def _best_frames_from(state: GameState, src: str) -> int:
         if best is None or frames < best:
             best = frames
     return best if best is not None else _INF
+
+
+def frames_from_node(state: GameState, src: str) -> int:
+    """src 节点到最近终点的预计帧数（公共入口，冻结改道逃生/治理器共用）。"""
+    return _best_frames_from(state, src)
+
+
+def guard_weathering_remaining(state: GameState, node_id: str, guard) -> int:
+    """一张有效卡距自然风化清零还需的帧数（任务书 924-936）。
+
+    首损：KEY_PASS 且设卡时防值 ≥4 为完成后 45 帧，其余 30 帧；之后每 30 帧 -1。
+    用 guard.age_round（完成起龄）推算下次风化倒计时，再加 (defense-1)*30。
+    """
+    defense = int(guard.defense)
+    if defense <= 0:
+        return 0
+    node = state.nodes.get(node_id)
+    first = 45 if (node is not None and node.node_type == "KEY_PASS"
+                   and int(guard.initial_defense) >= 4) else 30
+    age = max(0, int(guard.age_round))
+    if age < first:
+        next_decay = first - age
+    else:
+        next_decay = 30 - ((age - first) % 30)
+    return next_decay + (defense - 1) * 30
 
 
 def ahead_of_opponent(state: GameState, margin: int = 0) -> bool:
@@ -373,10 +398,14 @@ def freeze_window_open(state: GameState, node: str) -> bool:
 
 
 def _can_opponent_set_guard_before_arrival(state: GameState, next_node: str) -> bool:
+    """对手能否赶在我方到达 next_node 前在那里完成 4 帧设卡。
+
+    P4m 勘误：不看 guardActionPoint——它是窗口兵争牌货币（任务书 3.3.5），与设卡
+    无关；设卡真实成本是好果且普通节点基础 0 篓，资源面视同永远可行（13:22 现网局
+    对手 GAP 恒 4 只是没出过牌，旧判定纯属侥幸没漏）。只看位置与 ETA。
+    """
     opp = state.opponent
     if opp is None or opp.delivered or opp.retired:
-        return False
-    if opp.guard_action_point < 1:
         return False
     if opp.current_node_id == next_node and not opp.next_node_id:
         return True
@@ -389,82 +418,39 @@ def _can_opponent_set_guard_before_arrival(state: GameState, next_node: str) -> 
     return opp_eta + GUARD_SETUP_FRAMES <= my_eta
 
 
-def _hold_memory(state: GameState) -> dict:
-    mem = _HOLD_MEMORY.get(state)
-    if mem is None or mem.get("match_id") != state.match_id:
-        mem = {"match_id": state.match_id, "guard_ever_seen": False, "streaks": {}}
-        _HOLD_MEMORY[state] = mem
-    return mem
-
-
-def _observe_enemy_guard(state: GameState, mem: dict) -> None:
-    if mem.get("guard_ever_seen"):
-        return
-    my_team = state.my_team_id or state.me.team_id
-    for ns in state.node_states.values():
-        guard = ns.guard
-        if guard and guard.owner_team_id and guard.owner_team_id != my_team:
-            mem["guard_ever_seen"] = True
-            return
-
-
-def _hold_streak_allows(state: GameState, next_node: str, mem: dict) -> bool:
-    streaks = mem.setdefault("streaks", {})
-    count, last_round = streaks.get(next_node, (0, -1))
-    if last_round == state.round:
-        return count <= HOLD_MAX_FRAMES
-    if last_round == state.round - 1:
-        count += 1
-    else:
-        count = 1
-    streaks[next_node] = (count, state.round)
-    return count <= HOLD_MAX_FRAMES
-
-
-def _clear_hold_streak(state: GameState, next_node: str) -> None:
-    mem = _HOLD_MEMORY.get(state)
-    if mem is not None:
-        mem.setdefault("streaks", {}).pop(next_node, None)
-
-
 def hold_before_choke(state: GameState, next_node: str) -> bool:
-    """防陷阱闸门（P4e）：True = 本帧别提交进入 next_node 的 MOVE，原地等。
+    """防陷阱闸门（P4e，P4m 重做）：True = 本帧别提交进入 next_node 的 MOVE，原地等。
 
-    败因场景（现网 match_2751 r361）：对手车队停在我方交付路径咽喉上、握着
-    guardActionPoint，我方上边后它离站前设卡——半路禁止原路折返（任务书 8.2）、
-    攻坚需停稳相邻，小分队不足时只能干等风化（防御 6 = 180 帧）。停在边外等它
-    走人：亮卡则停稳攻坚当帧清（坏果 3 攻坚值/篓），没设卡照走，最多亏它的
-    停站帧数。
+    败因场景（13:22 现网局 0:678）：对手在同一条咽喉边上领先 19 帧，先到 S10 当着
+    我方半路 4 帧设卡——半路禁折返（任务书 8.2）、攻坚/强通均 MOVING_ACTION_FORBIDDEN
+    （M2 实测），削卡消耗战对会增援的对手必败（同帧序增援先落地），被钉 193 帧未送达
+    归零。停在边外等它走人：亮卡则停稳攻坚一击清（火力 10 ≥ 任何防值），没设卡照走。
 
-    有界状态：只在本局已见过对手设卡后启用，且同一咽喉最多连续 hold 12 帧。
+    P4m 重做要点：
+    - 删"本局见过对手设卡"先验——13:22 局对手全场第一张卡就是杀招，先验=盲区；
+      白等一个刷任务对手 ≈ -15 分，进边被钉 ≈ -700 分，EV 压倒性偏向等。
+    - 删"小分队 ≥ 防值上限可削穿"放行——增援战实证削不穿（对手 8 支反应式增援，
+      我方削卡反而把卡续长 60 帧），该条件是伪安全。
+    - 12 帧死等上限 → 无状态时间预算制：只要"现在起直冲终点 + 强通税 + 全局余量"
+      仍进得了终点就继续等（13:22 局需等 62 帧；预算耗尽被迫进边，真被关门还有
+      改道逃生 M2 + 强通税已预留在账里）。
     """
     if not next_node:
         return False
-    mem = _hold_memory(state)
-    _observe_enemy_guard(state, mem)
     if must_rush(state):                 # 时间账吃紧：接受风化风险也要走（保底交付）
-        _clear_hold_streak(state, next_node)
         return False
     if not _can_opponent_set_guard_before_arrival(state, next_node):
-        _clear_hold_streak(state, next_node)
         return False                     # 对手不能抢先在下一跳完成设卡
-    if not mem.get("guard_ever_seen"):
-        _clear_hold_streak(state, next_node)
-        return False                     # 本局从未见对手设卡：按刷任务对手处理，别自冻
     if state.enemy_guard_at(next_node) is not None:
-        _clear_hold_streak(state, next_node)
-        return False                     # 已亮卡：停稳攻坚链接管，蹲着反而白等
-    if state.me.squad_available >= pathing.guard_max_defense(state, next_node):
-        _clear_hold_streak(state, next_node)
-        return False                     # 半路被设卡也削得穿，进边风险可控
+        return False                     # 已亮卡：MOVE 服务器必拒，停稳攻坚链接管
     cur = state.me.current_node_id
     if not cur:
-        _clear_hold_streak(state, next_node)
         return False
     # 咽喉过滤：非咽喉对手不值得设卡，不过滤会在它每个处理站后面跟停
     is_choke = any(next_node in pathing.choke_nodes(state, cur, terminal)
                    for terminal in _terminals(state))
     if not is_choke:
-        _clear_hold_streak(state, next_node)
         return False
-    return _hold_streak_allows(state, next_node, mem)
+    # 时间预算：等到"再不走就进不了终点（含强通税保险）"为止
+    return state.round + frames_to_terminal(state) + FP_TAX_RESERVE \
+        + RUSH_SAFETY_MARGIN < state.duration_round

@@ -167,7 +167,21 @@ class CombatStrategy(Strategy):
         )
         if can_break_order:
             action["rushTactic"] = "BREAK_ORDER"
+        # P4m 一击闸：火力不足以清零且对手还能远程增援（SQUAD_REINFORCE 不限距离、
+        # 同帧序先于削弱落地）时不出手——半血卡会被 +2 回满，白丢果子还休整 5 帧；
+        # 攻坚值 ≥ 防值则一击清零，清零的卡失效移除、增援不可复活（任务书 936/970）
+        effective = attack + (3 if can_break_order else 0)
+        if effective < defense and self._opp_can_repump(state):
+            return None
         return action
+
+    @staticmethod
+    def _opp_can_repump(state: GameState) -> bool:
+        """对手能否把半血卡增援回去：未交付/未退赛且有 ≥2 支小分队；RUSH 后
+        禁新提交小分队动作（任务书 1157），增援威胁消失。"""
+        opp = state.opponent
+        return (opp is not None and not opp.delivered and not opp.retired
+                and opp.squad_available >= 2 and state.phase != "RUSH")
 
     def _propose_clear_obstacle(self, state: GameState) -> Intent | None:
         """主车队清障（任务书 2.4.4/5.2 动作表）：交付路径下一跳被道路障碍挡住时

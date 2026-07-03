@@ -44,7 +44,8 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
             resources: dict | None = None, events: list | None = None,
             buffs: list | None = None, tasks: list | None = None,
             task_score: int = 0, total_score: int = 0,
-            opp_total_score: int = 0, verified: bool = False) -> dict:
+            opp_total_score: int = 0, verified: bool = False,
+            opp_squads: int = 0) -> dict:
     return {
         "round": round_no,
         "phase": phase,
@@ -60,7 +61,7 @@ def inquire(round_no: int, *, node: str = "S09", state: str = "IDLE",
                     {"playerId": OPP_ID, "teamId": "BLUE", "state": opp_state,
                      "currentNodeId": opp_node, "nextNodeId": opp_next,
                      "edgeProgressMs": opp_progress_ms, "edgeTotalMs": opp_total_ms,
-                     "totalScore": opp_total_score}],
+                     "totalScore": opp_total_score, "squadAvailable": opp_squads}],
         "nodes": nodes or [],
         "contests": contests or [],
         "events": events or [],
@@ -221,6 +222,22 @@ class CombatStrategyTests(unittest.TestCase):
     def test_does_not_break_while_moving(self) -> None:
         acts = self.actions(inquire(320, state="MOVING", nodes=guard_s10()))
         self.assertNotIn("BREAK_GUARD", [a["action"] for a in acts])
+
+    def test_partial_break_withheld_when_opponent_can_repump(self) -> None:
+        # P4m 一击闸：火力 3 < 防 6 且对手有兵可远程增援（同帧序增援先落地）
+        # → 不出手——白丢果子还休整 5 帧，改等风化/强通
+        acts = self.actions(inquire(320, good=0, bad=1, opp_squads=8, nodes=guard_s10()))
+        self.assertNotIn("BREAK_GUARD", [a["action"] for a in acts])
+
+    def test_partial_break_allowed_when_opponent_out_of_squads(self) -> None:
+        acts = self.actions(inquire(320, good=0, bad=1, opp_squads=0, nodes=guard_s10()))
+        self.assertIn("BREAK_GUARD", [a["action"] for a in acts])
+
+    def test_partial_break_allowed_in_rush_phase(self) -> None:
+        # RUSH 禁新提交小分队动作（任务书 1157）→ 增援威胁消失，半血刀照出
+        acts = self.actions(inquire(320, good=0, bad=1, opp_squads=8, phase="RUSH",
+                                    nodes=guard_s10()))
+        self.assertIn("BREAK_GUARD", [a["action"] for a in acts])
 
     def test_no_ammo_does_not_emit_high_priority_wait(self) -> None:
         acts = self.actions(inquire(320, nodes=guard_s10(), good=0, bad=0))
