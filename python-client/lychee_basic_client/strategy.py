@@ -24,6 +24,7 @@ class MovementStrategy:
         self._claimed_resource_keys: set[str] = set()
         self._used_resource_types: set[str] = set()
         self._claimed_task_ids: set[str] = set()
+        self._squad_order_keys: set[str] = set()
 
     def update_start(self, data: dict[str, Any]) -> None:
         self._update_map(data)
@@ -44,43 +45,47 @@ class MovementStrategy:
         if window_action:
             return [window_action]
 
-        state = player.get("state")
         waiting_action = self._waiting_resume_action(player)
         if waiting_action:
-            return [waiting_action]
+            return self._with_squad_action(data, player, current_node_id, [waiting_action])
 
         if not self._can_plan_from_node(player) or not isinstance(current_node_id, str):
-            return []
+            return self._with_squad_action(data, player, current_node_id, [])
 
         if self._can_deliver(player, current_node_id):
             return [{"action": "DELIVER"}]
 
         if self._needs_gate_verification(data, player, current_node_id):
-            return [self._gate_verification_action(player, current_node_id)]
+            return self._with_squad_action(data, player, current_node_id, [self._gate_verification_action(player, current_node_id)])
 
         if self._is_waiting_for_rush_at_gate(data, player, current_node_id):
-            return []
+            return self._with_squad_action(data, player, current_node_id, [])
 
         if self._needs_processing(current_node_id):
-            return [{"action": "PROCESS", "targetNodeId": current_node_id}]
+            return self._with_squad_action(data, player, current_node_id, [{"action": "PROCESS", "targetNodeId": current_node_id}])
 
         task_action = self._task_action(data, current_node_id)
         if task_action:
-            return [task_action]
+            return self._with_squad_action(data, player, current_node_id, [task_action])
 
         resource_action = self._resource_action(player, current_node_id)
         if resource_action:
-            return [resource_action]
+            return self._with_squad_action(data, player, current_node_id, [resource_action])
 
         target_node_id = self._next_step_toward_score(data, player, current_node_id)
         if not target_node_id:
-            return []
+            return self._with_squad_action(data, player, current_node_id, [])
         guard_action = self._guard_breakthrough_action(data, player, target_node_id)
         if guard_action:
-            return [guard_action]
+            return self._with_squad_action(data, player, current_node_id, [guard_action])
         if self._has_obstacle(target_node_id):
-            return [{"action": "CLEAR", "targetNodeId": target_node_id}]
-        return [{"action": "MOVE", "targetNodeId": target_node_id}]
+            t04_action = self._t04_obstacle_task_action(data, current_node_id, target_node_id)
+            if t04_action:
+                return self._with_squad_action(data, player, current_node_id, [t04_action])
+            if self._active_t04_task_for_obstacle(data, target_node_id):
+                return self._with_squad_action(data, player, current_node_id, [])
+            return self._with_squad_action(data, player, current_node_id, [{"action": "CLEAR", "targetNodeId": target_node_id}])
+        return self._with_squad_action(data, player, current_node_id, [{"action": "MOVE", "targetNodeId": target_node_id}])
 
     def _update_map(self, data: dict[str, Any]) -> None:
         gameplay = self._gameplay(data)
@@ -255,6 +260,34 @@ class MovementStrategy:
             return False
         return bool(node.get("hasObstacle"))
 
+    def _t04_obstacle_task_action(
+        self, data: dict[str, Any], current_node_id: str, target_node_id: str
+    ) -> Optional[dict[str, Any]]:
+        task = self._active_t04_task_for_obstacle(data, target_node_id)
+        if not task:
+            return None
+        task_id = task.get("taskId")
+        if not isinstance(task_id, str) or task_id in self._claimed_task_ids:
+            return None
+        if current_node_id != target_node_id and not self._edge_between(current_node_id, target_node_id):
+            return None
+
+        self._claimed_task_ids.add(task_id)
+        return {"action": "CLAIM_TASK", "taskId": task_id}
+
+    def _active_t04_task_for_obstacle(self, data: dict[str, Any], target_node_id: str) -> Optional[dict[str, Any]]:
+        for task in data.get("tasks", []) or []:
+            if not isinstance(task, dict):
+                continue
+            if task.get("taskTemplateId") != "T04":
+                continue
+            if task.get("nodeId") != target_node_id:
+                continue
+            if task.get("active") is False or task.get("completed") is True or task.get("failed") is True:
+                continue
+            return task
+        return None
+
     def _has_blocking_guard(self, node_id: str, player: dict[str, Any]) -> bool:
         node = self._nodes_by_id.get(node_id)
         if not node:
@@ -269,6 +302,164 @@ class MovementStrategy:
             and owner_team_id != player.get("teamId")
             and (not isinstance(defense, int) or defense > 0)
         )
+
+    def _with_squad_action(
+        self,
+        data: dict[str, Any],
+        player: dict[str, Any],
+        current_node_id: Any,
+        actions: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(current_node_id, str):
+            return actions
+        squad_action = self._squad_action(data, player, current_node_id, actions)
+        if squad_action:
+            return actions + [squad_action]
+        return actions
+
+    def _squad_action(
+        self,
+        data: dict[str, Any],
+        player: dict[str, Any],
+        current_node_id: str,
+        main_actions: list[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        round_no = data.get("round", 0)
+        if isinstance(round_no, int) and round_no >= 390:
+            return None
+
+        squad_available = int(player.get("squadAvailable", 0) or 0)
+        main_targets = self._main_action_targets(main_actions)
+        if squad_available >= 2:
+            weaken_target = self._squad_weaken_target(data, player, current_node_id, main_targets.get("BREAK_GUARD", set()))
+            if weaken_target:
+                return self._remember_squad_order("SQUAD_WEAKEN", weaken_target)
+
+            clear_target = self._squad_clear_target(data, current_node_id, main_targets.get("CLEAR", set()))
+            if clear_target:
+                return self._remember_squad_order("SQUAD_CLEAR", clear_target)
+
+        if squad_available >= 1:
+            scout_target = self._squad_scout_target(data, player, current_node_id)
+            if scout_target:
+                return self._remember_squad_order("SQUAD_SCOUT", scout_target)
+        return None
+
+    def _main_action_targets(self, actions: list[dict[str, Any]]) -> dict[str, set[str]]:
+        targets: dict[str, set[str]] = {}
+        for action in actions:
+            action_type = action.get("action")
+            target_node_id = action.get("targetNodeId")
+            if isinstance(action_type, str) and isinstance(target_node_id, str):
+                targets.setdefault(action_type, set()).add(target_node_id)
+        return targets
+
+    def _squad_weaken_target(
+        self,
+        data: dict[str, Any],
+        player: dict[str, Any],
+        current_node_id: str,
+        blocked_targets: set[str],
+    ) -> Optional[str]:
+        delivery_path = self._path_to_any_goal(
+            current_node_id,
+            self._delivery_goals(player),
+            allow_obstacles=True,
+            player=None,
+        )
+        for node_id in delivery_path[1:4]:
+            if node_id in blocked_targets:
+                continue
+            if self._has_blocking_guard(node_id, player) and not self._has_squad_order("SQUAD_WEAKEN", node_id):
+                return node_id
+
+        for node_id in self._nodes_by_id:
+            if node_id in blocked_targets:
+                continue
+            if self._has_blocking_guard(node_id, player) and not self._has_squad_order("SQUAD_WEAKEN", node_id):
+                return node_id
+        return None
+
+    def _squad_clear_target(
+        self, data: dict[str, Any], current_node_id: str, blocked_targets: set[str]
+    ) -> Optional[str]:
+        delivery_goals = self._terminal_node_ids or ({self._gate_node_id} if self._gate_node_id else set())
+        delivery_path = self._path_to_any_goal(current_node_id, set(delivery_goals), allow_obstacles=True)
+        for node_id in delivery_path[1:5]:
+            if node_id in blocked_targets:
+                continue
+            if self._is_squad_clear_candidate(data, node_id):
+                return node_id
+
+        for node_id in self._nodes_by_id:
+            if node_id in blocked_targets:
+                continue
+            if self._is_squad_clear_candidate(data, node_id):
+                return node_id
+        return None
+
+    def _is_squad_clear_candidate(self, data: dict[str, Any], node_id: str) -> bool:
+        return (
+            self._has_obstacle(node_id)
+            and not self._active_t04_task_for_obstacle(data, node_id)
+            and not self._has_squad_order("SQUAD_CLEAR", node_id)
+        )
+
+    def _squad_scout_target(
+        self, data: dict[str, Any], player: dict[str, Any], current_node_id: str
+    ) -> Optional[str]:
+        round_no = data.get("round", 0)
+        if isinstance(round_no, int) and round_no >= 330:
+            return None
+
+        goals = self._delivery_goals(player)
+        path = self._path_to_any_goal(current_node_id, goals, allow_obstacles=True, player=None)
+        for node_id in path[1:]:
+            if self._is_squad_scout_candidate(player, node_id):
+                return node_id
+
+        for node_id in self._key_scout_nodes():
+            if self._is_squad_scout_candidate(player, node_id):
+                return node_id
+        return None
+
+    def _key_scout_nodes(self) -> list[str]:
+        key_nodes = []
+        for node_id, node in self._nodes_by_id.items():
+            process_round = node.get("processRound", 0)
+            has_process = isinstance(process_round, int) and process_round >= 4
+            if has_process or node.get("processType") == "VERIFY" or node_id == self._gate_node_id:
+                key_nodes.append(node_id)
+        return key_nodes
+
+    def _is_squad_scout_candidate(self, player: dict[str, Any], node_id: str) -> bool:
+        if self._has_squad_order("SQUAD_SCOUT", node_id):
+            return False
+        node = self._nodes_by_id.get(node_id) or {}
+        if node.get("terminal") is True:
+            return False
+        process_round = node.get("processRound", 0)
+        if node_id != self._gate_node_id and (not isinstance(process_round, int) or process_round < 4):
+            return False
+        return not self._has_own_scout_marker(node, player)
+
+    def _has_own_scout_marker(self, node: dict[str, Any], player: dict[str, Any]) -> bool:
+        team_id = player.get("teamId")
+        for marker in node.get("scouted", []) or []:
+            if not isinstance(marker, dict):
+                continue
+            if marker.get("teamId") == team_id or marker.get("ownerTeamId") == team_id:
+                return True
+            if marker.get("playerId") == self._player_id or marker.get("ownerPlayerId") == self._player_id:
+                return True
+        return False
+
+    def _remember_squad_order(self, action: str, target_node_id: str) -> dict[str, Any]:
+        self._squad_order_keys.add(f"{action}:{target_node_id}")
+        return {"action": action, "targetNodeId": target_node_id}
+
+    def _has_squad_order(self, action: str, target_node_id: str) -> bool:
+        return f"{action}:{target_node_id}" in self._squad_order_keys
 
     def _guard_breakthrough_action(
         self, data: dict[str, Any], player: dict[str, Any], target_node_id: str

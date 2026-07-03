@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import socket
 import sys
 from datetime import datetime, timezone
@@ -13,9 +14,15 @@ DIAGNOSTIC_SAMPLE_BYTES = 200
 
 
 class FrameDecodeError(ValueError):
-    def __init__(self, message: str, diagnostic_path: str) -> None:
+    def __init__(
+        self,
+        message: str,
+        diagnostic_path: str,
+        partial_message: Optional[dict[str, Any]] = None,
+    ) -> None:
         super().__init__(message)
         self.diagnostic_path = diagnostic_path
+        self.partial_message = partial_message or {}
 
 
 def read_exact(sock: socket.socket, length: int) -> bytes:
@@ -46,7 +53,8 @@ def read_frame(sock: socket.socket) -> dict:
         return json.loads(decoded)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         diagnostic_path = _write_frame_diagnostic("invalid_json", prefix, length, body, exc)
-        raise FrameDecodeError(f"invalid frame JSON: {exc}", diagnostic_path) from exc
+        partial_message = _extract_partial_message(body)
+        raise FrameDecodeError(f"invalid frame JSON: {exc}", diagnostic_path, partial_message) from exc
 
 
 def write_frame(sock: socket.socket, message: dict[str, Any]) -> None:
@@ -87,3 +95,32 @@ def _write_frame_diagnostic(
 
 def _sample_bytes(value: bytes) -> str:
     return value.decode("utf-8", errors="replace")
+
+
+def _extract_partial_message(body: bytes) -> dict[str, Any]:
+    decoded = body.decode("utf-8", errors="replace")
+    partial: dict[str, Any] = {}
+
+    msg_name = _extract_string(decoded, "msg_name")
+    if msg_name:
+        partial["msg_name"] = msg_name
+
+    match_id = _extract_string(decoded, "matchId")
+    if match_id:
+        partial["matchId"] = match_id
+
+    round_no = _extract_int(decoded, "round")
+    if round_no is not None:
+        partial["round"] = round_no
+
+    return partial
+
+
+def _extract_string(decoded: str, key: str) -> Optional[str]:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]*)"', decoded)
+    return match.group(1) if match else None
+
+
+def _extract_int(decoded: str, key: str) -> Optional[int]:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*(-?\d+)', decoded)
+    return int(match.group(1)) if match else None

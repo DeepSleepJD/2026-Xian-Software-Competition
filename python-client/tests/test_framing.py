@@ -44,6 +44,23 @@ class FramingTests(unittest.TestCase):
                 left.close()
                 right.close()
 
+    def test_malformed_inquire_exposes_partial_message(self) -> None:
+        left, right = socket.socketpair()
+        try:
+            body = b'{"msg_data":{"round":315,"matchId":"match_001"},,"msg_name":"inquire"}'
+            left.sendall(f"{len(body):05d}".encode("ascii") + body)
+
+            with self.assertRaises(FrameDecodeError) as raised:
+                read_frame(right)
+
+            self.assertEqual(
+                {"msg_name": "inquire", "matchId": "match_001", "round": 315},
+                raised.exception.partial_message,
+            )
+        finally:
+            left.close()
+            right.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -272,6 +272,264 @@ class MovementStrategyTests(unittest.TestCase):
 
         self.assertEqual([{"action": "CLEAR", "targetNodeId": "S02"}], action)
 
+    def test_active_t04_obstacle_is_claimed_instead_of_cleared_from_adjacent_node(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"gateNodeId": "S03", "terminalNodeIds": ["S04"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": True},
+                    {"nodeId": "S03", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S04", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02"},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03"},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04"},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 120,
+                "phase": "NORMAL",
+                "tasks": [
+                    {
+                        "taskId": "T_004",
+                        "taskTemplateId": "T04",
+                        "nodeId": "S02",
+                        "active": True,
+                        "completed": False,
+                        "failed": False,
+                    }
+                ],
+                "players": [
+                    {"playerId": 1001, "state": "IDLE", "currentNodeId": "S01", "goodFruit": 100, "verified": False}
+                ],
+            }
+        )
+
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_004"}], action)
+
+    def test_claimed_active_t04_obstacle_is_not_cleared_as_fallback(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"gateNodeId": "S03", "terminalNodeIds": ["S04"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": True},
+                    {"nodeId": "S03", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S04", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02"},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03"},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04"},
+                ],
+            }
+        )
+        data = {
+            "round": 120,
+            "phase": "NORMAL",
+            "tasks": [
+                {
+                    "taskId": "T_004",
+                    "taskTemplateId": "T04",
+                    "nodeId": "S02",
+                    "active": True,
+                    "completed": False,
+                    "failed": False,
+                }
+            ],
+            "players": [
+                {"playerId": 1001, "state": "IDLE", "currentNodeId": "S01", "goodFruit": 100, "verified": False}
+            ],
+        }
+
+        strategy.choose_action(data)
+        action = strategy.choose_action(data)
+
+        self.assertEqual([], action)
+
+    def test_squad_scouts_key_process_node_while_main_moves(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"gateNodeId": "S03", "terminalNodeIds": ["S04"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False, "processRound": 5, "processType": "TRANSFER"},
+                    {"nodeId": "S03", "hasObstacle": False, "processRound": 6, "processType": "VERIFY"},
+                    {"nodeId": "S04", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02"},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03"},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04"},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 20,
+                "phase": "NORMAL",
+                "players": [
+                    {
+                        "playerId": 1001,
+                        "teamId": "RED",
+                        "state": "IDLE",
+                        "currentNodeId": "S01",
+                        "verified": False,
+                        "squadAvailable": 8,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            [
+                {"action": "MOVE", "targetNodeId": "S02"},
+                {"action": "SQUAD_SCOUT", "targetNodeId": "S02"},
+            ],
+            action,
+        )
+
+    def test_squad_clears_non_t04_obstacle_instead_of_scouting(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"terminalNodeIds": ["S04"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False, "processRound": 0},
+                    {"nodeId": "S03", "hasObstacle": True, "processRound": 0},
+                    {"nodeId": "S04", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02"},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03"},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04"},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 20,
+                "phase": "NORMAL",
+                "players": [
+                    {
+                        "playerId": 1001,
+                        "state": "IDLE",
+                        "currentNodeId": "S01",
+                        "verified": True,
+                        "squadAvailable": 8,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            [
+                {"action": "MOVE", "targetNodeId": "S02"},
+                {"action": "SQUAD_CLEAR", "targetNodeId": "S03"},
+            ],
+            action,
+        )
+
+    def test_squad_does_not_clear_active_t04_obstacle(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"terminalNodeIds": ["S03"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": True, "processRound": 0},
+                    {"nodeId": "S03", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02"},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03"},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 20,
+                "phase": "NORMAL",
+                "tasks": [
+                    {
+                        "taskId": "T_004",
+                        "taskTemplateId": "T04",
+                        "nodeId": "S02",
+                        "active": True,
+                        "completed": False,
+                        "failed": False,
+                    }
+                ],
+                "players": [
+                    {
+                        "playerId": 1001,
+                        "state": "IDLE",
+                        "currentNodeId": "S01",
+                        "verified": True,
+                        "squadAvailable": 8,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_004"}], action)
+
+    def test_squad_weakens_enemy_guard_on_delivery_path(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"terminalNodeIds": ["S03"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False, "guard": {"ownerTeamId": "BLUE", "defense": 4}},
+                    {"nodeId": "S03", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02"},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03"},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 20,
+                "phase": "NORMAL",
+                "players": [
+                    {
+                        "playerId": 1001,
+                        "teamId": "RED",
+                        "state": "IDLE",
+                        "currentNodeId": "S01",
+                        "verified": True,
+                        "goodFruit": 1,
+                        "badFruit": 0,
+                        "squadAvailable": 8,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            [
+                {"action": "FORCED_PASS", "targetNodeId": "S02"},
+                {"action": "SQUAD_WEAKEN", "targetNodeId": "S02"},
+            ],
+            action,
+        )
+
     def test_gate_waits_until_rush_then_verifies(self) -> None:
         strategy = MovementStrategy(player_id=1001)
         strategy.update_start(
