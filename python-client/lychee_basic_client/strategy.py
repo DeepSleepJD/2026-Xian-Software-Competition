@@ -256,11 +256,11 @@ class Strategy:
             # only chokes we're at or still before (haven't passed)
             if node != c and self.graph.path_frames(node, self.gate_node, avoid={c}) != float("inf"):
                 continue
-            our_eta = self._route_frames(
-                node, c, me, nodes_by_id, round_no=round_no, weather=weather
+            our_eta = self._eta_to_node(
+                me, c, nodes_by_id, round_no=round_no, weather=weather
             ) + GUARD_SETUP_FRAMES
-            opp_eta = self._route_frames(
-                opp_node, c, opp, nodes_by_id, round_no=round_no, weather=weather
+            opp_eta = self._eta_to_node(
+                opp, c, nodes_by_id, round_no=round_no, weather=weather
             ) if opp_node else float("inf")
             # only spare if we're COMFORTABLY ahead to the choke -- a mere tie is not
             # spare (a neck-and-neck opponent leaves no time for tasks before we camp)
@@ -310,9 +310,7 @@ class Strategy:
         if edge is None:
             return 0
         route_type, distance = edge
-        required = math.ceil(distance * ROUTE_COST_COEF.get(route_type, 1500))
-        permille = opp.get("edgeProgressPermille", 0) or 0
-        remaining = max(0, math.ceil(required * (1000 - permille) / 1000))
+        remaining = self._remaining_edge_required(opp, route_type, distance)
         if remaining <= 0:
             return 0
         horse, horse_left, held = self._initial_horse_state(opp)
@@ -474,16 +472,18 @@ class Strategy:
     # ---- context-aware routing ----
     def _route_frames(
         self, src, dst, actor, nodes_by_id, avoid=None, obstacles=None,
-        round_no=0, weather=None, weather_base_round=None
+        round_no=0, weather=None, weather_base_round=None,
+        process_destination=True
     ) -> float:
         return self._route_plan(
             src, dst, actor, nodes_by_id, avoid, obstacles, round_no, weather,
-            weather_base_round
+            weather_base_round, process_destination
         ).frames
 
     def _route_plan(
         self, src, dst, actor, nodes_by_id, avoid=None, obstacles=None,
-        round_no=0, weather=None, weather_base_round=None
+        round_no=0, weather=None, weather_base_round=None,
+        process_destination=True
     ) -> RoutePlan:
         """Fewest-frame route with actor-local horse state and our opening obstacle rule.
 
@@ -546,9 +546,12 @@ class Strategy:
                     weather, weather_base_round
                 )
                 process_start_round = edge_start_round + edge_frames
-                process_frames = self._process_frames(
-                    v, nodes_by_id, process_start_round, weather, weather_base_round
-                )
+                process_frames = 0
+                if process_destination or v != dst:
+                    process_frames = self._process_frames(
+                        v, nodes_by_id, process_start_round, weather,
+                        weather_base_round
+                    )
                 nh, nh_left = self._spend_horse_wait(nh, nh_left, process_frames)
                 nd = d + pre_edge_wait + edge_frames + process_frames
                 ns = (v, nh, nh_left, nheld, claimed, True)
@@ -580,6 +583,82 @@ class Strategy:
                 first_claim = next(iter(added)).split(":", 1)[1]
 
         return RoutePlan(dist[best], path, first_claim)
+
+    def _eta_to_node(self, actor, dst, nodes_by_id, round_no=0, weather=None) -> float:
+        """Arrival ETA to a node, respecting current edge progress.
+
+        Route plans normally include mandatory processing on the destination because
+        delivery routing needs through-node costs. Choke races need the arrival
+        moment instead: a guard can be set as soon as we stand on the choke, and the
+        opponent reaches it before any local processing completes.
+        """
+        src = actor.get("currentNodeId")
+        if not src:
+            return float("inf")
+        if src == dst and not actor.get("routeEdgeId"):
+            return 0
+        next_node = actor.get("nextNodeId")
+        if not actor.get("routeEdgeId") or not next_node:
+            return self._route_frames(
+                src, dst, actor, nodes_by_id, round_no=round_no, weather=weather,
+                process_destination=False
+            )
+
+        edge = self._edge_info(src, next_node)
+        if edge is None:
+            return self._route_frames(
+                src, dst, actor, nodes_by_id, round_no=round_no, weather=weather,
+                process_destination=False
+            )
+        route_type, distance = edge
+        remaining = self._remaining_edge_required(actor, route_type, distance)
+        horse, horse_left, held = self._initial_horse_state(actor)
+        edge_frames, horse, horse_left, held = self._travel_required_frames(
+            remaining, route_type, horse, horse_left, held, round_no, weather,
+            round_no
+        )
+        if next_node == dst:
+            return edge_frames
+
+        process_frames = self._process_frames(
+            next_node, nodes_by_id, round_no + edge_frames, weather, round_no
+        )
+        horse, horse_left = self._spend_horse_wait(
+            horse, horse_left, process_frames
+        )
+        actor_at_next = self._actor_after_travel(
+            actor, next_node, horse, horse_left, held
+        )
+        rest = self._route_frames(
+            next_node, dst, actor_at_next, nodes_by_id,
+            round_no=round_no + edge_frames + process_frames,
+            weather=weather, weather_base_round=round_no,
+            process_destination=False
+        )
+        return edge_frames + process_frames + rest
+
+    @staticmethod
+    def _actor_after_travel(actor, node, horse, horse_left, held):
+        nxt = dict(actor)
+        nxt["currentNodeId"] = node
+        nxt["routeEdgeId"] = None
+        nxt["nextNodeId"] = None
+
+        resources = dict(actor.get("resources") or {})
+        for h in HORSES:
+            resources.pop(h, None)
+        if held:
+            resources[held] = max(1, resources.get(held, 0))
+        nxt["resources"] = resources
+
+        buffs = [
+            b for b in actor.get("buffs") or []
+            if b.get("type") not in HORSE_MOVE_PER_FRAME
+        ]
+        if horse and horse_left > 0:
+            buffs.append({"type": horse, "remainingRound": horse_left})
+        nxt["buffs"] = buffs
+        return nxt
 
     def _initial_horse_state(self, actor) -> tuple[Optional[str], int, Optional[str]]:
         active = self._active_horse(actor)
@@ -616,6 +695,34 @@ class Strategy:
     @staticmethod
     def _claim_key(node, horse) -> str:
         return f"{node}:{horse}"
+
+    @staticmethod
+    def _remaining_edge_required(actor, route_type, distance) -> int:
+        required = math.ceil(distance * ROUTE_COST_COEF.get(route_type, 1500))
+        progress = actor.get("edgeProgressMs")
+        total = actor.get("edgeTotalMs")
+        if progress is not None and total:
+            try:
+                progress_ratio = max(0.0, min(1.0, float(progress) / float(total)))
+            except (TypeError, ValueError, ZeroDivisionError):
+                progress_ratio = 0.0
+            return max(0, math.ceil(required * (1.0 - progress_ratio)))
+
+        permille = actor.get("edgeProgressPermille")
+        if permille is None:
+            move_progress = actor.get("moveProgress")
+            if move_progress is not None:
+                try:
+                    permille = float(move_progress) * 1000
+                except (TypeError, ValueError):
+                    permille = 0
+            else:
+                permille = 0
+        try:
+            permille = max(0.0, min(1000.0, float(permille)))
+        except (TypeError, ValueError):
+            permille = 0.0
+        return max(0, math.ceil(required * (1000.0 - permille) / 1000.0))
 
     def _resource_claim_frames(self, node, resource_type) -> int:
         return self._resource_claim_rounds.get((node, resource_type), RESOURCE_CLAIM_FRAMES)

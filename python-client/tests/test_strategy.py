@@ -83,6 +83,42 @@ class BlockadeTests(unittest.TestCase):
         act = s.decide(_inq(50, me, opp))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
+    def test_task_spare_counts_opponent_mid_edge_progress(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S06", "S14", "S14"
+        s.chokes = ["S10"]
+        s._my_team = "RED"
+        s._left_start = True
+        s.graph.load_edges([
+            {"fromNodeId": "S06", "toNodeId": "S08", "routeType": "MOUNTAIN",
+             "distance": 54, "bidirectional": True},
+            {"fromNodeId": "S08", "toNodeId": "S10", "routeType": "BRANCH",
+             "distance": 46, "bidirectional": True},
+            {"fromNodeId": "S10", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        nodes = [
+            {"nodeId": "S06", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S08", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S10", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S14", "hasObstacle": False, "resourceStock": {}},
+        ]
+        task = {
+            "taskId": "T_S08", "nodeId": "S08", "taskTemplateId": "T11",
+            "processType": "PASS_NODE", "processRound": 4, "active": True,
+            "completed": False, "failed": False, "ownerPlayerId": 0,
+        }
+        opp = _opp(
+            "S06", state="MOVING", routeEdgeId="E16", nextNodeId="S08",
+            edgeProgressMs=87000, edgeTotalMs=96120, edgeProgressPermille=905,
+        )
+
+        nodes_by_id = {n["nodeId"]: n for n in nodes}
+        self.assertEqual(82, s._eta_to_node(opp, "S10", nodes_by_id, 183, {}))
+        act = s.decide(_inq(183, _me("S08"), opp, nodes=nodes, tasks=[task]))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S10"}], act)
+
     def test_must_deliver_overrides_blocking_near_deadline(self) -> None:
         s = _line_strategy(gate="S04")
         # very late: no time left to keep blocking -> must move toward the gate
