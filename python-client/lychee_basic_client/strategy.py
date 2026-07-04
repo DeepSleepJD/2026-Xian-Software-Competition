@@ -33,6 +33,12 @@ TASK_TIME = 8                # rough frames a task claim+complete costs (spare-t
 RACE_SAFETY = 30             # only task pre-choke if we lead the race to it by > this
 OPP_SPEED = 1.25             # assume the opponent can use a fast horse (conservative:
                              # never overestimate our lead in the race to a choke)
+# weather -> per-route-type move-cost multiplier (server config; only these slow moves;
+# HOT only speeds freshness loss, no move effect)
+WEATHER_ROUTE_MULT = {
+    "HEAVY_RAIN": {"WATER": 1.35},
+    "MOUNTAIN_FOG": {"MOUNTAIN": 1.10},
+}
 FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before arrival
 ICE_BOX = "ICE_BOX"
 HORSES = ("FAST_HORSE", "SHORT_HORSE")   # move-buff resources (fast first)
@@ -67,6 +73,8 @@ class Strategy:
         self._squad_sent: set[str] = set()
         self._guard_blocked: set[str] = set()   # enemy guards blocking us
         self.route_avoid: set[str] = set()       # nodes to route around (variants/testing)
+        self._weather_windows: list = []         # (route_mult, start_round, end_round)
+        self._round = 0
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -109,6 +117,8 @@ class Strategy:
         self._account_process(inquire_data.get("events") or [])
         self._my_team = me.get("teamId")
         self._guard_blocked = self._enemy_guards(nodes_by_id)
+        self._round = round_no
+        self._ingest_weather(inquire_data.get("weather") or {}, round_no)
 
         if me.get("delivered") or me.get("retired"):
             return []
@@ -204,9 +214,11 @@ class Strategy:
             # only chokes we're at or still before (haven't passed)
             if node != c and self.graph.path_frames(node, self.gate_node, avoid={c}) != float("inf"):
                 continue
-            our_eta = self.graph.path_frames(node, c, speed=self._me_speed(me)) + GUARD_SETUP_FRAMES
-            # opponent speed is informed by their horse status, not blindly conservative
-            opp_eta = self.graph.path_frames(opp_node, c, speed=self._opp_speed(opp, nodes_by_id)) \
+            our_eta = self.graph.path_frames(node, c, speed=self._me_speed(me),
+                                             weather_fn=self._wmult, base_round=round_no) + GUARD_SETUP_FRAMES
+            # opponent speed informed by horse status; ETA weather-aware at traversal time
+            opp_eta = self.graph.path_frames(opp_node, c, speed=self._opp_speed(opp, nodes_by_id),
+                                             weather_fn=self._wmult, base_round=round_no) \
                 if opp_node else float("inf")
             # only spare if we're COMFORTABLY ahead to the choke -- a mere tie is not
             # spare (a neck-and-neck opponent leaves no time for tasks before we camp)
@@ -230,6 +242,29 @@ class Strategy:
         if not my_guards:
             return False
         return self.graph.path_frames(opp_node, self.gate_node, avoid=my_guards) == float("inf")
+
+    def _ingest_weather(self, weather, round_no) -> None:
+        """Parse active + forecast weather into (route_mult, start, end) windows so we
+        can look up the move multiplier for a route type at a future traversal round."""
+        windows = []
+        for a in weather.get("active", []):
+            m = WEATHER_ROUTE_MULT.get(a.get("type"))
+            if m:
+                windows.append((m, round_no, round_no + int(a.get("remainRound", 0))))
+        for f in weather.get("forecast", []):
+            m = WEATHER_ROUTE_MULT.get(f.get("type"))
+            if m:
+                s = int(f.get("startRound", round_no))
+                windows.append((m, s, s + int(f.get("durationRound", 0))))
+        self._weather_windows = windows
+
+    def _wmult(self, route_type, at_round) -> float:
+        """Move-cost multiplier for a route type at a given (future) round."""
+        mult = 1.0
+        for m, start, end in self._weather_windows:
+            if start <= at_round <= end and route_type in m:
+                mult = max(mult, m[route_type])
+        return mult
 
     def _opp_must_cross(self, node, opp) -> bool:
         """True if this cut-vertex is still on the opponent's only way to the gate."""
@@ -371,9 +406,11 @@ class Strategy:
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         avoid = self._guard_blocked | self.route_avoid
         nxt = self.graph.fastest_hop(node, dest, avoid=avoid, obstacles=obstacles,
-                                     obstacle_penalty=OBSTACLE_PENALTY) \
+                                     obstacle_penalty=OBSTACLE_PENALTY,
+                                     weather_fn=self._wmult, base_round=self._round) \
             or self.graph.fastest_hop(node, dest, obstacles=obstacles,
-                                      obstacle_penalty=OBSTACLE_PENALTY)
+                                      obstacle_penalty=OBSTACLE_PENALTY,
+                                      weather_fn=self._wmult, base_round=self._round)
         if not nxt:
             return []
         if nodes_by_id.get(nxt, {}).get("hasObstacle") or nxt in self._guard_blocked:
@@ -415,10 +452,12 @@ class Strategy:
         return round_no + need + DELIVER_MARGIN >= TOTAL_ROUNDS
 
     def _frames_to_deliver(self, node, me) -> float:
-        to_gate = 0 if me.get("verified") else self.graph.path_frames(node, self.gate_node)
+        wf, br = self._wmult, self._round
+        to_gate = 0 if me.get("verified") else self.graph.path_frames(
+            node, self.gate_node, weather_fn=wf, base_round=br)
         verify = 0 if me.get("verified") else VERIFY_FRAMES
         start = self.gate_node if not me.get("verified") else node
-        to_term = self.graph.path_frames(start, self.terminal_node)
+        to_term = self.graph.path_frames(start, self.terminal_node, weather_fn=wf, base_round=br)
         return to_gate + verify + to_term + DELIVER_FRAMES
 
     # ---- helpers ----

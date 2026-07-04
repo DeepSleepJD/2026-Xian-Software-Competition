@@ -131,7 +131,8 @@ class Graph:
         frames = max(1, math.ceil(required / (BASE_MOVE_PER_FRAME * speed)))
         return frames + self.process_rounds.get(dst, 0)
 
-    def _frame_dijkstra(self, src, speed, avoid, obstacles=None, obstacle_penalty=0):
+    def _frame_dijkstra(self, src, speed, avoid, obstacles=None, obstacle_penalty=0,
+                        weather_fn=None, base_round=0):
         avoid = avoid or set()
         obstacles = obstacles or set()
         dist: dict[str, int] = {src: 0}
@@ -144,7 +145,13 @@ class Graph:
             for v, rt, dd in self.adj.get(u, []):
                 if v in avoid:
                     continue
-                nd = d + self._frame_edge(v, rt, dd, speed)
+                coef = ROUTE_COST_COEF.get(rt, 1500)
+                move = max(1, math.ceil(math.ceil(dd * coef) / (BASE_MOVE_PER_FRAME * speed)))
+                if weather_fn is not None:
+                    # weather at the TIME we'd traverse this edge (route progress, not
+                    # coordinates): base_round + frames elapsed so far (=d)
+                    move = math.ceil(move * weather_fn(rt, base_round + d))
+                nd = d + move + self.process_rounds.get(v, 0)
                 if v in obstacles:
                     nd += obstacle_penalty  # obstacle time-tax: route around if we can
                 if nd < dist.get(v, math.inf):
@@ -156,22 +163,26 @@ class Graph:
     def path_frames(
         self, src: str, dst: str, speed: float = 1.0, avoid: Optional[set] = None,
         obstacles: Optional[set] = None, obstacle_penalty: int = 0,
+        weather_fn=None, base_round: int = 0,
     ) -> float:
         """Fewest frames from src to dst at the given speed (inf if unreachable)."""
         if src == dst:
             return 0
-        dist, _ = self._frame_dijkstra(src, speed, avoid, obstacles, obstacle_penalty)
+        dist, _ = self._frame_dijkstra(src, speed, avoid, obstacles, obstacle_penalty,
+                                       weather_fn, base_round)
         return dist.get(dst, math.inf)
 
     def fastest_hop(
         self, src: str, dst: str, avoid: Optional[set] = None,
         obstacles: Optional[set] = None, obstacle_penalty: int = 40,
+        weather_fn=None, base_round: int = 0,
     ) -> Optional[str]:
         """Next node on the fewest-frames route to dst (our own pace), routing
         around obstacle nodes when a comparable clear route exists."""
         if src == dst:
             return None
-        dist, prev = self._frame_dijkstra(src, 1.0, avoid, obstacles, obstacle_penalty)
+        dist, prev = self._frame_dijkstra(src, 1.0, avoid, obstacles, obstacle_penalty,
+                                          weather_fn, base_round)
         if dst not in dist:
             return None
         path = [dst]
