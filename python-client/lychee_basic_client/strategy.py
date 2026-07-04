@@ -474,10 +474,10 @@ class Strategy:
         if nodes_by_id.get(nxt, {}).get("hasObstacle") or nxt in self._guard_blocked:
             # NO FORCED_PASS (it chained into FORCED_PASS_REPEAT and stalled us). A squad
             # clears the obstacle in parallel (_squad_action); wait a frame, then MOVE.
-            # NOTE: having the MAIN claim a T04 (CLEAR_OBSTACLE) task here to score 30 was
-            # tested and REVERTED -- the squad pre-clears obstacles so the main never
-            # actually idles, so claiming just ADDS a stop, delaying our race to the choke
-            # (S10 r257->r263) and losing the shutout (blockade > task points).
+            # NOTE: the fix branch's "opening first-hop main-clear" was absorbed & tested
+            # but REVERTED for THIS map -- our first-hop obstacle (S06) is across a long
+            # 79f edge, so main-clear saves ~0 vs the squad yet disrupts task timing
+            # (526 vs 618). It only pays where the first-hop obstacle sits on a short edge.
             return [M.wait()]
         return [M.move(nxt)]
 
