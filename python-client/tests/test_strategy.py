@@ -433,7 +433,7 @@ class BlockadeTests(unittest.TestCase):
             nextNodeId="S05", edgeProgressPermille=300,
         )
 
-        act = s._squad_action("S04", me, _opp("S01"), nodes, round_no=90)
+        act = s._squad_action("S04", me, _opp("S01"), [], nodes, round_no=90)
 
         self.assertEqual([{"action": "SQUAD_SCOUT", "targetNodeId": "S05"}], act)
 
@@ -502,6 +502,96 @@ class PerOpRaceMarginTests(unittest.TestCase):
 
 
 class FarmModeTests(unittest.TestCase):
+    def test_preclears_post_freeze_task_obstacle_before_choke(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S14", "S15"
+        s.graph.load_edges([
+            {"fromNodeId": "S09", "toNodeId": "S10", "routeType": "ROAD",
+             "distance": 40, "bidirectional": True},
+            {"fromNodeId": "S10", "toNodeId": "S11", "routeType": "ROAD",
+             "distance": 36, "bidirectional": True},
+            {"fromNodeId": "S11", "toNodeId": "S14", "routeType": "BRANCH",
+             "distance": 15, "bidirectional": True},
+            {"fromNodeId": "S10", "toNodeId": "S13", "routeType": "BRANCH",
+             "distance": 27, "bidirectional": True},
+            {"fromNodeId": "S13", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 18, "bidirectional": True},
+            {"fromNodeId": "S14", "toNodeId": "S15", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        s.graph.process_rounds = {"S11": 5, "S13": 5}
+        s.chokes = ["S10"]
+        nodes = [
+            {"nodeId": "S09", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S10", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S11", "hasObstacle": True, "processRound": 5,
+             "resourceStock": {}},
+            {"nodeId": "S13", "hasObstacle": False, "processRound": 5,
+             "resourceStock": {}},
+            {"nodeId": "S14", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S15", "hasObstacle": False, "resourceStock": {}},
+        ]
+        task = [{
+            "taskId": "T_S11", "nodeId": "S11", "taskTemplateId": "T11",
+            "processType": "STATION_PROCESS", "processRound": 4, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 500,
+        }]
+        me = _me(
+            "S09", state="MOVING", nextNodeId="S10", routeEdgeId="E05",
+            edgeProgressMs=50000, edgeTotalMs=55200, edgeProgressPermille=905,
+            squadAvailable=2,
+        )
+        opp = _opp(
+            "S09", state="MOVING", nextNodeId="S10", routeEdgeId="E05",
+            edgeProgressMs=10000, edgeTotalMs=55200, edgeProgressPermille=181,
+        )
+
+        act = s.decide(_inq(250, me, opp, nodes=nodes, tasks=task))
+
+        self.assertEqual({"action": "MOVE", "targetNodeId": "S10"}, act[0])
+        self.assertIn({"action": "SQUAD_CLEAR", "targetNodeId": "S11"}, act)
+
+    def test_farm_mode_main_clears_task_obstacle_without_squad(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S14", "S15"
+        s.graph.load_edges([
+            {"fromNodeId": "S10", "toNodeId": "S11", "routeType": "ROAD",
+             "distance": 36, "bidirectional": True},
+            {"fromNodeId": "S11", "toNodeId": "S14", "routeType": "BRANCH",
+             "distance": 15, "bidirectional": True},
+            {"fromNodeId": "S10", "toNodeId": "S13", "routeType": "BRANCH",
+             "distance": 27, "bidirectional": True},
+            {"fromNodeId": "S13", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 18, "bidirectional": True},
+            {"fromNodeId": "S14", "toNodeId": "S15", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        s.graph.process_rounds = {"S11": 5, "S13": 5}
+        s.chokes = ["S10"]
+        s._first_guard_node = "S10"
+        nodes = [
+            {"nodeId": "S10", "hasObstacle": False, "resourceStock": {},
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": 6}},
+            {"nodeId": "S11", "hasObstacle": True, "processRound": 5,
+             "resourceStock": {}},
+            {"nodeId": "S13", "hasObstacle": False, "processRound": 5,
+             "resourceStock": {}},
+            {"nodeId": "S14", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S15", "hasObstacle": False, "resourceStock": {}},
+        ]
+        task = [{
+            "taskId": "T_S11", "nodeId": "S11", "taskTemplateId": "T11",
+            "processType": "STATION_PROCESS", "processRound": 4, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 500,
+        }]
+
+        act = s.decide(_inq(283, _me("S10", squadAvailable=0), _opp("S09"), nodes=nodes, tasks=task))
+
+        self.assertTrue(s._task_priority_mode)
+        self.assertEqual([{"action": "CLEAR", "targetNodeId": "S11"}], act)
+
     def test_farm_mode_claims_ice_box_ahead(self) -> None:
         s = _line_strategy(gate="S04")
         s._first_guard_node = "S02"

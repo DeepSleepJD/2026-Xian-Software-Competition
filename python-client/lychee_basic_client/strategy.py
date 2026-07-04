@@ -191,7 +191,7 @@ class Strategy:
 
         # squad pre-clears obstacles ahead (separate quota) so the main car never
         # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
-        squad = self._squad_action(node, me, opp, nodes_by_id, round_no, weather)
+        squad = self._squad_action(node, me, opp, tasks, nodes_by_id, round_no, weather)
 
         # once verified we've committed to the delivery run -> always finish it
         # (we only ever VERIFY during our own delivery push).
@@ -497,7 +497,7 @@ class Strategy:
                 return h
         return None
 
-    def _squad_action(self, node, me, opp, nodes_by_id, round_no=0, weather=None) -> list:
+    def _squad_action(self, node, me, opp, tasks, nodes_by_id, round_no=0, weather=None) -> list:
         """Squad CLEARS obstacles on our path so the main car MOVEs through (we never
         FORCED_PASS). Dispatch to the nearest uncleared obstacle ahead (clears in
         parallel as we race).
@@ -510,6 +510,14 @@ class Strategy:
         if squad_available < 1:
             return []
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
+        if squad_available >= 2:
+            task_obstacle = self._post_freeze_task_obstacle(
+                node, me, opp, tasks, nodes_by_id, obstacles, round_no, weather
+            )
+            if task_obstacle and task_obstacle not in self._squad_sent:
+                self._squad_sent.add(task_obstacle)
+                return [M.squad_clear(task_obstacle)]
+
         avoid = self._guard_blocked | self.route_avoid
         plan = self._route_plan(
             node, self.gate_node, me, nodes_by_id, avoid=avoid,
@@ -532,6 +540,44 @@ class Strategy:
         if scout:
             return scout
         return []
+
+    def _post_freeze_task_obstacle(
+        self, node, me, opp, tasks, nodes_by_id, obstacles, round_no=0, weather=None
+    ) -> Optional[str]:
+        projected = self._post_freeze_projected_node(
+            node, me, opp, nodes_by_id, round_no, weather
+        )
+        if not projected:
+            return None
+        actor = self._actor_after_travel(me, projected, *self._initial_horse_state(me))
+        dest = self._best_task_waypoint(
+            projected, actor, tasks, nodes_by_id, round_no, weather,
+            route_avoid=set()
+        )
+        if dest in obstacles:
+            return dest
+        return None
+
+    def _post_freeze_projected_node(
+        self, node, me, opp, nodes_by_id, round_no=0, weather=None
+    ) -> Optional[str]:
+        if self._task_priority_mode or self._first_guard_node is not None:
+            return me.get("nextNodeId") or node
+
+        projected = me.get("nextNodeId") if me.get("routeEdgeId") else node
+        if projected not in self.chokes:
+            return None
+        if not self._opp_must_cross(projected, opp):
+            return None
+        if opp is None:
+            return None
+        our_eta = self._eta_to_node(me, projected, nodes_by_id, round_no, weather)
+        opp_eta = self._eta_to_node(opp, projected, nodes_by_id, round_no, weather)
+        if our_eta == float("inf") or opp_eta == float("inf"):
+            return None
+        if our_eta + RACE_SAFETY >= opp_eta:
+            return None
+        return projected
 
     def _maybe_choose_opening_route(self, me, node, round_no, tasks, nodes_by_id, weather=None) -> None:
         if self.route_avoid or self._opening_route_path:
@@ -817,10 +863,9 @@ class Strategy:
         if nodes_by_id.get(nxt, {}).get("hasObstacle"):
             if self._is_opening_first_hop_obstacle(node, nxt, nodes_by_id, me):
                 return self._opening_obstacle_action(node, nxt, tasks or [])
-            # NO FORCED_PASS anymore (it chained into FORCED_PASS_REPEAT and stalled us).
-            # A squad clears the obstacle in parallel (_squad_action); we just wait a
-            # frame for it, then MOVE straight through.
-            return [M.wait()]
+            if nxt in self._squad_sent:
+                return [M.wait()]
+            return self._opening_obstacle_action(node, nxt, tasks or [])
         return [M.move(nxt)]
 
     def _arrive(self, dest, me, phase, nodes_by_id):
@@ -918,14 +963,17 @@ class Strategy:
         )
         return self._apply_scout_process_reduce(frames, reduce)
 
-    def _best_task_waypoint(self, node, me, tasks, nodes_by_id, round_no, weather=None) -> Optional[str]:
+    def _best_task_waypoint(
+        self, node, me, tasks, nodes_by_id, round_no, weather=None,
+        route_avoid: Optional[set[str]] = None
+    ) -> Optional[str]:
         if self._task_base_score(me) >= TASK_BASE_TARGET:
             return None
         direct = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
         # farm FORWARD only: never route back across our own freeze guard (the
         # frozen opponent unfreezes the moment the guard drops, and re-entry of a
         # guarded node is not a modelled move)
-        avoid = self._guard_blocked | self.route_avoid
+        avoid = self._guard_blocked | (self.route_avoid if route_avoid is None else route_avoid)
         if self._first_guard_node:
             avoid = avoid | {self._first_guard_node}
         best_node = None
