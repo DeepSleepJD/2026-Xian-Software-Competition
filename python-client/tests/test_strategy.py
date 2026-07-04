@@ -95,6 +95,91 @@ class BlockadeTests(unittest.TestCase):
         act = s.decide(_inq(300, me, _opp("S01")))
         self.assertEqual("DELIVER", act[0]["action"])
 
+    def test_opening_first_hop_obstacle_uses_main_clear_not_squad(self) -> None:
+        s = _line_strategy(gate="S03")
+        me = _me("S01", squadAvailable=2)
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": True, "resourceStock": {}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {}},
+        ]
+        act = s.decide(_inq(10, me, _opp("S01"), nodes=nodes))
+
+        self.assertEqual([{"action": "CLEAR", "targetNodeId": "S02"}], act)
+
+    def test_obstacle_after_first_hop_is_squad_cleared(self) -> None:
+        s = _line_strategy(gate="S03")
+        me = _me("S01", squadAvailable=2)
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S03", "hasObstacle": True, "resourceStock": {}},
+        ]
+        act = s.decide(_inq(10, me, _opp("S01"), nodes=nodes))
+
+        self.assertIn({"action": "SQUAD_CLEAR", "targetNodeId": "S03"}, act)
+        self.assertIn({"action": "MOVE", "targetNodeId": "S02"}, act)
+
+    def test_opening_clear_prefers_t04_when_available(self) -> None:
+        s = _line_strategy(gate="S03")
+        me = _me("S01", squadAvailable=2)
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": True, "resourceStock": {}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {}},
+        ]
+        tasks = [{
+            "taskId": "T04_1", "nodeId": "S02", "taskTemplateId": "T04",
+            "processType": "CLEAR_OBSTACLE", "processRound": 6, "active": True,
+            "completed": False, "failed": False, "ownerPlayerId": 0,
+        }]
+        act = s.decide(_inq(10, me, _opp("S01"), nodes=nodes, tasks=tasks))
+
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T04_1"}], act)
+
+
+class RoutePlanTests(unittest.TestCase):
+    def test_route_plan_counts_opening_first_hop_obstacle_once(self) -> None:
+        s = _line_strategy(gate="S03")
+        me = _me("S01")
+        nodes = {
+            "S01": {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            "S02": {"nodeId": "S02", "hasObstacle": True, "resourceStock": {}},
+            "S03": {"nodeId": "S03", "hasObstacle": False, "resourceStock": {}},
+        }
+
+        self.assertEqual(34, s._route_plan("S01", "S03", me, nodes).frames)
+        s._left_start = True
+        self.assertEqual(28, s._route_plan("S01", "S03", me, nodes).frames)
+
+    def test_route_plan_uses_horse_when_it_changes_the_fastest_path(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "G", "G"
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "A", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "A", "toNodeId": "G", "routeType": "ROAD",
+             "distance": 100, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "B", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "B", "toNodeId": "G", "routeType": "ROAD",
+             "distance": 99, "bidirectional": True},
+        ])
+        s._left_start = True
+        me = _me("S01")
+        nodes = {
+            "S01": {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            "A": {"nodeId": "A", "hasObstacle": False,
+                  "resourceStock": {"FAST_HORSE": 1}},
+            "B": {"nodeId": "B", "hasObstacle": False, "resourceStock": {}},
+            "G": {"nodeId": "G", "hasObstacle": False, "resourceStock": {}},
+        }
+
+        plan = s._route_plan("S01", "G", me, nodes)
+
+        self.assertEqual(["S01", "A", "G"], plan.path)
+        self.assertEqual(150, plan.frames)
+
 
 class OpeningContestTests(unittest.TestCase):
     def _contest(self, ri=1):

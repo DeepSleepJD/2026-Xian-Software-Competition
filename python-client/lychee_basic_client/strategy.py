@@ -15,11 +15,13 @@ Plan (feature/blockade-strategy):
 The window-card / contest layer is reused as-is; only navigation + guarding is new.
 """
 import math
+import heapq
+from dataclasses import dataclass
 from typing import Any, Optional
 
 from . import messages as M
 from .contest import active_contest, pick_card
-from .graph import Graph
+from .graph import BASE_MOVE_PER_FRAME, Graph, ROUTE_COST_COEF
 
 TOTAL_ROUNDS = 600
 DELIVER_MARGIN = 60          # safety frames before the delivery deadline (covers the
@@ -34,6 +36,10 @@ RACE_SAFETY = 30             # only task pre-choke if we lead the race to it by 
 FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before arrival
 ICE_BOX = "ICE_BOX"
 HORSES = ("FAST_HORSE", "SHORT_HORSE")   # move-buff resources (fast first)
+HORSE_MOVE_PER_FRAME = {"FAST_HORSE": 1200, "SHORT_HORSE": 1150}
+HORSE_DURATION = {"FAST_HORSE": 20, "SHORT_HORSE": 14}
+RESOURCE_CLAIM_FRAMES = 2
+START_OBSTACLE_CLEAR_FRAMES = 6
 OBSTACLE_PENALTY = 0         # routing cost of crossing an obstacle node: obstacles are
                              # squad-cleared in parallel now (near-free), so don't avoid
                              # them -- take the true shortest route (may use shortcuts)
@@ -41,6 +47,19 @@ XIAN_GONG_FLOOR = 6          # keep at least this many good fruit (guards + deli
 
 # main-car states where the engine is running our action; don't interrupt
 BUSY_STATES = {"PROCESSING", "VERIFYING", "FORCED_PASSING", "RESTING", "CONTESTING"}
+
+
+@dataclass(frozen=True)
+class RoutePlan:
+    frames: float
+    path: list[str]
+    first_claim: Optional[str] = None
+
+    @property
+    def next_hop(self) -> Optional[str]:
+        if len(self.path) >= 2:
+            return self.path[1]
+        return None
 
 
 class Strategy:
@@ -65,6 +84,9 @@ class Strategy:
         self._squad_sent: set[str] = set()
         self._guard_blocked: set[str] = set()   # enemy guards blocking us
         self.route_avoid: set[str] = set()       # nodes to route around (variants/testing)
+        self._resource_claim_rounds: dict[tuple[str, str], int] = {}
+        self._left_start = False
+        self._opp_left_start = False
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -76,6 +98,14 @@ class Strategy:
         self.start_node = roles.get("startNodeId", "S01")
         self.terminal_node = (roles.get("terminalNodeIds") or ["S15"])[0]
         self.graph.load_process_nodes(m.get("gameplay", {}).get("processNodes", []), self.gate_node)
+        self._resource_claim_rounds = {}
+        for r in start_data.get("resources") or m.get("resources") or []:
+            node_id = r.get("nodeId")
+            resource_type = r.get("resourceType")
+            if node_id and resource_type:
+                self._resource_claim_rounds[(node_id, resource_type)] = int(
+                    r.get("claimRound", RESOURCE_CLAIM_FRAMES)
+                )
         # chokes the opponent must cross, nearest the gate first (strongest to hold)
         self.chokes = self.graph.choke_points(self.start_node, self.gate_node)
 
@@ -107,6 +137,7 @@ class Strategy:
         self._account_process(inquire_data.get("events") or [])
         self._my_team = me.get("teamId")
         self._guard_blocked = self._enemy_guards(nodes_by_id)
+        self._update_start_flags(me, opp)
 
         if me.get("delivered") or me.get("retired"):
             return []
@@ -121,11 +152,15 @@ class Strategy:
         # once verified we've committed to the delivery run -> always finish it
         # (we only ever VERIFY during our own delivery push).
         if me.get("verified"):
-            return card + squad + self._advance_to(self.terminal_node, me, node, state, phase, nodes_by_id)
+            return card + squad + self._advance_to(
+                self.terminal_node, me, node, state, phase, nodes_by_id, tasks
+            )
 
         # delivery safety: if we can't afford to block any longer, go to the gate.
-        if self._must_deliver(node, me, round_no):
-            return card + squad + self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
+        if self._must_deliver(node, me, round_no, nodes_by_id):
+            return card + squad + self._advance_to(
+                self.gate_node, me, node, state, phase, nodes_by_id, tasks
+            )
 
         main = self._blockade(me, opp, node, state, phase, round_no, tasks, nodes_by_id)
         main = squad + main
@@ -153,7 +188,7 @@ class Strategy:
         # spamming SET_GUARD. currentNodeId still reads the edge's start node, so gate
         # this on routeEdgeId, not on `node`. Just push to the far end.
         if me.get("routeEdgeId") and me.get("nextNodeId"):
-            return [M.move(me["nextNodeId"])]
+            return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id, tasks)
 
         # FREEZE: camp on a choke the opponent must still cross and SET_GUARD only the
         # instant they've COMMITTED onto the edge into it (MOVING, nextNode==choke) AND
@@ -182,14 +217,14 @@ class Strategy:
             return here
         if node == self.gate_node and not me.get("verified") and phase != "RUSH":
             return [M.wait()]
-        return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
+        return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id, tasks)
 
     def _spare_for_task(self, node, me, opp, round_no, nodes_by_id) -> bool:
         """Do a task only with genuine spare time: it must not push us past our
         delivery deadline, and (before the blockade is secured) must not let the
         opponent reach the nearest choke we still need before we do."""
         # (a) delivery must survive the task's time cost
-        if round_no + TASK_TIME + self._frames_to_deliver(node, me) + DELIVER_MARGIN >= TOTAL_ROUNDS:
+        if round_no + TASK_TIME + self._frames_to_deliver(node, me, nodes_by_id) + DELIVER_MARGIN >= TOTAL_ROUNDS:
             return False
         # (b) the choke race: the nearest choke ahead that the opponent must still
         # cross and we don't yet hold -- a task must not lose us that race
@@ -202,8 +237,8 @@ class Strategy:
             # only chokes we're at or still before (haven't passed)
             if node != c and self.graph.path_frames(node, self.gate_node, avoid={c}) != float("inf"):
                 continue
-            our_eta = self.graph.path_frames(node, c) + GUARD_SETUP_FRAMES
-            opp_eta = self.graph.path_frames(opp_node, c) if opp_node else float("inf")
+            our_eta = self._route_frames(node, c, me, nodes_by_id) + GUARD_SETUP_FRAMES
+            opp_eta = self._route_frames(opp_node, c, opp, nodes_by_id) if opp_node else float("inf")
             # only spare if we're COMFORTABLY ahead to the choke -- a mere tie is not
             # spare (a neck-and-neck opponent leaves no time for tasks before we camp)
             return opp_eta - our_eta > TASK_TIME + RACE_SAFETY
@@ -266,21 +301,11 @@ class Strategy:
         spare = me.get("goodFruit", 0) - GUARD_KEEP_FRUIT
         return max(0, min(2, spare))
 
-    def _horse_action(self, me, node, nodes_by_id):
-        """Mount a held horse (speed buff) before moving; else grab one sitting here.
-        Horses accelerate the race to the choke -- and taking the one before the choke
-        also denies it to the opponent."""
-        res = me.get("resources") or {}
-        buffed = any((b.get("type") or "").endswith("HORSE") or b.get("type") == "MOVE_BUFF"
-                     for b in (me.get("buffs") or []))
-        held = [h for h in HORSES if res.get(h, 0) > 0]
-        if not buffed and held:
-            return [M.use_resource(held[0])]           # mount it now, then move
-        if not buffed and not held:
-            stock = nodes_by_id.get(node, {}).get("resourceStock") or {}
-            for h in HORSES:                            # fast horse first
-                if stock.get(h, 0) > 0:
-                    return [M.claim_resource(node, h)]
+    def _held_horse(self, actor) -> Optional[str]:
+        res = actor.get("resources") or {}
+        for h in HORSES:
+            if res.get(h, 0) > 0:
+                return h
         return None
 
     def _squad_action(self, node, me, opp, nodes_by_id) -> list:
@@ -295,9 +320,11 @@ class Strategy:
         if me.get("squadAvailable", 0) < 2:
             return []
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
-        path = self.graph.fastest_path(node, self.gate_node, obstacles=obstacles,
-                                       obstacle_penalty=OBSTACLE_PENALTY) or []
-        for nid in path[1:]:
+        plan = self._route_plan(node, self.gate_node, me, nodes_by_id, obstacles=obstacles)
+        path = plan.path
+        for idx, nid in enumerate(path[1:], start=1):
+            if idx == 1 and self._is_opening_first_hop_obstacle(node, nid, nodes_by_id, me):
+                continue
             if nid in obstacles and nid not in self._squad_sent:
                 self._squad_sent.add(nid)   # nearest uncleared obstacle on our path
                 return [M.squad_clear(nid)]
@@ -313,7 +340,7 @@ class Strategy:
         return self.graph.path_frames(node, self.gate_node) < self.graph.path_frames(opp_node, self.gate_node)
 
     # ---- navigation ----
-    def _advance_to(self, dest, me, node, state, phase, nodes_by_id):
+    def _advance_to(self, dest, me, node, state, phase, nodes_by_id, tasks=None):
         """One step toward dest: continue an edge, process/verify, force past an
         obstacle, else MOVE. Handles the WAITING-on-edge continuation."""
         if state in BUSY_STATES:
@@ -322,6 +349,9 @@ class Strategy:
             return self._arrive(dest, me, phase, nodes_by_id)
         # travelling: keep going to the committed next node
         if me.get("routeEdgeId") and me.get("nextNodeId"):
+            held = self._held_horse(me)
+            if held and not self._active_horse(me):
+                return [M.use_resource(held)]
             return [M.move(me["nextNodeId"])]
         # gate en route -> must VERIFY before passing (only in RUSH)
         if node == self.gate_node and not me.get("verified"):
@@ -329,22 +359,21 @@ class Strategy:
         # mandatory fixed process at the node we're standing on
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
             return [M.process(node)]
-        # grab / mount a horse to win the race to the choke (and deny it to the
-        # opponent). A move-buff means every following edge is faster.
-        horse = self._horse_action(me, node, nodes_by_id)
-        if horse:
-            return horse
-        # route around obstacle nodes (they carry a time tax); only cross one when
-        # it's unavoidable (e.g. an obstacle sitting on a choke).
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         avoid = self._guard_blocked | self.route_avoid
-        nxt = self.graph.fastest_hop(node, dest, avoid=avoid, obstacles=obstacles,
-                                     obstacle_penalty=OBSTACLE_PENALTY) \
-            or self.graph.fastest_hop(node, dest, obstacles=obstacles,
-                                      obstacle_penalty=OBSTACLE_PENALTY)
+        plan = self._route_plan(node, dest, me, nodes_by_id, avoid=avoid, obstacles=obstacles)
+        if plan.frames == float("inf"):
+            plan = self._route_plan(node, dest, me, nodes_by_id, obstacles=obstacles)
+        if plan.first_claim:
+            return [M.claim_resource(node, plan.first_claim)]
+        nxt = plan.next_hop
         if not nxt:
             return []
-        if nodes_by_id.get(nxt, {}).get("hasObstacle") or nxt in self._guard_blocked:
+        if nxt in self._guard_blocked:
+            return [M.wait()]
+        if nodes_by_id.get(nxt, {}).get("hasObstacle"):
+            if self._is_opening_first_hop_obstacle(node, nxt, nodes_by_id, me):
+                return self._opening_obstacle_action(node, nxt, tasks or [])
             # NO FORCED_PASS anymore (it chained into FORCED_PASS_REPEAT and stalled us).
             # A squad clears the obstacle in parallel (_squad_action); we just wait a
             # frame for it, then MOVE straight through.
@@ -378,16 +407,213 @@ class Strategy:
         return None
 
     # ---- delivery-time safety ----
-    def _must_deliver(self, node, me, round_no) -> bool:
-        need = self._frames_to_deliver(node, me)
+    def _must_deliver(self, node, me, round_no, nodes_by_id) -> bool:
+        need = self._frames_to_deliver(node, me, nodes_by_id)
         return round_no + need + DELIVER_MARGIN >= TOTAL_ROUNDS
 
-    def _frames_to_deliver(self, node, me) -> float:
-        to_gate = 0 if me.get("verified") else self.graph.path_frames(node, self.gate_node)
+    def _frames_to_deliver(self, node, me, nodes_by_id) -> float:
+        to_gate = 0 if me.get("verified") else self._route_frames(node, self.gate_node, me, nodes_by_id)
         verify = 0 if me.get("verified") else VERIFY_FRAMES
         start = self.gate_node if not me.get("verified") else node
-        to_term = self.graph.path_frames(start, self.terminal_node)
+        to_term = self._route_frames(start, self.terminal_node, me, nodes_by_id)
         return to_gate + verify + to_term + DELIVER_FRAMES
+
+    # ---- context-aware routing ----
+    def _route_frames(self, src, dst, actor, nodes_by_id, avoid=None, obstacles=None) -> float:
+        return self._route_plan(src, dst, actor, nodes_by_id, avoid, obstacles).frames
+
+    def _route_plan(
+        self, src, dst, actor, nodes_by_id, avoid=None, obstacles=None
+    ) -> RoutePlan:
+        """Fewest-frame route with actor-local horse state and our opening obstacle rule.
+
+        Obstacles after the first hop are treated as zero-cost for our route model,
+        because the squad path pre-clear runs in parallel. The one special case is the
+        match opening at S01: if the very first hop is obstructed, the main car spends
+        the 6-frame clear/T04 window instead of dispatching squad.
+        """
+        if not src:
+            return RoutePlan(float("inf"), [])
+        if src == dst:
+            return RoutePlan(0, [src])
+
+        avoid = avoid or set()
+        obstacles = obstacles or {
+            nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")
+        }
+        active, active_left, held = self._initial_horse_state(actor)
+        start_state = (src, active, active_left, held, tuple(), False)
+        dist: dict[tuple, int] = {start_state: 0}
+        prev: dict[tuple, tuple] = {}
+        pq: list[tuple[int, int, tuple]] = [(0, 0, start_state)]
+        seq = 1
+        best: Optional[tuple] = None
+
+        while pq:
+            d, _seq, state = heapq.heappop(pq)
+            if d > dist.get(state, math.inf):
+                continue
+            u, horse, horse_left, held_horse, claimed, moved = state
+            if u == dst:
+                best = state
+                break
+
+            claim = self._claimable_horse(u, nodes_by_id, claimed, horse, held_horse)
+            if claim:
+                claimed_key = self._claim_key(u, claim)
+                new_claimed = tuple(sorted((*claimed, claimed_key)))
+                ns = (u, horse, horse_left, claim, new_claimed, moved)
+                nd = d + self._resource_claim_frames(u, claim)
+                if nd < dist.get(ns, math.inf):
+                    dist[ns] = nd
+                    prev[ns] = state
+                    heapq.heappush(pq, (nd, seq, ns))
+                    seq += 1
+
+            for v, rt, dd in self.graph.adj.get(u, []):
+                if v in avoid:
+                    continue
+                edge_frames, nh, nh_left, nheld = self._horse_edge_frames(
+                    rt, dd, horse, horse_left, held_horse
+                )
+                nd = d + edge_frames + self.graph.process_rounds.get(v, 0)
+                if (not moved and self._opening_first_hop_applies(actor, src, u)
+                        and v in obstacles):
+                    nd += START_OBSTACLE_CLEAR_FRAMES
+                ns = (v, nh, nh_left, nheld, claimed, True)
+                if nd < dist.get(ns, math.inf):
+                    dist[ns] = nd
+                    prev[ns] = state
+                    heapq.heappush(pq, (nd, seq, ns))
+                    seq += 1
+
+        if best is None:
+            return RoutePlan(float("inf"), [])
+
+        states = [best]
+        while states[-1] != start_state:
+            states.append(prev[states[-1]])
+        states.reverse()
+
+        path = [states[0][0]]
+        for st in states[1:]:
+            if st[0] != path[-1]:
+                path.append(st[0])
+
+        first_claim = None
+        if len(states) >= 2 and states[0][0] == states[1][0]:
+            before_claimed = set(states[0][4])
+            after_claimed = set(states[1][4])
+            added = after_claimed - before_claimed
+            if added:
+                first_claim = next(iter(added)).split(":", 1)[1]
+
+        return RoutePlan(dist[best], path, first_claim)
+
+    def _initial_horse_state(self, actor) -> tuple[Optional[str], int, Optional[str]]:
+        active = self._active_horse(actor)
+        held = self._held_horse(actor)
+        if active:
+            return active[0], active[1], held
+        return None, 0, held
+
+    def _active_horse(self, actor) -> Optional[tuple[str, int]]:
+        best = None
+        for b in actor.get("buffs") or []:
+            t = b.get("type")
+            if t not in HORSE_MOVE_PER_FRAME:
+                continue
+            left = int(b.get("remainingRound", 0) or 0)
+            if left <= 0:
+                continue
+            rank = (HORSE_MOVE_PER_FRAME[t], left)
+            if best is None or rank > best[0]:
+                best = (rank, t, left)
+        if best is None:
+            return None
+        return best[1], best[2]
+
+    def _claimable_horse(self, node, nodes_by_id, claimed, active, held) -> Optional[str]:
+        if active or held:
+            return None
+        stock = nodes_by_id.get(node, {}).get("resourceStock") or {}
+        for h in HORSES:
+            if stock.get(h, 0) > 0 and self._claim_key(node, h) not in claimed:
+                return h
+        return None
+
+    @staticmethod
+    def _claim_key(node, horse) -> str:
+        return f"{node}:{horse}"
+
+    def _resource_claim_frames(self, node, resource_type) -> int:
+        return self._resource_claim_rounds.get((node, resource_type), RESOURCE_CLAIM_FRAMES)
+
+    def _horse_edge_frames(self, route_type, distance, horse, horse_left, held):
+        if (not horse or horse_left <= 0) and held:
+            horse = held
+            horse_left = HORSE_DURATION[held]
+            held = None
+        required = math.ceil(distance * ROUTE_COST_COEF.get(route_type, 1500))
+        if not horse or horse_left <= 0:
+            return max(1, math.ceil(required / BASE_MOVE_PER_FRAME)), None, 0, held
+
+        speed = HORSE_MOVE_PER_FRAME[horse]
+        boosted = horse_left * speed
+        if required <= boosted:
+            frames = max(1, math.ceil(required / speed))
+            left = horse_left - frames
+            if left > 0:
+                return frames, horse, left, held
+            return frames, None, 0, held
+
+        frames = horse_left + math.ceil((required - boosted) / BASE_MOVE_PER_FRAME)
+        return frames, None, 0, held
+
+    def _opening_first_hop_applies(self, actor, route_src, current_node) -> bool:
+        if route_src != self.start_node or current_node != self.start_node:
+            return False
+        if actor.get("playerId") == self.player_id:
+            return not self._left_start
+        return not self._opp_left_start
+
+    def _is_opening_first_hop_obstacle(self, node, nxt, nodes_by_id, actor) -> bool:
+        return (
+            nxt
+            and nodes_by_id.get(nxt, {}).get("hasObstacle")
+            and self._opening_first_hop_applies(actor, node, node)
+        )
+
+    def _opening_obstacle_action(self, node, target, tasks):
+        task = self._clear_task_for(node, target, tasks)
+        if task:
+            return [M.claim_task(task["taskId"])]
+        return [M.clear(target)]
+
+    def _clear_task_for(self, node, target, tasks):
+        if not self._adjacent_or_same(node, target):
+            return None
+        for t in tasks:
+            if t.get("nodeId") != target:
+                continue
+            if t.get("processType") != "CLEAR_OBSTACLE" and t.get("taskTemplateId") != "T04":
+                continue
+            if not t.get("active") or t.get("completed") or t.get("failed") or t.get("ownerPlayerId"):
+                continue
+            if int(t.get("processRound", START_OBSTACLE_CLEAR_FRAMES)) <= START_OBSTACLE_CLEAR_FRAMES:
+                return t
+        return None
+
+    def _adjacent_or_same(self, node, target) -> bool:
+        if node == target:
+            return True
+        return any(v == target for v, _rt, _dd in self.graph.adj.get(node, []))
+
+    def _update_start_flags(self, me, opp) -> None:
+        if me.get("routeEdgeId") or me.get("currentNodeId") != self.start_node:
+            self._left_start = True
+        if opp and (opp.get("routeEdgeId") or opp.get("currentNodeId") != self.start_node):
+            self._opp_left_start = True
 
     # ---- helpers ----
     def _card(self, me, contests, round_no):
