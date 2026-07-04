@@ -163,9 +163,10 @@ class BlockadeTests(unittest.TestCase):
 
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S03"}], act)
 
-    def test_farm_after_freeze_ignores_opponent_proximity(self) -> None:
-        # the freeze is placed; a long task next to the escaping/attacking
-        # opponent is still farmed -- we no longer manage guard windows
+    def test_local_wait_overrides_farm_when_opponent_parks_next_door(self) -> None:
+        # The freeze is placed, but the global local-ambush rule still wins:
+        # when the opponent waits one hop behind us, we wait for their departure
+        # instead of taking a local task.
         s = _line_strategy(gate="S04")
         s._first_guard_node = "S02"
         nodes = [
@@ -184,11 +185,11 @@ class BlockadeTests(unittest.TestCase):
 
         act = s.decide(_inq(70, _me("S03"), _opp("S02"), nodes=nodes, tasks=tasks))
 
-        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S03"}], act)
+        self.assertEqual([{"action": "WAIT"}], act)
 
-    def test_never_reguards_after_freeze_active(self) -> None:
-        # opponent commits toward the next choke -- old rolling blockade would
-        # SET_GUARD S03; fire-and-forget keeps walking instead
+    def test_local_ambush_reguards_after_freeze_when_opponent_commits_to_us(self) -> None:
+        # The old fire-and-forget plan would keep walking here; the always-on
+        # local ambush must arm our current node if the opponent commits into it.
         s = _line_strategy(gate="S04")
         s._first_guard_node = "S02"
         nodes = [
@@ -202,8 +203,35 @@ class BlockadeTests(unittest.TestCase):
 
         act = s.decide(_inq(80, _me("S03", goodFruit=20), opp, nodes=nodes))
 
-        self.assertNotIn("SET_GUARD", [a["action"] for a in act])
-        self.assertEqual({"action": "MOVE", "targetNodeId": "S04"}, act[0])
+        self.assertEqual([{"action": "SET_GUARD", "targetNodeId": "S03", "extraGoodFruit": 2}], act)
+
+    def test_local_ambush_resumes_route_when_adjacent_opponent_moves_elsewhere(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S04", "S04"
+        s._my_team = "RED"
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "B1", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "B1", "toNodeId": "S03", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        s.chokes = s.graph.choke_points("S01", "S04")
+        nodes = [
+            {"nodeId": n, "hasObstacle": False, "resourceStock": {}}
+            for n in ("S01", "S02", "S03", "S04", "B1")
+        ]
+        opp = _opp("S01", state="MOVING", routeEdgeId="E_SIDE",
+                   nextNodeId="B1", edgeProgressPermille=0)
+
+        act = s.decide(_inq(80, _me("S02", goodFruit=20), opp, nodes=nodes))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
     def test_no_node_action_while_mid_edge(self) -> None:
         s = _line_strategy(gate="S04")
@@ -247,7 +275,10 @@ class BlockadeTests(unittest.TestCase):
         self.assertEqual(82, s._eta_to_node(opp, "S10", nodes_by_id, 183, {}))
         act = s.decide(_inq(183, _me("S08"), opp, nodes=nodes, tasks=[task]))
 
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "S10"}], act)
+        self.assertEqual(
+            [{"action": "SET_GUARD", "targetNodeId": "S08", "extraGoodFruit": 2}],
+            act,
+        )
 
     def test_must_deliver_overrides_blocking_near_deadline(self) -> None:
         s = _line_strategy(gate="S04")
@@ -263,12 +294,12 @@ class BlockadeTests(unittest.TestCase):
         self.assertFalse(s._delivery_abandoned)
         self.assertEqual([{"action": "WAIT"}], act)
 
-    def test_returns_to_buffer_once_opponent_fastest_finish_is_too_late(self) -> None:
+    def test_local_wait_still_overrides_buffer_when_opponent_waits_next_door(self) -> None:
         s = _line_strategy(gate="S04")
-        # By round 540 the opponent's optimistic fastest delivery is already past
-        # the deadline, so the normal delivery buffer should take over again.
+        # Even when the normal delivery buffer would let us leave, an adjacent
+        # waiting opponent keeps the highest-priority ambush armed.
         act = s.decide(_inq(540, _me("S02"), _opp("S01")))
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
+        self.assertEqual([{"action": "WAIT"}], act)
 
     def test_delivers_when_verified_at_terminal(self) -> None:
         s = _line_strategy(gate="S04")
@@ -455,8 +486,8 @@ def _spaced_line_strategy(gate="S04"):
 
 
 class PerOpRaceMarginTests(unittest.TestCase):
-    """Pre-choke ops are allowed iff the lead survives: opp_eta - our_eta >
-    op_frames + RACE_SAFETY."""
+    """Pre-choke ops are allowed iff the lead survives, unless the higher-priority
+    adjacent-wait ambush is active."""
 
     ICE_NODES = [
         {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
@@ -468,10 +499,14 @@ class PerOpRaceMarginTests(unittest.TestCase):
 
     def test_camped_claims_ice_box_when_lead_survives_it(self) -> None:
         s = _spaced_line_strategy(gate="S04")
-        # camped on the first choke S02; opponent parked at S01 (42 frames out)
-        act = s.decide(_inq(50, _me("S02"), _opp("S01"), nodes=self.ICE_NODES))
+        # Camped on S03; opponent parked two hops back, so local adjacent-wait
+        # does not preempt the old spare-time calculation.
+        nodes = [dict(n) for n in self.ICE_NODES]
+        nodes[2] = dict(nodes[2])
+        nodes[2]["resourceStock"] = {"ICE_BOX": 1}
+        act = s.decide(_inq(50, _me("S03"), _opp("S01"), nodes=nodes))
         self.assertEqual(
-            [{"action": "CLAIM_RESOURCE", "targetNodeId": "S02",
+            [{"action": "CLAIM_RESOURCE", "targetNodeId": "S03",
               "resourceType": "ICE_BOX"}], act)
 
     def test_camped_skips_ice_box_when_race_is_tight(self) -> None:
@@ -483,7 +518,7 @@ class PerOpRaceMarginTests(unittest.TestCase):
     def test_camped_short_task_claims_long_task_waits(self) -> None:
         def task(process_round):
             return [{
-                "taskId": "T_S02", "nodeId": "S02", "taskTemplateId": "T02",
+                "taskId": "T_S03", "nodeId": "S03", "taskTemplateId": "T02",
                 "processType": "STATION_PROCESS", "processRound": process_round,
                 "score": 30, "active": True, "completed": False, "failed": False,
                 "ownerPlayerId": 0, "expireRound": 500,
@@ -491,14 +526,14 @@ class PerOpRaceMarginTests(unittest.TestCase):
         nodes = [{"nodeId": n, "hasObstacle": False, "resourceStock": {}}
                  for n in ("S01", "S02", "S03", "S04", "S05")]
 
-        # lead 42-5=37; short op 1+3=4 -> 37 > 4+8, claim
+        # Opponent is two hops back; short op 3 -> lead survives, claim.
         s = _spaced_line_strategy(gate="S04")
-        act = s.decide(_inq(50, _me("S02"), _opp("S01"), nodes=nodes, tasks=task(3)))
-        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S02"}], act)
+        act = s.decide(_inq(50, _me("S03"), _opp("S01"), nodes=nodes, tasks=task(3)))
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S03"}], act)
 
-        # long op 1+30=31 -> 37 <= 31+8, wait for the freeze instead
+        # Long op loses the race, so wait for the freeze instead.
         s = _spaced_line_strategy(gate="S04")
-        act = s.decide(_inq(50, _me("S02"), _opp("S01"), nodes=nodes, tasks=task(30)))
+        act = s.decide(_inq(50, _me("S03"), _opp("S01"), nodes=nodes, tasks=task(80)))
         self.assertEqual([{"action": "WAIT"}], act)
 
 

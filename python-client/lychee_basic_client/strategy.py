@@ -204,6 +204,15 @@ class Strategy:
         # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
         squad = self._squad_action(node, me, opp, tasks, nodes_by_id, round_no, weather)
 
+        # Highest-priority local ambush: whenever we are already standing on a
+        # node the opponent is about to enter, arm it; if they are parked one hop
+        # away, hold our action until they commit or choose another direction.
+        local_ambush = self._local_ambush_action(
+            me, opp, node, state, round_no, nodes_by_id, weather
+        )
+        if local_ambush:
+            return self._ordered_actions(local_ambush, squad, card)
+
         # Endgame gate ambush: the gate is the one true cut-vertex before the
         # terminal (palace stations have branch bypasses), so while parked on it
         # -- pre-RUSH wait or post-verify -- freeze the opponent mid-edge the
@@ -487,6 +496,60 @@ class Strategy:
     def _we_hold(self, node, nodes_by_id) -> bool:
         g = nodes_by_id.get(node, {}).get("guard") or {}
         return bool(g.get("active") and g.get("ownerTeamId") == self._my_team and g.get("defense", 0) > 0)
+
+    def _local_ambush_action(self, me, opp, node, state, round_no, nodes_by_id, weather=None) -> list:
+        """Global interception rule: if we reached a node before the opponent and
+        they are coming in with enough setup time, SET_GUARD. If they are waiting
+        on an adjacent node, wait them out and let the next frame decide."""
+        if state in BUSY_STATES or not node:
+            return []
+        if me.get("routeEdgeId") or me.get("nextNodeId"):
+            return []
+        if node == self.terminal_node:
+            return []
+        if opp is None or opp.get("delivered") or opp.get("retired"):
+            return []
+        if opp.get("currentNodeId") == node and not opp.get("routeEdgeId"):
+            return []
+        if self._guard_active(node, nodes_by_id):
+            return []
+        if self._guard_pending(node, round_no):
+            return [M.wait()]
+
+        if self._freeze_window_open(opp, node, round_no, weather):
+            if me.get("goodFruit", 0) <= GUARD_KEEP_FRUIT:
+                return []
+            self._guarded_round[node] = round_no
+            return [M.set_guard(node, extra_good_fruit=self._local_guard_fruit(node, me))]
+
+        if self._opponent_waiting_adjacent_to(node, opp):
+            return [M.wait()]
+        return []
+
+    def _guard_active(self, node, nodes_by_id) -> bool:
+        guard = (nodes_by_id.get(node) or {}).get("guard") or {}
+        return bool(guard.get("active") and guard.get("defense", 0) > 0)
+
+    def _guard_pending(self, node, round_no) -> bool:
+        placed = self._guarded_round.get(node)
+        return placed is not None and round_no - placed < GUARD_SETUP_FRAMES
+
+    def _local_guard_fruit(self, node, me) -> int:
+        if node == self.gate_node:
+            return min(GATE_GUARD_EXTRA_FRUIT, self._guard_fruit(me))
+        return self._guard_fruit(me)
+
+    def _opponent_waiting_adjacent_to(self, node, opp) -> bool:
+        if opp is None or opp.get("routeEdgeId") or opp.get("nextNodeId"):
+            return False
+        if opp.get("state") not in ("IDLE", "WAITING"):
+            return False
+        opp_node = opp.get("currentNodeId")
+        return bool(
+            opp_node
+            and self._edge_info(opp_node, node) is not None
+            and self._ahead_of(node, opp)
+        )
 
     # ---- guard reinforcement ----
     def _account_enemy_weakens(self, events, nodes_by_id) -> None:
