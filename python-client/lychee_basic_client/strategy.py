@@ -45,7 +45,12 @@ HORSES = ("FAST_HORSE", "SHORT_HORSE")   # move-buff resources (fast first)
 OBSTACLE_PENALTY = 0         # routing cost of crossing an obstacle node: obstacles are
                              # squad-cleared in parallel now (near-free), so don't avoid
                              # them -- take the true shortest route (may use shortcuts)
-XIAN_GONG_FLOOR = 6          # keep at least this many good fruit (guards + delivery)
+XIAN_GONG_FLOOR = 1          # play XIAN_GONG whenever we can legally afford it (cost is
+                             # 1 good fruit + freshness>=80): "能出就都出"; keep only a
+                             # 1-fruit token so a tap never leaves us at zero good fruit
+PROCESS_STUCK_LIMIT = 14     # if a process won't complete after this many tries (a
+                             # co-occupation contest keeps blocking it), abandon it and
+                             # move on -- delivery must never be held hostage to a process
 
 # main-car states where the engine is running our action; don't interrupt
 BUSY_STATES = {"PROCESSING", "VERIFYING", "FORCED_PASSING", "RESTING", "CONTESTING"}
@@ -77,6 +82,8 @@ class Strategy:
         self._round = 0
         self._opp = None
         self._tasks: list = []
+        self._stuck_node = None
+        self._stuck_tries = 0
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -420,12 +427,21 @@ class Strategy:
         # so grab a task here first IF we have genuine spare (task costs its own serial
         # read-bar -- never free -- so it's gated the same as anywhere else). During the
         # tight race to the choke _spare_for_task is False -> we just process and rush.
+        # ANTI-STUCK (goal #1: we MUST deliver): if the process won't complete after
+        # many tries (e.g. a co-occupation contest keeps blocking it), abandon it and
+        # move on -- finishing the delivery outranks a process bonus.
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
-            if self._spare_for_task(node, me, self._opp, self._round, nodes_by_id):
-                t = self._free_task_here(node, self._tasks, me)
-                if t:
-                    return t
-            return [M.process(node)]
+            if node != self._stuck_node:
+                self._stuck_node, self._stuck_tries = node, 0
+            self._stuck_tries += 1
+            if self._stuck_tries > PROCESS_STUCK_LIMIT:
+                self.processed.add(node)  # give up: keep moving so we still deliver
+            else:
+                if self._spare_for_task(node, me, self._opp, self._round, nodes_by_id):
+                    t = self._free_task_here(node, self._tasks, me)
+                    if t:
+                        return t
+                return [M.process(node)]
         # grab / mount a horse to win the race to the choke (and deny it to the
         # opponent). A move-buff means every following edge is faster.
         horse = self._horse_action(me, node, nodes_by_id)

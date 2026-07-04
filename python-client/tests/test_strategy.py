@@ -116,7 +116,7 @@ class OpeningContestTests(unittest.TestCase):
 
     def test_good_fruit_floor_stops_xian_gong(self) -> None:
         s = _line_strategy()
-        me = _me("S02", freshness=95, goodFruit=3)  # below the floor
+        me = _me("S02", freshness=95, goodFruit=1)  # can't afford (keep the 1-fruit token)
         act = s._card(me, [self._contest()], 50)
         self.assertNotEqual("XIAN_GONG", act[0]["card"])  # protect delivery/guard fruit
 
