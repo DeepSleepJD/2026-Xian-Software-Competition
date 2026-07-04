@@ -5,6 +5,330 @@ from lychee_basic_client.strategy import MovementStrategy
 
 
 class MovementStrategyTests(unittest.TestCase):
+    def test_start_update_identifies_choke_points_without_changing_action(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"startNodeId": "S01", "gateNodeId": "S05", "terminalNodeIds": ["S06"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False},
+                    {"nodeId": "S04", "hasObstacle": False},
+                    {"nodeId": "S05", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S06", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E04", "fromNodeId": "S04", "toNodeId": "S05", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E05", "fromNodeId": "S05", "toNodeId": "S06", "routeType": "ROAD", "distance": 10},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 1,
+                "phase": "NORMAL",
+                "players": [{"playerId": 1001, "state": "IDLE", "currentNodeId": "S01", "verified": False}],
+            }
+        )
+
+        self.assertEqual(["S04", "S03", "S02"], strategy._choke_node_ids)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S02"}], action)
+
+    def test_unverified_player_rushes_choke_before_claiming_current_task(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"startNodeId": "S01", "gateNodeId": "S04", "terminalNodeIds": ["S05"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False},
+                    {"nodeId": "S04", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S05", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E04", "fromNodeId": "S04", "toNodeId": "S05", "routeType": "ROAD", "distance": 10},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 100,
+                "phase": "NORMAL",
+                "tasks": [
+                    {"taskId": "T_001", "nodeId": "S01", "active": True, "completed": False, "failed": False}
+                ],
+                "players": [{"playerId": 1001, "state": "IDLE", "currentNodeId": "S01", "verified": False}],
+            }
+        )
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S02"}], action)
+
+    def test_unverified_player_waits_at_choke_without_setting_guard(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"startNodeId": "S01", "gateNodeId": "S04", "terminalNodeIds": ["S05"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False},
+                    {"nodeId": "S04", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S05", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E04", "fromNodeId": "S04", "toNodeId": "S05", "routeType": "ROAD", "distance": 10},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 100,
+                "phase": "NORMAL",
+                "tasks": [
+                    {"taskId": "T_001", "nodeId": "S02", "active": True, "completed": False, "failed": False}
+                ],
+                "players": [{"playerId": 1001, "state": "IDLE", "currentNodeId": "S02", "verified": False}],
+            }
+        )
+
+        self.assertEqual([], action)
+
+    def test_unverified_player_sets_guard_when_opponent_commits_to_choke(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"startNodeId": "S01", "gateNodeId": "S04", "terminalNodeIds": ["S05"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False},
+                    {"nodeId": "S04", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S05", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E04", "fromNodeId": "S04", "toNodeId": "S05", "routeType": "ROAD", "distance": 10},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 100,
+                "phase": "NORMAL",
+                "players": [
+                    {
+                        "playerId": 1001,
+                        "teamId": "RED",
+                        "state": "IDLE",
+                        "currentNodeId": "S02",
+                        "verified": False,
+                        "goodFruit": 20,
+                    },
+                    {
+                        "playerId": 2002,
+                        "teamId": "BLUE",
+                        "state": "MOVING",
+                        "currentNodeId": "S01",
+                        "nextNodeId": "S02",
+                        "edgeProgressPermille": 0,
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual([{"action": "SET_GUARD", "targetNodeId": "S02", "extraGoodFruit": 2}], action)
+
+    def test_window_card_does_not_interrupt_precise_choke_guard(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"startNodeId": "S01", "gateNodeId": "S04", "terminalNodeIds": ["S05"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False},
+                    {"nodeId": "S04", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S05", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E04", "fromNodeId": "S04", "toNodeId": "S05", "routeType": "ROAD", "distance": 10},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 100,
+                "phase": "NORMAL",
+                "contests": [
+                    {
+                        "contestId": "C_002",
+                        "contestType": "PASS",
+                        "redPlayerId": 1001,
+                        "bluePlayerId": 2002,
+                        "resolved": False,
+                        "cards": {},
+                    }
+                ],
+                "players": [
+                    {
+                        "playerId": 1001,
+                        "teamId": "RED",
+                        "state": "IDLE",
+                        "currentNodeId": "S02",
+                        "verified": False,
+                        "goodFruit": 20,
+                        "freshness": 85,
+                    },
+                    {
+                        "playerId": 2002,
+                        "teamId": "BLUE",
+                        "state": "MOVING",
+                        "currentNodeId": "S01",
+                        "nextNodeId": "S02",
+                        "edgeProgressPermille": 0,
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(
+            [
+                {"action": "WINDOW_CARD", "contestId": "C_002", "card": "XIAN_GONG"},
+                {"action": "SET_GUARD", "targetNodeId": "S02", "extraGoodFruit": 2},
+            ],
+            action,
+        )
+
+    def test_unverified_player_does_not_guard_before_opponent_commits(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"startNodeId": "S01", "gateNodeId": "S04", "terminalNodeIds": ["S05"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False},
+                    {"nodeId": "S04", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S05", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E04", "fromNodeId": "S04", "toNodeId": "S05", "routeType": "ROAD", "distance": 10},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 100,
+                "phase": "NORMAL",
+                "players": [
+                    {"playerId": 1001, "teamId": "RED", "state": "IDLE", "currentNodeId": "S02", "verified": False, "goodFruit": 20},
+                    {"playerId": 2002, "teamId": "BLUE", "state": "IDLE", "currentNodeId": "S01"},
+                ],
+            }
+        )
+
+        self.assertEqual([], action)
+
+    def test_unverified_player_does_not_guard_choke_opponent_already_passed(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"startNodeId": "S01", "gateNodeId": "S04", "terminalNodeIds": ["S05"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False},
+                    {"nodeId": "S04", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S05", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E04", "fromNodeId": "S04", "toNodeId": "S05", "routeType": "ROAD", "distance": 10},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 100,
+                "phase": "NORMAL",
+                "players": [
+                    {"playerId": 1001, "teamId": "RED", "state": "IDLE", "currentNodeId": "S02", "verified": False, "goodFruit": 20},
+                    {"playerId": 2002, "teamId": "BLUE", "state": "IDLE", "currentNodeId": "S03"},
+                ],
+            }
+        )
+
+        self.assertEqual([], action)
+
+    def test_unverified_player_does_not_guard_when_opponent_is_too_close(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"startNodeId": "S01", "gateNodeId": "S04", "terminalNodeIds": ["S05"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False},
+                    {"nodeId": "S04", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S05", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E04", "fromNodeId": "S04", "toNodeId": "S05", "routeType": "ROAD", "distance": 10},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 100,
+                "phase": "NORMAL",
+                "players": [
+                    {"playerId": 1001, "teamId": "RED", "state": "IDLE", "currentNodeId": "S02", "verified": False, "goodFruit": 20},
+                    {
+                        "playerId": 2002,
+                        "teamId": "BLUE",
+                        "state": "MOVING",
+                        "currentNodeId": "S01",
+                        "nextNodeId": "S02",
+                        "edgeProgressPermille": 900,
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual([], action)
+
     def test_idle_player_moves_toward_terminal_instead_of_first_neighbor(self) -> None:
         strategy = MovementStrategy(player_id=1001)
         strategy.update_start(
@@ -206,6 +530,63 @@ class MovementStrategyTests(unittest.TestCase):
         )
 
         self.assertEqual([{"action": "WINDOW_CARD", "contestId": "C_001", "card": "BING_ZHENG"}], action)
+
+    def test_window_card_does_not_interrupt_deadline_delivery_move(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"gateNodeId": "S03", "terminalNodeIds": ["S04"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S04", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 590,
+                "phase": "RUSH",
+                "contests": [
+                    {
+                        "contestId": "C_003",
+                        "contestType": "TASK",
+                        "redPlayerId": 1001,
+                        "bluePlayerId": 2002,
+                        "resolved": False,
+                        "cards": {},
+                    }
+                ],
+                "tasks": [
+                    {"taskId": "T_001", "nodeId": "S01", "active": True, "completed": False, "failed": False}
+                ],
+                "players": [
+                    {
+                        "playerId": 1001,
+                        "state": "IDLE",
+                        "currentNodeId": "S01",
+                        "verified": False,
+                        "goodFruit": 20,
+                        "freshness": 85,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(
+            [
+                {"action": "WINDOW_CARD", "contestId": "C_003", "card": "XIAN_GONG"},
+                {"action": "MOVE", "targetNodeId": "S02"},
+            ],
+            action,
+        )
 
     def test_task_node_can_become_temporary_goal_when_detour_is_small(self) -> None:
         strategy = MovementStrategy(player_id=1001)
@@ -530,6 +911,106 @@ class MovementStrategyTests(unittest.TestCase):
             action,
         )
 
+    def test_squad_does_not_clear_obstacle_off_current_route(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"terminalNodeIds": ["S04"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": True},
+                    {"nodeId": "S04", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S01", "toNodeId": "S03", "routeType": "ROAD", "distance": 50},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 20,
+                "phase": "NORMAL",
+                "players": [
+                    {"playerId": 1001, "state": "IDLE", "currentNodeId": "S01", "verified": True, "squadAvailable": 8}
+                ],
+            }
+        )
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S02"}], action)
+
+    def test_squad_does_not_weaken_enemy_guard_off_current_route(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"terminalNodeIds": ["S04"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False, "guard": {"ownerTeamId": "BLUE", "defense": 4}},
+                    {"nodeId": "S04", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S01", "toNodeId": "S03", "routeType": "ROAD", "distance": 50},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 20,
+                "phase": "NORMAL",
+                "players": [
+                    {
+                        "playerId": 1001,
+                        "teamId": "RED",
+                        "state": "IDLE",
+                        "currentNodeId": "S01",
+                        "verified": True,
+                        "squadAvailable": 8,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S02"}], action)
+
+    def test_squad_does_not_scout_process_node_off_current_route(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"terminalNodeIds": ["S04"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False, "processRound": 6, "processType": "TRANSFER"},
+                    {"nodeId": "S04", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S01", "toNodeId": "S03", "routeType": "ROAD", "distance": 50},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 20,
+                "phase": "NORMAL",
+                "players": [
+                    {"playerId": 1001, "state": "IDLE", "currentNodeId": "S01", "verified": True, "squadAvailable": 1}
+                ],
+            }
+        )
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S02"}], action)
+
     def test_gate_waits_until_rush_then_verifies(self) -> None:
         strategy = MovementStrategy(player_id=1001)
         strategy.update_start(
@@ -757,6 +1238,75 @@ class MovementStrategyTests(unittest.TestCase):
         )
 
         self.assertEqual([], action)
+
+    def test_deadline_delivery_moves_to_gate_instead_of_claiming_current_task(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"gateNodeId": "S03", "terminalNodeIds": ["S04"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False, "processType": "VERIFY"},
+                    {"nodeId": "S04", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E03", "fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD", "distance": 10},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 590,
+                "phase": "RUSH",
+                "tasks": [
+                    {"taskId": "T_001", "nodeId": "S01", "active": True, "completed": False, "failed": False}
+                ],
+                "players": [
+                    {"playerId": 1001, "state": "IDLE", "currentNodeId": "S01", "verified": False}
+                ],
+            }
+        )
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S02"}], action)
+
+    def test_deadline_delivery_moves_to_terminal_instead_of_claiming_resource(self) -> None:
+        strategy = MovementStrategy(player_id=1001)
+        strategy.update_start(
+            {
+                "map": {"gameplay": {"roles": {"terminalNodeIds": ["S03"]}}},
+                "nodes": [
+                    {"nodeId": "S01", "hasObstacle": False, "resourceStock": {"SHORT_HORSE": 1}},
+                    {"nodeId": "S02", "hasObstacle": False},
+                    {"nodeId": "S03", "hasObstacle": False, "terminal": True},
+                ],
+                "edges": [
+                    {"edgeId": "E01", "fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD", "distance": 10},
+                    {"edgeId": "E02", "fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD", "distance": 10},
+                ],
+            }
+        )
+
+        action = strategy.choose_action(
+            {
+                "round": 590,
+                "phase": "RUSH",
+                "players": [
+                    {
+                        "playerId": 1001,
+                        "state": "IDLE",
+                        "currentNodeId": "S01",
+                        "verified": True,
+                        "resources": {"SHORT_HORSE": 0},
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S02"}], action)
 
     def test_idle_player_moves_to_unblocked_neighbor(self) -> None:
         strategy = MovementStrategy(player_id=1001)

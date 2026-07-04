@@ -1,6 +1,29 @@
 import heapq
+import math
 from typing import Any, Optional
 
+from .graph import Graph
+
+
+TOTAL_ROUNDS = 600
+DELIVERY_MARGIN_ROUNDS = 60
+VERIFY_GATE_ROUNDS = 6
+DELIVER_ROUNDS = 2
+MOVE_COST_PER_ROUND = 1000
+GUARD_KEEP_GOOD_FRUIT = 6
+GUARD_SETUP_ROUNDS = 5
+GUARD_FREEZE_SAFETY_ROUNDS = 2
+WINDOW_CARD_GOOD_FRUIT_FLOOR = GUARD_KEEP_GOOD_FRUIT
+HIGH_VALUE_WINDOW_PRIORITY = 90
+
+WINDOW_CONTEST_PRIORITY = {
+    "GATE": 100,
+    "PASS": 90,
+    "OBSTACLE": 40,
+    "TASK": 30,
+    "DOCK": 20,
+    "RESOURCE": 15,
+}
 
 ROUTE_COST = {
     "ROAD": 1380,
@@ -19,12 +42,17 @@ class MovementStrategy:
         self._last_current_node_id: Optional[str] = None
         self._previous_node_id: Optional[str] = None
         self._processed_nodes: set[str] = set()
+        self._graph = Graph()
+        self._start_node_id: Optional[str] = None
         self._gate_node_id: Optional[str] = None
         self._terminal_node_ids: set[str] = set()
+        self._choke_node_ids: list[str] = []
+        self._guarded_choke_node_ids: set[str] = set()
         self._claimed_resource_keys: set[str] = set()
         self._used_resource_types: set[str] = set()
         self._claimed_task_ids: set[str] = set()
         self._squad_order_keys: set[str] = set()
+        self._played_window_keys: set[tuple[str, int]] = set()
 
     def update_start(self, data: dict[str, Any]) -> None:
         self._update_map(data)
@@ -41,10 +69,6 @@ class MovementStrategy:
             self._remember_current_node(current_node_id)
         self._remember_process_events(data)
 
-        window_action = self._window_card_action(data, player)
-        if window_action:
-            return [window_action]
-
         waiting_action = self._waiting_resume_action(player)
         if waiting_action:
             return self._with_squad_action(data, player, current_node_id, [waiting_action])
@@ -53,7 +77,7 @@ class MovementStrategy:
             return self._with_squad_action(data, player, current_node_id, [])
 
         if self._can_deliver(player, current_node_id):
-            return [{"action": "DELIVER"}]
+            return self._with_window_action(data, player, [{"action": "DELIVER"}])
 
         if self._needs_gate_verification(data, player, current_node_id):
             return self._with_squad_action(data, player, current_node_id, [self._gate_verification_action(player, current_node_id)])
@@ -61,8 +85,16 @@ class MovementStrategy:
         if self._is_waiting_for_rush_at_gate(data, player, current_node_id):
             return self._with_squad_action(data, player, current_node_id, [])
 
+        deadline_action = self._deadline_delivery_action(data, player, current_node_id)
+        if deadline_action is not None:
+            return self._with_squad_action(data, player, current_node_id, deadline_action)
+
         if self._needs_processing(current_node_id):
             return self._with_squad_action(data, player, current_node_id, [{"action": "PROCESS", "targetNodeId": current_node_id}])
+
+        choke_action = self._choke_rush_action(data, player, current_node_id)
+        if choke_action is not None:
+            return self._with_squad_action(data, player, current_node_id, choke_action)
 
         task_action = self._task_action(data, current_node_id)
         if task_action:
@@ -91,6 +123,9 @@ class MovementStrategy:
         gameplay = self._gameplay(data)
         roles = gameplay.get("roles") if isinstance(gameplay, dict) else None
         if isinstance(roles, dict):
+            start_node_id = roles.get("startNodeId")
+            if isinstance(start_node_id, str):
+                self._start_node_id = start_node_id
             gate_node_id = roles.get("gateNodeId")
             if isinstance(gate_node_id, str):
                 self._gate_node_id = gate_node_id
@@ -101,6 +136,7 @@ class MovementStrategy:
         edges = data.get("edges")
         if isinstance(edges, list):
             self._edges = [edge for edge in edges if isinstance(edge, dict)]
+            self._graph.load_edges(self._edges)
 
         nodes = data.get("nodes")
         if isinstance(nodes, list):
@@ -112,6 +148,7 @@ class MovementStrategy:
                     self._nodes_by_id[node_id] = node
                     if node.get("terminal") is True:
                         self._terminal_node_ids.add(node_id)
+        self._refresh_choke_points()
 
     def _gameplay(self, data: dict[str, Any]) -> dict[str, Any]:
         map_data = data.get("map")
@@ -120,6 +157,13 @@ class MovementStrategy:
             if isinstance(gameplay, dict):
                 return gameplay
         return {}
+
+    def _refresh_choke_points(self) -> None:
+        start_node_id = self._start_node_id or "S01"
+        if not self._gate_node_id or not self._edges:
+            self._choke_node_ids = []
+            return
+        self._choke_node_ids = self._graph.choke_points(start_node_id, self._gate_node_id)
 
     def _find_player(self, players: Any) -> Optional[dict[str, Any]]:
         if not isinstance(players, list):
@@ -186,6 +230,186 @@ class MovementStrategy:
         if self._gate_node_id:
             return {self._gate_node_id}
         return set(self._terminal_node_ids)
+
+    def _deadline_delivery_action(
+        self, data: dict[str, Any], player: dict[str, Any], current_node_id: str
+    ) -> Optional[list[dict[str, Any]]]:
+        if not self._must_protect_delivery(data, player, current_node_id):
+            return None
+        if self._needs_processing(current_node_id):
+            return [{"action": "PROCESS", "targetNodeId": current_node_id}]
+
+        target_node_id = self._next_step_toward_delivery(player, current_node_id)
+        if not target_node_id:
+            return []
+        guard_action = self._guard_breakthrough_action(data, player, target_node_id)
+        if guard_action:
+            return [guard_action]
+        if self._has_obstacle(target_node_id):
+            t04_action = self._t04_obstacle_task_action(data, current_node_id, target_node_id)
+            if t04_action:
+                return [t04_action]
+            if self._active_t04_task_for_obstacle(data, target_node_id):
+                return []
+            return [{"action": "CLEAR", "targetNodeId": target_node_id}]
+        return [{"action": "MOVE", "targetNodeId": target_node_id}]
+
+    def _must_protect_delivery(self, data: dict[str, Any], player: dict[str, Any], current_node_id: str) -> bool:
+        round_no = data.get("round")
+        if not isinstance(round_no, int) or player.get("delivered") is True:
+            return False
+        remaining_rounds = self._estimated_delivery_rounds(player, current_node_id)
+        if remaining_rounds == math.inf:
+            return False
+        return round_no + remaining_rounds + DELIVERY_MARGIN_ROUNDS >= TOTAL_ROUNDS
+
+    def _estimated_delivery_rounds(self, player: dict[str, Any], current_node_id: str) -> float:
+        if player.get("verified") is True:
+            terminal_path = self._path_to_any_goal(current_node_id, set(self._terminal_node_ids), allow_obstacles=True, player=player)
+            if not terminal_path:
+                return math.inf
+            return self._path_rounds(terminal_path) + DELIVER_ROUNDS
+
+        if not self._gate_node_id:
+            return math.inf
+        gate_path = self._path_to_any_goal(current_node_id, {self._gate_node_id}, allow_obstacles=True, player=player)
+        if not gate_path:
+            return math.inf
+        gate_to_terminal = self._path_to_any_goal(self._gate_node_id, set(self._terminal_node_ids), allow_obstacles=True, player=player)
+        if not gate_to_terminal:
+            return math.inf
+        return self._path_rounds(gate_path) + VERIFY_GATE_ROUNDS + self._path_rounds(gate_to_terminal) + DELIVER_ROUNDS
+
+    def _next_step_toward_delivery(self, player: dict[str, Any], current_node_id: str) -> Optional[str]:
+        goals = self._delivery_goals(player)
+        if not goals:
+            return None
+        path = self._path_to_any_goal(current_node_id, goals, allow_obstacles=False, player=player)
+        if not path:
+            path = self._path_to_any_goal(current_node_id, goals, allow_obstacles=True, player=player)
+        if len(path) >= 2:
+            return path[1]
+        return None
+
+    def _choke_rush_action(
+        self, data: dict[str, Any], player: dict[str, Any], current_node_id: str
+    ) -> Optional[list[dict[str, Any]]]:
+        if player.get("verified") is True or not self._choke_node_ids:
+            return None
+        if current_node_id in self._choke_node_ids:
+            guard_action = self._guard_choke_action(data, player, current_node_id)
+            if guard_action:
+                return [guard_action]
+            return []
+
+        target_node_id = self._next_step_toward_choke(player, current_node_id)
+        if not target_node_id:
+            return None
+        guard_action = self._guard_breakthrough_action(data, player, target_node_id)
+        if guard_action:
+            return [guard_action]
+        if self._has_obstacle(target_node_id):
+            t04_action = self._t04_obstacle_task_action(data, current_node_id, target_node_id)
+            if t04_action:
+                return [t04_action]
+            if self._active_t04_task_for_obstacle(data, target_node_id):
+                return []
+            return [{"action": "CLEAR", "targetNodeId": target_node_id}]
+        return [{"action": "MOVE", "targetNodeId": target_node_id}]
+
+    def _next_step_toward_choke(self, player: dict[str, Any], current_node_id: str) -> Optional[str]:
+        best_path: list[str] = []
+        best_cost: Optional[int] = None
+        for choke_node_id in self._choke_node_ids:
+            if choke_node_id == current_node_id:
+                continue
+            path = self._path_to_any_goal(current_node_id, {choke_node_id}, allow_obstacles=False, player=player)
+            if not path:
+                path = self._path_to_any_goal(current_node_id, {choke_node_id}, allow_obstacles=True, player=player)
+            if len(path) < 2:
+                continue
+            cost = self._path_cost(path)
+            if best_cost is not None and cost >= best_cost:
+                continue
+            best_path = path
+            best_cost = cost
+        if len(best_path) >= 2:
+            return best_path[1]
+        return None
+
+    def _guard_choke_action(
+        self, data: dict[str, Any], player: dict[str, Any], current_node_id: str
+    ) -> Optional[dict[str, Any]]:
+        if current_node_id in self._guarded_choke_node_ids:
+            return None
+        if int(player.get("goodFruit", 0) or 0) <= GUARD_KEEP_GOOD_FRUIT:
+            return None
+        if self._has_own_active_guard(current_node_id, player):
+            return None
+        opponent = self._find_opponent(data.get("players", []))
+        if not self._opponent_must_cross_choke(opponent, current_node_id):
+            return None
+        if not self._freeze_window_open(opponent, current_node_id):
+            return None
+
+        self._guarded_choke_node_ids.add(current_node_id)
+        return {
+            "action": "SET_GUARD",
+            "targetNodeId": current_node_id,
+            "extraGoodFruit": self._guard_extra_good_fruit(player),
+        }
+
+    def _find_opponent(self, players: Any) -> Optional[dict[str, Any]]:
+        if not isinstance(players, list):
+            return None
+        for player in players:
+            if isinstance(player, dict) and player.get("playerId") != self._player_id:
+                return player
+        return None
+
+    def _opponent_must_cross_choke(self, opponent: Optional[dict[str, Any]], choke_node_id: str) -> bool:
+        if not opponent or not self._gate_node_id:
+            return False
+        opponent_node_id = opponent.get("currentNodeId")
+        if not isinstance(opponent_node_id, str):
+            return False
+        return self._graph.path_frames(opponent_node_id, self._gate_node_id, avoid={choke_node_id}) == math.inf
+
+    def _freeze_window_open(self, opponent: Optional[dict[str, Any]], choke_node_id: str) -> bool:
+        if not opponent or opponent.get("state") != "MOVING" or opponent.get("nextNodeId") != choke_node_id:
+            return False
+        return self._opponent_remaining_edge_rounds(opponent) >= GUARD_SETUP_ROUNDS + GUARD_FREEZE_SAFETY_ROUNDS
+
+    def _opponent_remaining_edge_rounds(self, opponent: dict[str, Any]) -> int:
+        current_node_id = opponent.get("currentNodeId")
+        next_node_id = opponent.get("nextNodeId")
+        if not isinstance(current_node_id, str) or not isinstance(next_node_id, str):
+            return 0
+        edge_rounds = self._graph.edge_frames(current_node_id, next_node_id)
+        if edge_rounds is None:
+            edge = self._edge_between(current_node_id, next_node_id)
+            edge_rounds = math.ceil(self._edge_cost(edge) / MOVE_COST_PER_ROUND) if edge else 0
+        progress = opponent.get("edgeProgressPermille", 0)
+        if not isinstance(progress, int):
+            progress = 0
+        progress = min(1000, max(0, progress))
+        return math.ceil((1 - progress / 1000.0) * edge_rounds)
+
+    def _has_own_active_guard(self, node_id: str, player: dict[str, Any]) -> bool:
+        node = self._nodes_by_id.get(node_id) or {}
+        guard = node.get("guard")
+        if not isinstance(guard, dict):
+            return False
+        defense = guard.get("defense", 0)
+        return (
+            guard.get("ownerTeamId") == player.get("teamId")
+            and guard.get("active") is not False
+            and (not isinstance(defense, int) or defense > 0)
+        )
+
+    def _guard_extra_good_fruit(self, player: dict[str, Any]) -> int:
+        spare = int(player.get("goodFruit", 0) or 0) - GUARD_KEEP_GOOD_FRUIT
+        return max(0, min(2, spare))
 
     def _path_to_any_goal(
         self,
@@ -311,10 +535,18 @@ class MovementStrategy:
         actions: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         if not isinstance(current_node_id, str):
-            return actions
+            return self._with_window_action(data, player, actions)
         squad_action = self._squad_action(data, player, current_node_id, actions)
         if squad_action:
-            return actions + [squad_action]
+            actions = actions + [squad_action]
+        return self._with_window_action(data, player, actions)
+
+    def _with_window_action(
+        self, data: dict[str, Any], player: dict[str, Any], actions: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        window_action = self._window_card_action(data, player)
+        if window_action:
+            return [window_action] + actions
         return actions
 
     def _squad_action(
@@ -372,12 +604,6 @@ class MovementStrategy:
                 continue
             if self._has_blocking_guard(node_id, player) and not self._has_squad_order("SQUAD_WEAKEN", node_id):
                 return node_id
-
-        for node_id in self._nodes_by_id:
-            if node_id in blocked_targets:
-                continue
-            if self._has_blocking_guard(node_id, player) and not self._has_squad_order("SQUAD_WEAKEN", node_id):
-                return node_id
         return None
 
     def _squad_clear_target(
@@ -386,12 +612,6 @@ class MovementStrategy:
         delivery_goals = self._terminal_node_ids or ({self._gate_node_id} if self._gate_node_id else set())
         delivery_path = self._path_to_any_goal(current_node_id, set(delivery_goals), allow_obstacles=True)
         for node_id in delivery_path[1:5]:
-            if node_id in blocked_targets:
-                continue
-            if self._is_squad_clear_candidate(data, node_id):
-                return node_id
-
-        for node_id in self._nodes_by_id:
             if node_id in blocked_targets:
                 continue
             if self._is_squad_clear_candidate(data, node_id):
@@ -414,23 +634,10 @@ class MovementStrategy:
 
         goals = self._delivery_goals(player)
         path = self._path_to_any_goal(current_node_id, goals, allow_obstacles=True, player=None)
-        for node_id in path[1:]:
-            if self._is_squad_scout_candidate(player, node_id):
-                return node_id
-
-        for node_id in self._key_scout_nodes():
+        for node_id in path[1:6]:
             if self._is_squad_scout_candidate(player, node_id):
                 return node_id
         return None
-
-    def _key_scout_nodes(self) -> list[str]:
-        key_nodes = []
-        for node_id, node in self._nodes_by_id.items():
-            process_round = node.get("processRound", 0)
-            has_process = isinstance(process_round, int) and process_round >= 4
-            if has_process or node.get("processType") == "VERIFY" or node_id == self._gate_node_id:
-                key_nodes.append(node_id)
-        return key_nodes
 
     def _is_squad_scout_candidate(self, player: dict[str, Any], node_id: str) -> bool:
         if self._has_squad_order("SQUAD_SCOUT", node_id):
@@ -702,6 +909,9 @@ class MovementStrategy:
                 total += self._edge_cost(edge) + self._node_entry_cost(path[index + 1])
         return total
 
+    def _path_rounds(self, path: list[str]) -> int:
+        return math.ceil(self._path_cost(path) / MOVE_COST_PER_ROUND)
+
     def _edge_between(self, from_node_id: str, to_node_id: str) -> Optional[dict[str, Any]]:
         for edge, neighbor in self._neighbor_edges(from_node_id):
             if neighbor == to_node_id:
@@ -709,7 +919,9 @@ class MovementStrategy:
         return None
 
     def _window_card_action(self, data: dict[str, Any], player: dict[str, Any]) -> Optional[dict[str, Any]]:
-        for contest in data.get("contests", []) or []:
+        contests = [contest for contest in data.get("contests", []) or [] if isinstance(contest, dict)]
+        contests.sort(key=self._window_contest_priority, reverse=True)
+        for contest in contests:
             if not isinstance(contest, dict):
                 continue
             contest_id = contest.get("contestId")
@@ -724,17 +936,32 @@ class MovementStrategy:
                 str(self._player_id) in cards or player.get("teamId") in cards
             ):
                 continue
-            return {"action": "WINDOW_CARD", "contestId": contest_id, "card": self._window_card(player)}
+            window_key = self._window_key(contest)
+            if window_key in self._played_window_keys:
+                continue
+            self._played_window_keys.add(window_key)
+            return {"action": "WINDOW_CARD", "contestId": contest_id, "card": self._window_card(data, player, contest)}
         return None
 
     def _is_own_contest(self, contest: dict[str, Any]) -> bool:
         return contest.get("redPlayerId") == self._player_id or contest.get("bluePlayerId") == self._player_id
 
-    def _window_card(self, player: dict[str, Any]) -> str:
+    def _window_key(self, contest: dict[str, Any]) -> tuple[str, int]:
+        contest_id = contest.get("contestId")
+        round_index = contest.get("roundIndex")
+        return (
+            contest_id if isinstance(contest_id, str) else "",
+            round_index if isinstance(round_index, int) else 0,
+        )
+
+    def _window_contest_priority(self, contest: dict[str, Any]) -> int:
+        return WINDOW_CONTEST_PRIORITY.get(contest.get("contestType"), 10)
+
+    def _window_card(self, data: dict[str, Any], player: dict[str, Any], contest: dict[str, Any]) -> str:
+        if self._should_spend_good_fruit_on_window(data, player, contest):
+            return "XIAN_GONG"
         if int(player.get("guardActionPoint", 0) or 0) > 0:
             return "BING_ZHENG"
-        if float(player.get("freshness", 0) or 0) >= 80 and int(player.get("goodFruit", 0) or 0) > 1:
-            return "XIAN_GONG"
         resources = player.get("resources")
         if isinstance(resources, dict):
             if self._resource_count(resources, "PASS_TOKEN") > 0 or self._resource_count(resources, "OFFICIAL_PERMIT") > 0:
@@ -742,3 +969,15 @@ class MovementStrategy:
             if self._has_horse_buff(player) or self._resource_count(resources, "FAST_HORSE") > 0 or self._resource_count(resources, "SHORT_HORSE") > 0:
                 return "QIANG_XING"
         return "ABSTAIN"
+
+    def _should_spend_good_fruit_on_window(
+        self, data: dict[str, Any], player: dict[str, Any], contest: dict[str, Any]
+    ) -> bool:
+        if float(player.get("freshness", 0) or 0) < 80:
+            return False
+        if int(player.get("goodFruit", 0) or 0) <= WINDOW_CARD_GOOD_FRUIT_FLOOR:
+            return False
+        if self._window_contest_priority(contest) >= HIGH_VALUE_WINDOW_PRIORITY:
+            return True
+        current_node_id = player.get("currentNodeId")
+        return isinstance(current_node_id, str) and self._must_protect_delivery(data, player, current_node_id)
