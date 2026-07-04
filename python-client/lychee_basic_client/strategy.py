@@ -48,6 +48,10 @@ OBSTACLE_PENALTY = 0         # routing cost of crossing an obstacle node: obstac
 XIAN_GONG_FLOOR = 1          # play XIAN_GONG whenever we can legally afford it (cost is
                              # 1 good fruit + freshness>=80): "能出就都出"; keep only a
                              # 1-fruit token so a tap never leaves us at zero good fruit
+SQUAD_CLEAR_LEAD_HOPS = 2    # only pre-clear obstacles within this many hops ahead
+                             # (just-in-time, per "别太早"): the immediate next-hop
+                             # obstacle always qualifies (no wait-for-clear deadlock),
+                             # while obstacles further along stay the squad's to defer
 PROCESS_STUCK_LIMIT = 14     # if a process won't complete after this many tries (a
                              # co-occupation contest keeps blocking it), abandon it and
                              # move on -- delivery must never be held hostage to a process
@@ -394,10 +398,16 @@ class Strategy:
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         path = self.graph.fastest_path(node, self.gate_node, obstacles=obstacles,
                                        obstacle_penalty=OBSTACLE_PENALTY) or []
-        for nid in path[1:]:
+        for i, nid in enumerate(path[1:], start=1):
             if nid in obstacles and nid not in self._squad_sent:
-                self._squad_sent.add(nid)   # nearest uncleared obstacle on our path
-                return [M.squad_clear(nid)]
+                # JUST-IN-TIME (per "别太早"): clear the obstacle only once it's within a
+                # couple of hops. The immediate next-hop obstacle always qualifies, so we
+                # never deadlock waiting on an un-dispatched clear; obstacles further out
+                # are left for later (keeps the squad free for other uses).
+                if i <= SQUAD_CLEAR_LEAD_HOPS:
+                    self._squad_sent.add(nid)
+                    return [M.squad_clear(nid)]
+                break   # nearest obstacle still too far -> keep the squad free for now
         return []
 
     def _ahead_of(self, node, opp) -> bool:
