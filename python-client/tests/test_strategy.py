@@ -294,12 +294,26 @@ class BlockadeTests(unittest.TestCase):
         self.assertFalse(s._delivery_abandoned)
         self.assertEqual([{"action": "WAIT"}], act)
 
-    def test_local_wait_still_overrides_buffer_when_opponent_waits_next_door(self) -> None:
+    def test_must_deliver_overrides_local_wait_near_deadline(self) -> None:
         s = _line_strategy(gate="S04")
-        # Even when the normal delivery buffer would let us leave, an adjacent
-        # waiting opponent keeps the highest-priority ambush armed.
+        # Once the latest safe departure arrives, we leave even if an adjacent
+        # opponent could be baited into a local ambush.
         act = s.decide(_inq(540, _me("S02"), _opp("S01")))
-        self.assertEqual([{"action": "WAIT"}], act)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
+
+    def test_task_mode_must_deliver_before_claiming_local_task(self) -> None:
+        s = _line_strategy(gate="S04")
+        s._task_priority_mode = True
+        tasks = [{
+            "taskId": "T_LATE", "nodeId": "S02", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 600,
+        }]
+
+        act = s.decide(_inq(TOTAL_ROUNDS - 5, _me("S02"), _opp("S01"), tasks=tasks))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
     def test_delivers_when_verified_at_terminal(self) -> None:
         s = _line_strategy(gate="S04")

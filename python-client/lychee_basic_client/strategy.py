@@ -204,6 +204,16 @@ class Strategy:
         # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
         squad = self._squad_action(node, me, opp, tasks, nodes_by_id, round_no, weather)
 
+        # A hard delivery deadline beats speed buffs, ambushes, and any remaining
+        # task farm: block only while our own finish is still safe.
+        if self._must_deliver(node, me, opp, round_no, nodes_by_id, weather):
+            main = self._advance_to(
+                self.terminal_node if me.get("verified") else self.gate_node,
+                me, node, state, phase, nodes_by_id, tasks,
+                round_no, weather
+            )
+            return self._ordered_actions(main, squad, card)
+
         # RUSH_SPEED IS a main-car action and is only valid mid-move -> issue it (as THE
         # main action) while we're MOVING; never when idle/parked (invalid + wasted).
         if self._rush_speed_action(me, state, phase):
@@ -212,11 +222,12 @@ class Strategy:
         # Highest-priority local ambush: whenever we are already standing on a
         # node the opponent is about to enter, arm it; if they are parked one hop
         # away, hold our action until they commit or choose another direction.
-        local_ambush = self._local_ambush_action(
-            me, opp, node, state, round_no, nodes_by_id, weather
-        )
-        if local_ambush:
-            return self._ordered_actions(local_ambush, squad, card)
+        if not me.get("verified"):
+            local_ambush = self._local_ambush_action(
+                me, opp, node, state, round_no, nodes_by_id, weather
+            )
+            if local_ambush:
+                return self._ordered_actions(local_ambush, squad, card)
 
         # Endgame gate ambush: the gate is the one true cut-vertex before the
         # terminal (palace stations have branch bypasses), so while parked on it
@@ -231,7 +242,8 @@ class Strategy:
                 return self._ordered_actions(ambush, squad, card)
 
         # once verified we've committed to the delivery run -> always finish it
-        # (we only ever VERIFY during our own delivery push).
+        # (we only ever VERIFY during our own delivery push), except for the safe
+        # gate ambush window handled just above.
         if me.get("verified"):
             main = self._advance_to(
                 self.terminal_node, me, node, state, phase, nodes_by_id, tasks,
@@ -241,15 +253,6 @@ class Strategy:
 
         if self._should_abandon_delivery(node, me, round_no, nodes_by_id, weather):
             self._enter_task_priority(abandon_delivery=True)
-
-        # Delivery safety. If the opponent can still finish through an unsecured
-        # choke, use the hard latest-departure time instead of the normal buffer.
-        if self._must_deliver(node, me, opp, round_no, nodes_by_id, weather):
-            main = self._advance_to(
-                self.gate_node, me, node, state, phase, nodes_by_id, tasks,
-                round_no, weather
-            )
-            return self._ordered_actions(main, squad, card)
 
         if self._task_priority_mode:
             main = self._task_priority_action(
@@ -1253,6 +1256,10 @@ class Strategy:
         if self._delivery_abandoned:
             return False
         need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
+        if need == float("inf"):
+            return False
+        if round_no + need >= TOTAL_ROUNDS + DELIVERY_ABANDON_MARGIN:
+            return False
         margin = DELIVER_MARGIN
         if self._deny_still_matters(node, opp, round_no, nodes_by_id, weather):
             margin = DENY_DELIVER_MARGIN
