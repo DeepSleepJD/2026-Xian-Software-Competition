@@ -277,7 +277,8 @@ class BlockadeTests(unittest.TestCase):
         ]
         act = s.decide(_inq(10, me, _opp("S01"), nodes=nodes))
 
-        self.assertEqual([{"action": "CLEAR", "targetNodeId": "S02"}], act)
+        self.assertEqual({"action": "CLEAR", "targetNodeId": "S02"}, act[0])
+        self.assertNotIn("SQUAD_CLEAR", [a["action"] for a in act])
 
     def test_obstacle_after_first_hop_is_squad_cleared(self) -> None:
         s = _line_strategy(gate="S03")
@@ -324,7 +325,109 @@ class BlockadeTests(unittest.TestCase):
         }]
         act = s.decide(_inq(10, me, _opp("S01"), nodes=nodes, tasks=tasks))
 
-        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T04_1"}], act)
+        self.assertEqual({"action": "CLAIM_TASK", "taskId": "T04_1"}, act[0])
+        self.assertNotIn("SQUAD_CLEAR", [a["action"] for a in act])
+
+    def test_opening_route_prefers_water_when_scout_budget_beats_mountain(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S14", "S15"
+        edges = [
+            ("S01", "S02", "ROAD", 30), ("S02", "S03", "ROAD", 25),
+            ("S03", "S07", "ROAD", 54), ("S07", "S09", "ROAD", 46),
+            ("S09", "S10", "ROAD", 40), ("S10", "S11", "ROAD", 36),
+            ("S11", "S12", "ROAD", 20), ("S12", "S13", "ROAD", 25),
+            ("S13", "S14", "ROAD", 18), ("S14", "S15", "ROAD", 10),
+            ("S02", "S04", "ROAD", 20), ("S04", "S05", "WATER", 44),
+            ("S05", "S07", "BRANCH", 46), ("S01", "S06", "MOUNTAIN", 44),
+            ("S06", "S08", "MOUNTAIN", 54), ("S08", "S10", "BRANCH", 46),
+            ("S03", "S06", "BRANCH", 38), ("S05", "S09", "WATER", 48),
+            ("S07", "S08", "MOUNTAIN", 42), ("S04", "S07", "BRANCH", 54),
+            ("S08", "S09", "BRANCH", 64),
+        ]
+        s.graph.load_edges([
+            {"fromNodeId": a, "toNodeId": b, "routeType": rt,
+             "distance": d, "bidirectional": True}
+            for a, b, rt, d in edges
+        ])
+        s.graph.process_rounds = {
+            "S02": 4, "S04": 7, "S05": 6, "S11": 5, "S13": 5,
+        }
+        s.chokes = s.graph.choke_points("S01", "S14")
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "processRound": 0, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "processRound": 4, "resourceStock": {}},
+            {"nodeId": "S03", "hasObstacle": False, "processRound": 0, "resourceStock": {}},
+            {"nodeId": "S04", "hasObstacle": False, "processRound": 7, "resourceStock": {}},
+            {"nodeId": "S05", "hasObstacle": False, "processRound": 6, "resourceStock": {}},
+            {"nodeId": "S06", "hasObstacle": True, "processRound": 0, "resourceStock": {}},
+            {"nodeId": "S07", "hasObstacle": False, "processRound": 0, "resourceStock": {}},
+            {"nodeId": "S08", "hasObstacle": True, "processRound": 0, "resourceStock": {}},
+            {"nodeId": "S09", "hasObstacle": False, "processRound": 0, "resourceStock": {}},
+            {"nodeId": "S10", "hasObstacle": True, "processRound": 0, "resourceStock": {}},
+            {"nodeId": "S11", "hasObstacle": True, "processRound": 5, "resourceStock": {}},
+            {"nodeId": "S12", "hasObstacle": False, "processRound": 0, "resourceStock": {}},
+            {"nodeId": "S13", "hasObstacle": False, "processRound": 5, "resourceStock": {}},
+            {"nodeId": "S14", "hasObstacle": False, "processRound": 6, "resourceStock": {}},
+            {"nodeId": "S15", "hasObstacle": False, "processRound": 0, "resourceStock": {}},
+        ]
+
+        act = s.decide(_inq(1, _me("S01", squadAvailable=8), _opp("S01"), nodes=nodes))
+
+        self.assertEqual({"action": "MOVE", "targetNodeId": "S02"}, act[0])
+        self.assertIn({"action": "SQUAD_CLEAR", "targetNodeId": "S10"}, act)
+        self.assertEqual(["S01", "S02", "S04", "S05", "S09", "S10", "S11", "S12", "S13", "S14"], s._opening_route_path)
+
+    def test_squad_scouts_process_node_once_inside_marker_window(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S14", "S15"
+        s.graph.load_edges([
+            {"fromNodeId": "S04", "toNodeId": "S05", "routeType": "WATER",
+             "distance": 44, "bidirectional": True},
+            {"fromNodeId": "S05", "toNodeId": "S09", "routeType": "WATER",
+             "distance": 48, "bidirectional": True},
+            {"fromNodeId": "S09", "toNodeId": "S10", "routeType": "ROAD",
+             "distance": 40, "bidirectional": True},
+            {"fromNodeId": "S10", "toNodeId": "S11", "routeType": "ROAD",
+             "distance": 36, "bidirectional": True},
+            {"fromNodeId": "S11", "toNodeId": "S12", "routeType": "ROAD",
+             "distance": 20, "bidirectional": True},
+            {"fromNodeId": "S12", "toNodeId": "S13", "routeType": "ROAD",
+             "distance": 25, "bidirectional": True},
+            {"fromNodeId": "S13", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 18, "bidirectional": True},
+        ])
+        s.graph.process_rounds = {"S05": 6, "S11": 5, "S13": 5}
+        s._my_team = "RED"
+        s.route_avoid = {"S03", "S06", "S07", "S08"}
+        s._squad_sent = {"S10", "S11"}
+        nodes = {
+            "S04": {"nodeId": "S04", "x": 22, "y": 52, "hasObstacle": False,
+                    "processRound": 7, "resourceStock": {}},
+            "S05": {"nodeId": "S05", "x": 38, "y": 48, "hasObstacle": False,
+                    "processRound": 6, "resourceStock": {}, "scouted": []},
+            "S09": {"nodeId": "S09", "x": 55, "y": 32, "hasObstacle": False,
+                    "processRound": 0, "resourceStock": {}},
+            "S10": {"nodeId": "S10", "x": 62, "y": 26, "hasObstacle": True,
+                    "processRound": 0, "resourceStock": {}},
+            "S11": {"nodeId": "S11", "x": 66, "y": 22, "hasObstacle": True,
+                    "processRound": 5, "resourceStock": {}},
+            "S12": {"nodeId": "S12", "x": 70, "y": 20, "hasObstacle": False,
+                    "processRound": 0, "resourceStock": {}},
+            "S13": {"nodeId": "S13", "x": 73, "y": 19, "hasObstacle": False,
+                    "processRound": 5, "resourceStock": {}},
+            "S14": {"nodeId": "S14", "x": 76, "y": 18, "hasObstacle": False,
+                    "processRound": 6, "resourceStock": {}},
+            "S15": {"nodeId": "S15", "x": 78, "y": 18, "hasObstacle": False,
+                    "processRound": 0, "resourceStock": {}},
+        }
+        me = _me(
+            "S04", squadAvailable=4, state="MOVING", routeEdgeId="E12",
+            nextNodeId="S05", edgeProgressPermille=300,
+        )
+
+        act = s._squad_action("S04", me, _opp("S01"), nodes, round_no=90)
+
+        self.assertEqual([{"action": "SQUAD_SCOUT", "targetNodeId": "S05"}], act)
 
 
 class RoutePlanTests(unittest.TestCase):
@@ -435,6 +538,86 @@ class RoutePlanTests(unittest.TestCase):
             13,
             s._route_plan("S01", "S04", _me("S01"), nodes, round_no=100, weather=weather).frames,
         )
+
+    def test_route_plan_uses_own_scout_marker_for_process_eta(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "P", "P"
+        s._left_start = True
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "P", "routeType": "ROAD",
+             "distance": 1, "bidirectional": True},
+        ])
+        s.graph.process_rounds = {"P": 6}
+        nodes = {
+            "S01": {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            "P": {"nodeId": "P", "hasObstacle": False, "resourceStock": {},
+                  "processType": "TRANSFER",
+                  "scouted": [{"teamId": "RED", "remainRound": 10,
+                               "processReduceRound": 3, "remainingTriggers": 1}]},
+        }
+
+        self.assertEqual(5, s._route_plan("S01", "P", _me("S01"), nodes).frames)
+
+    def test_route_plan_ignores_enemy_scout_marker_for_process_eta(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "P", "P"
+        s._left_start = True
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "P", "routeType": "ROAD",
+             "distance": 1, "bidirectional": True},
+        ])
+        s.graph.process_rounds = {"P": 6}
+        nodes = {
+            "S01": {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            "P": {"nodeId": "P", "hasObstacle": False, "resourceStock": {},
+                  "processType": "TRANSFER",
+                  "scouted": [{"teamId": "BLUE", "remainRound": 10,
+                               "processReduceRound": 3, "remainingTriggers": 1}]},
+        }
+
+        self.assertEqual(8, s._route_plan("S01", "P", _me("S01"), nodes).frames)
+
+    def test_route_plan_ignores_scout_marker_that_expires_before_processing(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "P", "P"
+        s._left_start = True
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "P", "routeType": "ROAD",
+             "distance": 1, "bidirectional": True},
+        ])
+        s.graph.process_rounds = {"P": 6}
+        nodes = {
+            "S01": {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            "P": {"nodeId": "P", "hasObstacle": False, "resourceStock": {},
+                  "processType": "TRANSFER",
+                  "scouted": [{"teamId": "RED", "remainRound": 1,
+                               "processReduceRound": 3, "remainingTriggers": 1}]},
+        }
+
+        self.assertEqual(
+            8,
+            s._route_plan("S01", "P", _me("S01"), nodes, round_no=100).frames,
+        )
+
+    def test_delivery_eta_uses_scout_marker_for_gate_verify(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S14", "S15"
+        s._left_start = True
+        s.graph.load_edges([
+            {"fromNodeId": "S13", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 1, "bidirectional": True},
+            {"fromNodeId": "S14", "toNodeId": "S15", "routeType": "ROAD",
+             "distance": 1, "bidirectional": True},
+        ])
+        nodes = {
+            "S13": {"nodeId": "S13", "hasObstacle": False, "resourceStock": {}},
+            "S14": {"nodeId": "S14", "hasObstacle": False, "resourceStock": {},
+                    "scouted": [{"teamId": "RED", "remainRound": 10,
+                                 "processReduceRound": 3, "remainingTriggers": 1}]},
+            "S15": {"nodeId": "S15", "hasObstacle": False, "resourceStock": {}},
+        }
+
+        self.assertEqual(9, s._frames_to_deliver("S13", _me("S13"), nodes, 100))
 
     def test_active_weather_remain_round_uses_original_base_round(self) -> None:
         s = Strategy(1001)

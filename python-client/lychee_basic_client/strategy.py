@@ -25,13 +25,16 @@ from .contest import active_contest
 from .graph import BASE_MOVE_PER_FRAME, Graph, ROUTE_COST_COEF
 
 TOTAL_ROUNDS = 600
-DELIVER_MARGIN = 60          # safety frames before the delivery deadline (covers the
+DELIVER_MARGIN = 10          # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
 DENY_DELIVER_MARGIN = 0      # no buffer while an unsecured blockade is the only thing
                              # preventing the opponent from finishing
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
 DELIVER_FRAMES = 2           # move-into-terminal + DELIVER
+SCOUT_PROCESS_MIN_FRAMES = 2
+SCOUT_DEFAULT_PROCESS_REDUCE = 3
+SCOUT_MARKER_LIFETIME = 45
 GUARD_KEEP_FRUIT = 6         # never spend guard fruit below this (keep some to deliver)
 GUARD_SETUP_FRAMES = 5       # SET_GUARD read-bar (4) + activates next frame
 TASK_TIME = 8                # rough frames a task claim+complete costs (spare-time gate)
@@ -93,6 +96,7 @@ class Strategy:
         self._guarded_round: dict[str, int] = {}
         # obstacle nodes we've dispatched a squad to clear (avoid re-dispatch)
         self._squad_sent: set[str] = set()
+        self._scout_sent: set[str] = set()
         self._guard_blocked: set[str] = set()   # enemy guards blocking us
         self.route_avoid: set[str] = set()       # nodes to route around (variants/testing)
         self._resource_claim_rounds: dict[tuple[str, str], int] = {}
@@ -102,6 +106,8 @@ class Strategy:
         self.task_base = 0
         self._counted_tasks: set[str] = set()
         self._task_attempts: dict[str, int] = {}
+        self._opening_route_path: list[str] = []
+        self._latest_tasks: list[dict[str, Any]] = []
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -155,6 +161,8 @@ class Strategy:
         self._guard_blocked = self._enemy_guards(nodes_by_id)
         self._update_start_flags(me, opp)
         self._account_tasks(tasks)
+        self._latest_tasks = tasks
+        self._maybe_choose_opening_route(me, node, round_no, tasks, nodes_by_id, weather)
 
         if me.get("delivered") or me.get("retired"):
             return []
@@ -316,7 +324,9 @@ class Strategy:
     def _spare_for_rolling_task(self, node, me, opp, task, round_no, nodes_by_id, weather=None) -> bool:
         """While parked on a rolling-blockade choke, use the opponent ETA to decide
         whether a local task can finish before we still need to set the guard."""
-        task_frames = self._task_process_frames(task)
+        task_frames = self._task_process_frames(
+            task, nodes_by_id, me, round_no, round_no
+        )
         if round_no + task_frames + self._frames_to_deliver(node, me, nodes_by_id, round_no, weather) + DELIVER_MARGIN >= TOTAL_ROUNDS:
             return False
         if opp is None:
@@ -439,21 +449,214 @@ class Strategy:
         -- to be re-added separately. The blockade relies on freeze timing (fresh
         max-defense guard set at the last moment) so a squad-poor opponent can't
         weaken through it, not on healing."""
-        if me.get("squadAvailable", 0) < 2:
+        squad_available = int(me.get("squadAvailable", 0) or 0)
+        if squad_available < 1:
             return []
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
+        avoid = self._guard_blocked | self.route_avoid
         plan = self._route_plan(
-            node, self.gate_node, me, nodes_by_id, obstacles=obstacles,
-            round_no=round_no, weather=weather
+            node, self.gate_node, me, nodes_by_id, avoid=avoid,
+            obstacles=obstacles, round_no=round_no, weather=weather
         )
+        if plan.frames == float("inf"):
+            plan = self._route_plan(
+                node, self.gate_node, me, nodes_by_id, obstacles=obstacles,
+                round_no=round_no, weather=weather
+            )
         path = plan.path
-        for idx, nid in enumerate(path[1:], start=1):
-            if idx == 1 and self._is_opening_first_hop_obstacle(node, nid, nodes_by_id, me):
-                continue
-            if nid in obstacles and nid not in self._squad_sent:
-                self._squad_sent.add(nid)   # nearest uncleared obstacle on our path
-                return [M.squad_clear(nid)]
+        if squad_available >= 2:
+            for idx, nid in enumerate(path[1:], start=1):
+                if idx == 1 and self._is_opening_first_hop_obstacle(node, nid, nodes_by_id, me):
+                    continue
+                if nid in obstacles and nid not in self._squad_sent:
+                    self._squad_sent.add(nid)   # nearest uncleared obstacle on our path
+                    return [M.squad_clear(nid)]
+        scout = self._squad_scout_action(path, node, me, round_no, nodes_by_id, weather)
+        if scout:
+            return scout
         return []
+
+    def _maybe_choose_opening_route(self, me, node, round_no, tasks, nodes_by_id, weather=None) -> None:
+        if self.route_avoid or self._opening_route_path:
+            return
+        if node != self.start_node or me.get("routeEdgeId") or self._left_start:
+            return
+        if not self.graph.adj or not nodes_by_id:
+            return
+
+        best = None
+        for path in self._opening_candidate_paths(nodes_by_id):
+            score = self._opening_route_score(path, me, round_no, tasks, nodes_by_id, weather)
+            if score is None:
+                continue
+            if best is None or score[0] < best[0]:
+                best = score
+        if best is None:
+            return
+
+        _, path = best
+        self._opening_route_path = path
+        route_nodes = set(path)
+        self.route_avoid = {
+            nid for nid in nodes_by_id
+            if nid not in route_nodes and nid != self.terminal_node
+        }
+
+    def _opening_candidate_paths(self, nodes_by_id) -> list[list[str]]:
+        limit = max(4, len(nodes_by_id) + 1)
+        paths: list[list[str]] = []
+
+        def dfs(node, path):
+            if len(paths) >= 128:
+                return
+            if node == self.gate_node:
+                paths.append(path[:])
+                return
+            if len(path) >= limit:
+                return
+            for nxt, _rt, _dd in self.graph.adj.get(node, []):
+                if nxt in path or nxt == self.terminal_node:
+                    continue
+                dfs(nxt, [*path, nxt])
+
+        dfs(self.start_node, [self.start_node])
+        return paths
+
+    def _opening_route_score(self, path, me, round_no, tasks, nodes_by_id, weather=None):
+        if len(path) < 2 or path[-1] != self.gate_node:
+            return None
+        avoid = {
+            nid for nid in nodes_by_id
+            if nid not in set(path) and nid != self.terminal_node
+        }
+        obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
+        plan = self._route_plan(
+            self.start_node, self.gate_node, me, nodes_by_id, avoid=avoid,
+            obstacles=obstacles, round_no=round_no, weather=weather
+        )
+        if plan.frames == float("inf") or plan.path != path:
+            return None
+
+        verify = self._verify_frames(me, nodes_by_id, round_no + plan.frames, round_no)
+        terminal = self._route_frames(
+            self.gate_node, self.terminal_node, me, nodes_by_id,
+            round_no=round_no + plan.frames + verify, weather=weather,
+            weather_base_round=round_no
+        )
+        if terminal == float("inf"):
+            return None
+
+        base = plan.frames + verify + terminal + DELIVER_FRAMES
+        squad_budget = self._opening_scout_budget(path, me, nodes_by_id)
+        if squad_budget < 0:
+            return None
+        savings = self._opening_scout_savings(path, tasks, nodes_by_id, squad_budget)
+        return base - savings, path
+
+    def _opening_scout_budget(self, path, me, nodes_by_id) -> int:
+        budget = int(me.get("squadAvailable", 0) or 0)
+        for idx, nid in enumerate(path[1:], start=1):
+            if not nodes_by_id.get(nid, {}).get("hasObstacle"):
+                continue
+            if idx == 1 and self._is_opening_first_hop_obstacle(path[0], nid, nodes_by_id, me):
+                continue
+            budget -= 2
+        return budget
+
+    def _opening_scout_savings(self, path, tasks, nodes_by_id, squad_budget) -> int:
+        task_nodes = {
+            t.get("nodeId") for t in tasks
+            if t.get("active") and not t.get("completed") and not t.get("failed")
+        }
+        savings: list[int] = []
+        for nid in path[1:]:
+            if nid == self.gate_node:
+                savings.append(self._scout_saving_for_frames(VERIFY_FRAMES))
+                continue
+            frames = self._node_process_round(nid, nodes_by_id)
+            if frames <= 0:
+                continue
+            # A single marker at a task node is consumed by the task first, so don't
+            # count it as mandatory-process savings in the opening route estimate.
+            if nid in task_nodes:
+                continue
+            savings.append(self._scout_saving_for_frames(frames))
+        savings = [s for s in savings if s > 0]
+        savings.sort(reverse=True)
+        return sum(savings[:max(0, squad_budget)])
+
+    @staticmethod
+    def _scout_saving_for_frames(frames: int) -> int:
+        return max(0, frames - max(SCOUT_PROCESS_MIN_FRAMES, frames - SCOUT_DEFAULT_PROCESS_REDUCE))
+
+    def _squad_scout_action(self, path, node, me, round_no, nodes_by_id, weather=None) -> list:
+        if not path:
+            return []
+        candidates = []
+        task_nodes = {
+            t.get("nodeId") for t in self._latest_tasks
+            if t.get("active") and not t.get("completed") and not t.get("failed")
+        }
+        for nid in path[1:]:
+            if nid in self._scout_sent or self._has_own_scout(nid, nodes_by_id):
+                continue
+            if nid == self.gate_node:
+                saving = self._scout_saving_for_frames(VERIFY_FRAMES)
+            else:
+                frames = self._node_process_round(nid, nodes_by_id)
+                if frames <= 0 or nid in task_nodes:
+                    continue
+                saving = self._scout_saving_for_frames(frames)
+            if saving <= 0:
+                continue
+            eta = self._eta_to_node(
+                me, nid, nodes_by_id, round_no=round_no, weather=weather,
+                avoid=self._guard_blocked | self.route_avoid
+            )
+            if eta == float("inf"):
+                continue
+            delay = self._squad_delay(node, nid, me, nodes_by_id, round_no, weather)
+            if delay <= eta <= delay + SCOUT_MARKER_LIFETIME:
+                candidates.append((-saving, eta, nid))
+
+        if not candidates:
+            return []
+        candidates.sort()
+        target = candidates[0][2]
+        self._scout_sent.add(target)
+        return [M.squad_scout(target)]
+
+    def _has_own_scout(self, node, nodes_by_id) -> bool:
+        for marker in nodes_by_id.get(node, {}).get("scouted") or []:
+            if marker.get("teamId") == self._my_team and int(marker.get("remainingTriggers", 1) or 0) > 0:
+                return True
+        return False
+
+    def _squad_delay(self, node, target, me, nodes_by_id, round_no=0, weather=None) -> int:
+        origin = me.get("currentNodeId") or node
+        tx, ty = self._node_xy(target, nodes_by_id)
+        ox, oy = self._node_xy(origin, nodes_by_id)
+        dist = max(abs(tx - ox), abs(ty - oy))
+        delay = min(15, max(3, math.ceil(dist / 3)))
+        if self._mountain_fog_on_node(target, nodes_by_id, round_no, weather):
+            delay = min(15, delay + 2)
+        return delay
+
+    @staticmethod
+    def _node_xy(node, nodes_by_id) -> tuple[int, int]:
+        n = nodes_by_id.get(node, {})
+        return int(n.get("x", 0) or 0), int(n.get("y", 0) or 0)
+
+    def _mountain_fog_on_node(self, node, nodes_by_id, round_no=0, weather=None) -> bool:
+        n = nodes_by_id.get(node, {})
+        if "MOUNTAIN" not in str(n.get("nodeType", "")):
+            return False
+        for w in self._weather_entries(weather, round_no):
+            if not (w["start"] <= round_no < w["end"]):
+                continue
+            if w["type"] == "MOUNTAIN_FOG" and w["region"] in (None, "ALL", "MOUNTAIN"):
+                return True
+        return False
 
     def _ahead_of(self, node, opp) -> bool:
         """True if we're closer to the gate (in frames) than the opponent."""
@@ -599,9 +802,18 @@ class Strategy:
             return False
         return True
 
-    @staticmethod
-    def _task_process_frames(task) -> int:
-        return int(task.get("processRound", TASK_TIME) or TASK_TIME)
+    def _task_process_frames(
+        self, task, nodes_by_id=None, actor=None, start_round=0,
+        weather_base_round=0
+    ) -> int:
+        frames = int(task.get("processRound", TASK_TIME) or TASK_TIME)
+        target = task.get("nodeId")
+        if not target or nodes_by_id is None:
+            return frames
+        reduce = self._scout_process_reduce(
+            target, nodes_by_id, actor, start_round, weather_base_round
+        )
+        return self._apply_scout_process_reduce(frames, reduce)
 
     def _best_task_waypoint(self, node, me, tasks, nodes_by_id, round_no, weather=None) -> Optional[str]:
         if self._task_base_score(me) >= TASK_BASE_TARGET:
@@ -621,7 +833,9 @@ class Strategy:
             )
             if to_task == float("inf"):
                 continue
-            task_frames = self._task_process_frames(task)
+            task_frames = self._task_process_frames(
+                task, nodes_by_id, me, round_no + to_task, round_no
+            )
             finish_task_round = round_no + to_task + task_frames
             expire = int(task.get("expireRound", 0) or 0)
             if expire and finish_task_round >= expire:
@@ -727,14 +941,15 @@ class Strategy:
         )
         if to_gate == float("inf"):
             return float("inf")
+        verify = self._verify_frames(opp, nodes_by_id, round_no + to_gate, round_no)
         to_term = self._route_frames(
             self.gate_node, self.terminal_node, opp, nodes_by_id,
-            avoid=avoid, round_no=round_no + to_gate + VERIFY_FRAMES,
+            avoid=avoid, round_no=round_no + to_gate + verify,
             weather=weather, weather_base_round=round_no
         )
         if to_term == float("inf"):
             return float("inf")
-        return to_gate + VERIFY_FRAMES + to_term + DELIVER_FRAMES
+        return to_gate + verify + to_term + DELIVER_FRAMES
 
     def _frames_to_deliver(self, node, me, nodes_by_id, round_no=0, weather=None) -> float:
         to_gate = 0 if me.get("verified") else self._route_frames(
@@ -743,7 +958,9 @@ class Strategy:
         )
         if to_gate == float("inf"):
             return float("inf")
-        verify = 0 if me.get("verified") else VERIFY_FRAMES
+        verify = 0 if me.get("verified") else self._verify_frames(
+            me, nodes_by_id, round_no + to_gate, round_no
+        )
         start = self.gate_node if not me.get("verified") else node
         to_term = self._route_frames(
             start, self.terminal_node, me, nodes_by_id,
@@ -808,7 +1025,10 @@ class Strategy:
                 claimed_key = self._claim_key(u, claim)
                 new_claimed = tuple(sorted((*claimed, claimed_key)))
                 ns = (u, horse, horse_left, claim, new_claimed, moved)
-                nd = d + self._resource_claim_frames(u, claim)
+                nd = d + self._resource_claim_frames(
+                    u, claim, nodes_by_id, round_no + d, actor,
+                    weather_base_round
+                )
                 if nd < dist.get(ns, math.inf):
                     dist[ns] = nd
                     prev[ns] = state
@@ -833,7 +1053,7 @@ class Strategy:
                 if process_destination or v != dst:
                     process_frames = self._process_frames(
                         v, nodes_by_id, process_start_round, weather,
-                        weather_base_round
+                        weather_base_round, actor
                     )
                 nh, nh_left = self._spend_horse_wait(nh, nh_left, process_frames)
                 nd = d + pre_edge_wait + edge_frames + process_frames
@@ -907,7 +1127,8 @@ class Strategy:
             return edge_frames
 
         process_frames = self._process_frames(
-            next_node, nodes_by_id, round_no + edge_frames, weather, round_no
+            next_node, nodes_by_id, round_no + edge_frames, weather, round_no,
+            actor
         )
         horse, horse_left = self._spend_horse_wait(
             horse, horse_left, process_frames
@@ -1010,8 +1231,17 @@ class Strategy:
             permille = 0.0
         return max(0, math.ceil(required * (1000.0 - permille) / 1000.0))
 
-    def _resource_claim_frames(self, node, resource_type) -> int:
-        return self._resource_claim_rounds.get((node, resource_type), RESOURCE_CLAIM_FRAMES)
+    def _resource_claim_frames(
+        self, node, resource_type, nodes_by_id=None, start_round=0, actor=None,
+        weather_base_round=0
+    ) -> int:
+        frames = self._resource_claim_rounds.get((node, resource_type), RESOURCE_CLAIM_FRAMES)
+        if nodes_by_id is None:
+            return frames
+        reduce = self._scout_process_reduce(
+            node, nodes_by_id, actor, start_round, weather_base_round
+        )
+        return self._apply_scout_process_reduce(frames, reduce)
 
     def _horse_edge_frames(
         self, route_type, distance, horse, horse_left, held, start_round=0,
@@ -1059,13 +1289,65 @@ class Strategy:
             return None, 0
         return horse, left
 
-    def _process_frames(self, node, nodes_by_id, start_round, weather=None, weather_base_round=0) -> int:
-        base = self.graph.process_rounds.get(node, 0)
+    def _process_frames(
+        self, node, nodes_by_id, start_round, weather=None, weather_base_round=0,
+        actor=None
+    ) -> int:
+        base = self._node_process_round(node, nodes_by_id)
         if base <= 0:
             return 0
         process_type = nodes_by_id.get(node, {}).get("processType")
         extra = self._weather_process_extra(process_type, start_round, weather, weather_base_round)
-        return base + extra
+        frames = base + extra
+        reduce = self._scout_process_reduce(
+            node, nodes_by_id, actor, start_round, weather_base_round
+        )
+        return self._apply_scout_process_reduce(frames, reduce)
+
+    def _node_process_round(self, node, nodes_by_id) -> int:
+        if node in self.graph.process_rounds:
+            return int(self.graph.process_rounds.get(node, 0) or 0)
+        return int(nodes_by_id.get(node, {}).get("processRound", 0) or 0)
+
+    def _verify_frames(self, actor, nodes_by_id, start_round, weather_base_round=0) -> int:
+        reduce = self._scout_process_reduce(
+            self.gate_node, nodes_by_id, actor, start_round, weather_base_round
+        )
+        return self._apply_scout_process_reduce(VERIFY_FRAMES, reduce)
+
+    def _scout_process_reduce(
+        self, node, nodes_by_id, actor=None, start_round=0, weather_base_round=0
+    ) -> int:
+        team_id = None
+        if actor is not None:
+            team_id = actor.get("teamId")
+        if team_id is None:
+            team_id = self._my_team
+        if not team_id:
+            return 0
+
+        elapsed = max(0, int(start_round - weather_base_round))
+        best = 0
+        for marker in nodes_by_id.get(node, {}).get("scouted") or []:
+            if marker.get("teamId") != team_id:
+                continue
+            if int(marker.get("remainingTriggers", 1) or 0) <= 0:
+                continue
+            remain = marker.get("remainRound")
+            if remain is not None and int(remain or 0) <= elapsed:
+                continue
+            best = max(
+                best,
+                int(marker.get("processReduceRound", SCOUT_DEFAULT_PROCESS_REDUCE)
+                    or SCOUT_DEFAULT_PROCESS_REDUCE)
+            )
+        return best
+
+    @staticmethod
+    def _apply_scout_process_reduce(frames: int, reduce: int) -> int:
+        if frames <= 0 or reduce <= 0:
+            return frames
+        return min(frames, max(SCOUT_PROCESS_MIN_FRAMES, frames - reduce))
 
     def _weather_process_extra(self, process_type, frame_round, weather=None, weather_base_round=0) -> int:
         if not process_type:

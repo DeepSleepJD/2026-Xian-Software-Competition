@@ -113,6 +113,11 @@ def squad_clear(target_node_id: str) -> dict[str, Any]:
     return {"action": "SQUAD_CLEAR", "targetNodeId": target_node_id}
 
 
+def squad_scout(target_node_id: str) -> dict[str, Any]:
+    """小分队探路: delayed scout marker on a target node (1 squad member)."""
+    return {"action": "SQUAD_SCOUT", "targetNodeId": target_node_id}
+
+
 def squad_reinforce(target_node_id: str) -> dict[str, Any]:
     """小分队增援: +2 defense to our own guard, any distance (2 squad members)."""
     return {"action": "SQUAD_REINFORCE", "targetNodeId": target_node_id}
