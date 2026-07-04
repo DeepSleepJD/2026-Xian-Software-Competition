@@ -75,6 +75,86 @@ class BlockadeTests(unittest.TestCase):
         act = s.decide(_inq(50, me, opp))
         self.assertNotIn("SET_GUARD", [a["action"] for a in act])
 
+    def test_first_choke_failure_switches_to_task_priority(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S04", "S04"
+        s._my_team = "RED"
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S02", "toNodeId": "T1", "routeType": "ROAD",
+             "distance": 5, "bidirectional": True},
+        ])
+        s.chokes = s.graph.choke_points("S01", "S04")
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "T1", "hasObstacle": False, "resourceStock": {}},
+        ]
+        tasks = [{
+            "taskId": "T_SIDE", "nodeId": "T1", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 50,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 200,
+        }]
+
+        act = s.decide(_inq(50, _me("S02"), _opp("S03"), nodes=nodes, tasks=tasks))
+
+        self.assertTrue(s._task_priority_mode)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "T1"}], act)
+
+    def test_held_choke_moves_forward_immediately_after_guard(self) -> None:
+        s = _line_strategy(gate="S04")
+        s._first_guard_node = "S02"
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {},
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": 3}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+        ]
+
+        act = s.decide(_inq(60, _me("S02"), _opp("S01"), nodes=nodes))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
+
+    def test_rolls_blockade_to_next_choke_even_when_previous_guard_walls_off(self) -> None:
+        s = _line_strategy(gate="S04")
+        s._first_guard_node = "S02"
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {},
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": 3}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+        ]
+
+        act = s.decide(_inq(70, _me("S03"), _opp("S01"), nodes=nodes))
+
+        self.assertEqual([{"action": "WAIT"}], act)
+
+    def test_rolls_blockade_sets_next_choke_on_departure(self) -> None:
+        s = _line_strategy(gate="S04")
+        s._first_guard_node = "S02"
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {},
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": 3}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+        ]
+        opp = _opp("S02", state="MOVING", nextNodeId="S03", edgeProgressPermille=0)
+
+        act = s.decide(_inq(80, _me("S03", goodFruit=20), opp, nodes=nodes))
+
+        self.assertIn({"action": "SET_GUARD", "targetNodeId": "S03", "extraGoodFruit": 2}, act)
+
     def test_no_node_action_while_mid_edge(self) -> None:
         s = _line_strategy(gate="S04")
         # on the edge into S02 (currentNodeId still S02) -> must only MOVE, never SET_GUARD

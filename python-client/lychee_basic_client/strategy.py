@@ -37,6 +37,8 @@ GUARD_SETUP_FRAMES = 5       # SET_GUARD read-bar (4) + activates next frame
 TASK_TIME = 8                # rough frames a task claim+complete costs (spare-time gate)
 RACE_SAFETY = 30             # only task pre-choke if we lead the race to it by > this
 FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before arrival
+TASK_BASE_TARGET = 130       # enough to fill delivery/task milestones; then deliver
+TASK_FRAME_SCORE_COST = 0.12 # rough score lost per extra task-detour frame
 ICE_BOX = "ICE_BOX"
 HORSES = ("FAST_HORSE", "SHORT_HORSE")   # move-buff resources (fast first)
 HORSE_MOVE_PER_FRAME = {"FAST_HORSE": 1200, "SHORT_HORSE": 1150}
@@ -98,6 +100,10 @@ class Strategy:
         self._resource_claim_rounds: dict[tuple[str, str], int] = {}
         self._left_start = False
         self._opp_left_start = False
+        self._task_priority_mode = False
+        self.task_base = 0
+        self._counted_tasks: set[str] = set()
+        self._task_attempts: dict[str, int] = {}
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -150,6 +156,7 @@ class Strategy:
         self._my_team = me.get("teamId")
         self._guard_blocked = self._enemy_guards(nodes_by_id)
         self._update_start_flags(me, opp)
+        self._account_tasks(tasks)
 
         if me.get("delivered") or me.get("retired"):
             return []
@@ -176,6 +183,12 @@ class Strategy:
             main = self._advance_to(
                 self.gate_node, me, node, state, phase, nodes_by_id, tasks,
                 round_no, weather
+            )
+            return self._ordered_actions(main, squad, card)
+
+        if self._task_priority_mode:
+            main = self._task_priority_action(
+                me, node, state, phase, round_no, tasks, nodes_by_id, weather
             )
             return self._ordered_actions(main, squad, card)
 
@@ -222,6 +235,12 @@ class Strategy:
                 round_no, weather
             )
 
+        if node in self.chokes and self._we_hold(node, nodes_by_id) and self._rolling_blockade_active():
+            return self._advance_to(
+                self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+                round_no, weather
+            )
+
         # FREEZE: camp on a choke the opponent must still cross and SET_GUARD only the
         # instant they've COMMITTED onto the edge into it (MOVING, nextNode==choke) AND
         # enough edge is left for the guard to finish before they arrive. They then
@@ -229,23 +248,32 @@ class Strategy:
         # no BREAK_GUARD. If they haven't committed yet we hold the choke and wait;
         # once the opponent can no longer finish, the normal delivery buffer drags
         # us off to score.
+        if self._first_choke_failed(node, me, opp, round_no, weather):
+            self._task_priority_mode = True
+            return self._task_priority_action(
+                me, node, state, phase, round_no, tasks, nodes_by_id, weather
+            )
+
         if node in self.chokes and not self._we_hold(node, nodes_by_id) \
-           and self._opp_must_cross(node, opp) and not self._opp_walled_off(opp, nodes_by_id):
+           and self._opp_must_cross(node, opp) \
+           and (self._rolling_blockade_active() or not self._opp_walled_off(opp, nodes_by_id)):
             if self._freeze_window_open(opp, node, round_no, weather) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
                 if self._first_guard_node is None:
                     self._first_guard_node = node
                 self._guarded_round[node] = round_no
                 return [M.set_guard(node, extra_good_fruit=self._guard_fruit(me))]
+            if self._rolling_blockade_active():
+                return [M.wait()]
             # opponent not committed yet -> camp; use the wait for a task ONLY if we
             # have spare time (won't miss the freeze / delivery -- see _spare_for_task)
-            t = self._free_task_here(node, tasks, me)
+            t = self._free_task_here(node, tasks, me, round_no)
             if t and self._spare_for_task(node, me, opp, round_no, nodes_by_id, weather):
                 return t
             return [M.wait()]
 
         # a task anywhere on the way -- but only with spare time: doing it must NOT let
         # the opponent beat us to an unsecured choke, nor risk our own delivery.
-        here = self._free_task_here(node, tasks, me)
+        here = self._free_task_here(node, tasks, me, round_no)
         if here and self._spare_for_task(node, me, opp, round_no, nodes_by_id, weather):
             return here
         if node == self.gate_node and not me.get("verified") and phase != "RUSH":
@@ -254,6 +282,33 @@ class Strategy:
             self.gate_node, me, node, state, phase, nodes_by_id, tasks,
             round_no, weather
         )
+
+    def _rolling_blockade_active(self) -> bool:
+        return self._first_guard_node is not None and not self._task_priority_mode
+
+    def _first_choke_failed(self, node, me, opp, round_no, weather=None) -> bool:
+        """The first start-side choke is no longer a viable freeze point."""
+        if self._first_guard_node is not None or node != self._first_start_side_choke():
+            return False
+        if self._we_can_wait_for_first_choke(me, opp, node, round_no, weather):
+            return False
+        return True
+
+    def _we_can_wait_for_first_choke(self, me, opp, node, round_no, weather=None) -> bool:
+        if opp is None or me.get("goodFruit", 0) <= GUARD_KEEP_FRUIT:
+            return False
+        if not self._opp_must_cross(node, opp):
+            return False
+        if opp.get("currentNodeId") == node and not opp.get("routeEdgeId"):
+            return False
+        if opp.get("state") == "MOVING" and opp.get("nextNodeId") == node:
+            return self._freeze_window_open(opp, node, round_no, weather)
+        return True
+
+    def _first_start_side_choke(self) -> Optional[str]:
+        if not self.chokes:
+            return None
+        return self.chokes[-1]
 
     def _spare_for_task(self, node, me, opp, round_no, nodes_by_id, weather=None) -> bool:
         """Do a task only with genuine spare time: it must not push us past our
@@ -452,14 +507,137 @@ class Strategy:
         return []
 
     # ---- opportunistic (free) task pickup ----
-    def _free_task_here(self, node, tasks, me):
+    def _free_task_here(self, node, tasks, me, round_no=0):
         """Claim a task sitting on the node we're already stopped at -- no detour,
         no dedicated stop (called only from _stopped_anyway)."""
-        for t in tasks:
-            if t.get("nodeId") == node and t.get("active") and not t.get("completed") \
-               and not t.get("failed") and not t.get("ownerPlayerId"):
-                return [M.claim_task(t["taskId"])]
+        task = self._claimable_task_here(node, tasks, me, round_no)
+        if task is not None:
+            return [M.claim_task(task["taskId"])]
         return None
+
+    def _task_priority_action(self, me, node, state, phase, round_no, tasks, nodes_by_id, weather=None):
+        """Fallback after the first choke is no longer enforceable: farm worthwhile
+        task points under the normal delivery buffer, then complete delivery."""
+        if state in BUSY_STATES:
+            return []
+        if me.get("routeEdgeId") and me.get("nextNodeId"):
+            return self._advance_to(
+                self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+                round_no, weather
+            )
+        task = self._claimable_task_here(node, tasks, me, round_no)
+        if task is not None:
+            return self._claim_task_action(task)
+        if node == self.gate_node and not me.get("verified") and phase != "RUSH":
+            return [M.wait()]
+        if self._needs_process(node, nodes_by_id) and node not in self.processed:
+            return [M.process(node)]
+        dest = self._best_task_waypoint(node, me, tasks, nodes_by_id, round_no, weather)
+        return self._advance_to(
+            dest or self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+            round_no, weather
+        )
+
+    def _claim_task_action(self, task):
+        task_id = task["taskId"]
+        self._task_attempts[task_id] = self._task_attempts.get(task_id, 0) + 1
+        return [M.claim_task(task_id)]
+
+    def _claimable_task_here(self, node, tasks, me, round_no) -> Optional[dict[str, Any]]:
+        if self._task_base_score(me) >= TASK_BASE_TARGET:
+            return None
+        best = None
+        for t in tasks:
+            if t.get("nodeId") != node or not self._task_claimable(t, me, round_no):
+                continue
+            if best is None or int(t.get("score", 0) or 0) > int(best.get("score", 0) or 0):
+                best = t
+        return best
+
+    def _task_claimable(self, task, me, round_no) -> bool:
+        task_id = task.get("taskId")
+        if not isinstance(task_id, str):
+            return False
+        if not task.get("active") or task.get("completed") or task.get("failed"):
+            return False
+        owner = task.get("ownerPlayerId", 0)
+        if owner not in (0, None, self.player_id):
+            return False
+        protected = task.get("protectionPlayerId", 0)
+        if protected not in (0, None, self.player_id):
+            return False
+        expire = int(task.get("expireRound", 0) or 0)
+        if expire and round_no >= expire:
+            return False
+        if task.get("taskTemplateId") == "T06" and self._held_horse(me) is None:
+            return False
+        if self._task_attempts.get(task_id, 0) >= 3:
+            return False
+        return True
+
+    def _best_task_waypoint(self, node, me, tasks, nodes_by_id, round_no, weather=None) -> Optional[str]:
+        if self._task_base_score(me) >= TASK_BASE_TARGET:
+            return None
+        direct = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
+        best_node = None
+        best_net = 0.0
+        for task in tasks:
+            if not self._task_claimable(task, me, round_no):
+                continue
+            target = task.get("nodeId")
+            if not target or target == node:
+                continue
+            to_task = self._eta_to_node(
+                me, target, nodes_by_id, round_no=round_no,
+                weather=weather, avoid=self._guard_blocked | self.route_avoid
+            )
+            if to_task == float("inf"):
+                continue
+            task_frames = int(task.get("processRound", TASK_TIME) or TASK_TIME)
+            finish_task_round = round_no + to_task + task_frames
+            expire = int(task.get("expireRound", 0) or 0)
+            if expire and finish_task_round >= expire:
+                continue
+            deliver_after = self._frames_to_deliver(
+                target, me, nodes_by_id, finish_task_round, weather
+            )
+            if deliver_after == float("inf"):
+                continue
+            total = to_task + task_frames + deliver_after
+            if round_no + total + DELIVER_MARGIN >= TOTAL_ROUNDS:
+                continue
+            detour = max(0.0, total - direct) if direct != float("inf") else total
+            net = self._task_value(task, me) - detour * TASK_FRAME_SCORE_COST
+            if net > best_net:
+                best_node = target
+                best_net = net
+        return best_node
+
+    def _task_value(self, task, me) -> float:
+        score = float(task.get("score", 0) or 0)
+        base = self._task_base_score(me)
+        if base < 90:
+            return score * 2.5
+        if base < TASK_BASE_TARGET:
+            return score
+        return 0.0
+
+    def _task_base_score(self, me) -> int:
+        score = me.get("taskScore")
+        if isinstance(score, (int, float)):
+            return max(self.task_base, int(score))
+        return self.task_base
+
+    def _account_tasks(self, tasks) -> None:
+        for task in tasks:
+            task_id = task.get("taskId")
+            if (
+                task.get("completed")
+                and task.get("ownerPlayerId") == self.player_id
+                and task_id not in self._counted_tasks
+            ):
+                self._counted_tasks.add(task_id)
+                self.task_base += int(task.get("score", 0) or 0)
 
     # ---- delivery-time safety ----
     def _must_deliver(self, node, me, opp, round_no, nodes_by_id, weather=None) -> bool:
@@ -472,6 +650,8 @@ class Strategy:
     def _deny_still_matters(self, node, opp, round_no, nodes_by_id, weather=None) -> bool:
         """True while leaving now gives the opponent a fastest-route finish and we
         still have a choke ahead/underfoot that can deny that finish."""
+        if self._task_priority_mode:
+            return False
         return (
             self._opponent_can_still_deliver(opp, round_no, nodes_by_id, weather)
             and self._live_deny_choke_exists(node, opp)
