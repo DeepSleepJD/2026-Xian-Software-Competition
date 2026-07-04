@@ -22,7 +22,11 @@ class AggressiveStrategy(Strategy):
             if first:
                 self.route_avoid = {first}
 
-    def _blockade(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id):
+    def _main_action(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id):
+        if state in ("MOVING", "PROCESSING", "CONTESTING"):
+            return []
+        if me.get("routeEdgeId") and me.get("nextNodeId"):
+            return [M.move(me["nextNodeId"])]
         self._ensure_diverged(nodes_by_id)
         dest = self.terminal_node if me.get("verified") else self.gate_node
         return self._advance_to(dest, me, node, state, phase, nodes_by_id)

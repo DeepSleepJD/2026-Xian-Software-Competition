@@ -22,9 +22,9 @@ from .contest import active_contest, pick_card
 from .graph import Graph
 
 TOTAL_ROUNDS = 600
-DELIVER_MARGIN = 60          # safety frames before the delivery deadline (covers the
-                             # obstacle clear-waits our frame estimate doesn't model, so
-                             # camping on a choke never drags us past our own delivery)
+DELIVER_MARGIN = 40          # safety frames before the delivery deadline; camp closer to
+                             # the true extreme so a stalling opponent (who leaves after
+                             # us) can't make their own 600-frame delivery
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
 DELIVER_FRAMES = 2           # move-into-terminal + DELIVER
 GUARD_KEEP_FRUIT = 6         # never spend guard fruit below this (keep some to deliver)
@@ -75,6 +75,8 @@ class Strategy:
         self.route_avoid: set[str] = set()       # nodes to route around (variants/testing)
         self._weather_windows: list = []         # (route_mult, start_round, end_round)
         self._round = 0
+        self._opp = None
+        self._tasks: list = []
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -118,83 +120,94 @@ class Strategy:
         self._my_team = me.get("teamId")
         self._guard_blocked = self._enemy_guards(nodes_by_id)
         self._round = round_no
+        self._opp = opp
+        self._tasks = tasks
         self._ingest_weather(inquire_data.get("weather") or {}, round_no)
 
         if me.get("delivered") or me.get("retired"):
             return []
 
-        # window card rides alongside the main action (separate quota)
+        # window card (XIAN_GONG when legal) + squad (obstacle clear) are SEPARATE
+        # action quotas -- they ride alongside the main-car action.
         card = self._card(me, contests, round_no)
-
-        # squad pre-clears obstacles ahead (separate quota) so the main car never
-        # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
         squad = self._squad_action(node, me, opp, nodes_by_id)
-
-        # once verified we've committed to the delivery run -> always finish it
-        # (we only ever VERIFY during our own delivery push).
-        if me.get("verified"):
-            return card + squad + self._advance_to(self.terminal_node, me, node, state, phase, nodes_by_id)
-
-        # delivery safety: if we can't afford to block any longer, go to the gate.
-        if self._must_deliver(node, me, round_no):
-            return card + squad + self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
-
-        main = self._blockade(me, opp, node, state, phase, round_no, tasks, nodes_by_id)
-        main = squad + main
-        # remember opponent position for next-frame "just departed" detection
-        if opp is not None:
+        main = self._main_action(me, opp, node, state, phase, round_no, tasks, nodes_by_id)
+        if opp is not None:  # remember opponent for next-frame "just committed" detection
             self._opp_prev_node = opp.get("currentNodeId")
             self._opp_prev_edge = opp.get("routeEdgeId")
-        return card + main
+        return card + squad + main
 
-    # ---- blockade / phase logic ----
-    def _blockade(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id):
-        """Goal: WE deliver, the opponent doesn't. Camp the first choke the opponent
-        must cross and, the instant they commit ONTO the edge into it (state MOVING,
-        with enough edge left for the guard to activate), SET_GUARD -- they arrive to
-        a blocked node and FREEZE mid-edge, where they can neither FORCED_PASS nor
-        BREAK_GUARD (both need a current node) nor backtrack. Their only out is a
-        squad-weaken, which we out-heal with SQUAD_REINFORCE (see _squad_action).
-        Then we run to deliver. Never linger for tasks (only grab freebies where we
-        already stop). Our delivery deadline (_must_deliver upstream) always wins."""
+    # ---- main-car decision: one strict priority ladder ----
+    def _main_action(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id):
+        """Goal: WE deliver, the opponent does NOT. Priority each frame:
+          1. busy / mid-edge   -> let the engine run / keep moving (no node action)
+          2. verified          -> committed to delivery: rush to the terminal
+          3. delivery deadline -> our own precise ETA says leave now: rush to the gate
+          4. blockade          -> camp the first common choke the opponent must cross;
+                                  the instant they COMMIT onto its edge, SET_GUARD to
+                                  freeze them mid-edge; else hold the choke
+          5. otherwise         -> nothing to intercept: rush to the gate and deliver
+
+        Leaving a choke happens ONLY via (3) our deadline or (4) after we've frozen it
+        -- never otherwise. Tasks are the LOWEST priority: only while we are stationary
+        ANYWAY (camping with the opponent still far, or the forced pre-RUSH gate wait)
+        and only with genuine spare time; NEVER while advancing / rushing / on deadline.
+        A task costs its own serial read-bar (it is never free)."""
         if state in BUSY_STATES:
             return []
-
-        # MID-EDGE: never attempt a node action -- SET_GUARD/PROCESS while travelling
-        # are rejected MOVING_ACTION_FORBIDDEN, which once stalled us dead on the edge
-        # spamming SET_GUARD. currentNodeId still reads the edge's start node, so gate
-        # this on routeEdgeId, not on `node`. Just push to the far end.
+        # mid-edge: SET_GUARD/PROCESS are forbidden while travelling -> just keep moving
         if me.get("routeEdgeId") and me.get("nextNodeId"):
             return [M.move(me["nextNodeId"])]
 
-        # FREEZE: camp on a choke the opponent must still cross and SET_GUARD only the
-        # instant they've COMMITTED onto the edge into it (MOVING, nextNode==choke) AND
-        # enough edge is left for the guard to finish before they arrive. They then
-        # arrive to a blocked node and freeze mid-edge -- no backtrack, no FORCED_PASS,
-        # no BREAK_GUARD. If they haven't committed yet we hold the choke and wait; our
-        # delivery deadline (_must_deliver upstream) drags us off before we're too late.
-        if node in self.chokes and not self._we_hold(node, nodes_by_id) \
-           and self._opp_must_cross(node, opp) and not self._opp_walled_off(opp, nodes_by_id):
-            if self._freeze_window_open(opp, node) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
-                if self._first_guard_node is None:
-                    self._first_guard_node = node
-                self._guarded_round[node] = round_no
-                return [M.set_guard(node, extra_good_fruit=self._guard_fruit(me))]
-            # opponent not committed yet -> camp; use the wait for a task ONLY if we
-            # have spare time (won't miss the freeze / delivery -- see _spare_for_task)
-            t = self._free_task_here(node, tasks, me)
-            if t and self._spare_for_task(node, me, opp, round_no, nodes_by_id):
-                return t
-            return [M.wait()]
+        # 2. committed to the delivery run -> finish it (rush, never task)
+        if me.get("verified"):
+            return self._advance_to(self.terminal_node, me, node, state, phase, nodes_by_id)
 
-        # a task anywhere on the way -- but only with spare time: doing it must NOT let
-        # the opponent beat us to an unsecured choke, nor risk our own delivery.
-        here = self._free_task_here(node, tasks, me)
-        if here and self._spare_for_task(node, me, opp, round_no, nodes_by_id):
-            return here
-        if node == self.gate_node and not me.get("verified") and phase != "RUSH":
+        # 3. our own delivery deadline (precise own ETA) -> rush to the gate (never task)
+        if self._must_deliver(node, me, round_no):
+            return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
+
+        # 4. blockade: race to and camp the first common choke the opponent must cross
+        N = self._camp_choke(node, opp, nodes_by_id)
+        if N is not None:
+            if node == N:
+                # (b) opponent has committed onto the edge in -> freeze (fresh guard)
+                if self._freeze_window_open(opp, N) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
+                    if self._first_guard_node is None:
+                        self._first_guard_node = N
+                    self._guarded_round[N] = round_no
+                    return [M.set_guard(N, extra_good_fruit=self._guard_fruit(me))]
+                # hold the choke; only in this genuine idle wait may we grab a task
+                if self._spare_for_task(node, me, opp, round_no, nodes_by_id):
+                    t = self._free_task_here(node, tasks, me)
+                    if t:
+                        return t
+                return [M.wait()]
+            return self._advance_to(N, me, node, state, phase, nodes_by_id)  # race there
+
+        # 5. nothing to intercept (opponent walled off / past every choke) -> deliver.
+        # Only the forced pre-RUSH gate wait is genuine idle time for a task.
+        if node == self.gate_node and phase != "RUSH":
+            if self._spare_for_task(node, me, opp, round_no, nodes_by_id):
+                t = self._free_task_here(node, tasks, me)
+                if t:
+                    return t
             return [M.wait()]
         return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
+
+    def _camp_choke(self, node, opp, nodes_by_id):
+        """The first (start-side) common choke the opponent must still cross that we
+        don't already hold and haven't passed -- the one to race to and camp on. None
+        when the opponent is walled off or past every choke (blockade done -> deliver)."""
+        if opp is None or self._opp_walled_off(opp, nodes_by_id):
+            return None
+        for c in reversed(self.chokes):  # start-side first (the opponent hits it first)
+            if self._we_hold(c, nodes_by_id) or not self._opp_must_cross(c, opp):
+                continue
+            # only if we're on it or still before it (never backtrack to a passed choke)
+            if node == c or self.graph.path_frames(node, self.gate_node, avoid={c}) == float("inf"):
+                return c
+        return None
 
     def _spare_for_task(self, node, me, opp, round_no, nodes_by_id) -> bool:
         """Do a task only with genuine spare time: it must not push us past our
@@ -393,8 +406,15 @@ class Strategy:
         # gate en route -> must VERIFY before passing (only in RUSH)
         if node == self.gate_node and not me.get("verified"):
             return self._arrive(self.gate_node, me, phase, nodes_by_id)
-        # mandatory fixed process at the node we're standing on
+        # mandatory fixed process at the node we're standing on: this is a forced STOP,
+        # so grab a task here first IF we have genuine spare (task costs its own serial
+        # read-bar -- never free -- so it's gated the same as anywhere else). During the
+        # tight race to the choke _spare_for_task is False -> we just process and rush.
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
+            if self._spare_for_task(node, me, self._opp, self._round, nodes_by_id):
+                t = self._free_task_here(node, self._tasks, me)
+                if t:
+                    return t
             return [M.process(node)]
         # grab / mount a horse to win the race to the choke (and deny it to the
         # opponent). A move-buff means every following edge is faster.
@@ -452,12 +472,12 @@ class Strategy:
         return round_no + need + DELIVER_MARGIN >= TOTAL_ROUNDS
 
     def _frames_to_deliver(self, node, me) -> float:
-        wf, br = self._wmult, self._round
-        to_gate = 0 if me.get("verified") else self.graph.path_frames(
-            node, self.gate_node, weather_fn=wf, base_round=br)
+        # OUR OWN precise ETA to deliver -- deterministic, no opponent, no weather guess
+        # (per design: the "can we still make it" deadline is about us only).
+        to_gate = 0 if me.get("verified") else self.graph.path_frames(node, self.gate_node)
         verify = 0 if me.get("verified") else VERIFY_FRAMES
         start = self.gate_node if not me.get("verified") else node
-        to_term = self.graph.path_frames(start, self.terminal_node, weather_fn=wf, base_round=br)
+        to_term = self.graph.path_frames(start, self.terminal_node)
         return to_gate + verify + to_term + DELIVER_FRAMES
 
     # ---- helpers ----
