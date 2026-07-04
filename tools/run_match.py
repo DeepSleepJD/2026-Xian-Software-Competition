@@ -114,6 +114,10 @@ def main() -> int:
     parser.add_argument("--client-cmd", help="玩家1001命令模板，占位符 {player_id} {host} {port} {name}")
     parser.add_argument("--demo-cmd", help="玩家2002命令模板，同上")
     parser.add_argument("--match-id", default="local-debug-l1")
+    parser.add_argument("--map", help="换图变体：Unity 格式地图 JSON 路径（经 GAME_MAP_PATH "
+                        "让裁判加载外部图，检验换图泛化性）。须 Unity 格式（含 grid/legend），"
+                        "普通 GameStartMap/map_config 格式会撞 fastjson 反射墙加载失败。"
+                        "见 tools/gen_variant_maps.py 与 docs/地图泛化测试.md")
     args = parser.parse_args()
 
     if args.ui_only:
@@ -134,6 +138,17 @@ def main() -> int:
         (SERVER_DIR / name).unlink(missing_ok=True)
 
     env = clean_env()
+    if args.map:
+        map_path = Path(args.map)
+        if not map_path.is_absolute():
+            map_path = (REPO_ROOT / map_path).resolve()
+        if not map_path.exists():
+            print(f"[ERROR] 换图文件不存在: {map_path}")
+            return 1
+        # 裁判读 GAME_MAP_PATH 加载外部图；JVM 认正斜杠绝对路径
+        env["GAME_MAP_PATH"] = str(map_path).replace("\\", "/")
+        print(f"[换图] 裁判将加载外部变体图: {env['GAME_MAP_PATH']}")
+
     procs: list[tuple[str, subprocess.Popen]] = []
     try:
         print(f"[1/3] 启动裁判服务端 127.0.0.1:{args.port}  seed={args.seed}  round={args.round_ms}ms")

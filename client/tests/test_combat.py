@@ -521,6 +521,14 @@ class CombatStrategyTests(unittest.TestCase):
         self.assertIn({"action": "SQUAD_CLEAR", "targetNodeId": "S10"}, acts)
         self.assertNotIn({"action": "CLEAR", "targetNodeId": "S10"}, acts)
 
+    def test_squad_clear_can_continue_after_first_opening_dispatch(self) -> None:
+        acts = self.actions(inquire(100, nodes=obstacle_s10(), squad_available=6))
+        self.assertIn({"action": "SQUAD_CLEAR", "targetNodeId": "S10"}, acts)
+
+    def test_squad_clear_keeps_four_squad_floor(self) -> None:
+        acts = self.actions(inquire(100, nodes=obstacle_s10(), squad_available=5))
+        self.assertNotIn("SQUAD_CLEAR", [a["action"] for a in acts])
+
     def test_clears_obstacle_on_first_common_rush_next_hop(self) -> None:
         self.state = GameState(MY_ID)
         self.state.update_start(RUSH_OBSTACLE_START)

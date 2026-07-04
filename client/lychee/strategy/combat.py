@@ -341,9 +341,9 @@ class CombatStrategy(Strategy):
         me = state.me
         if state.phase == "RUSH":
             return None
-        # 铁律：预清障同样不得击穿验核前 6 支保留（P4m 陪练局实证：r1-2 两次预清
-        # 8→4，削卡本钱只剩两刀，差 2 防干等风化 70 帧）。8 满编时首次预清仍放行
-        if me.squad_available - 2 < max(self._squad_reserve(state), CLEAR_SQUAD_FLOOR):
+        # 清障是开路动作，不能套验核前 6 支保留线；否则满编 8 支也只能派一次
+        # SQUAD_CLEAR。这里单独留 CLEAR_SQUAD_FLOOR，保证还能处理后续守卡威胁。
+        if me.squad_available - 2 < CLEAR_SQUAD_FLOOR:
             return None
         cur = me.current_node_id
         if not cur:
@@ -388,7 +388,7 @@ class CombatStrategy(Strategy):
         me = state.me
         if state.phase == "RUSH":
             return False
-        if me.squad_available - 2 < max(self._squad_reserve(state), CLEAR_SQUAD_FLOOR):
+        if me.squad_available - 2 < CLEAR_SQUAD_FLOOR:
             return False
         ns = state.node_states.get(node_id)
         if ns is None or not ns.has_obstacle:

@@ -15,3 +15,7 @@ refs/
 dist/
 
 looog/
+
+# 换图变体：生成的 Unity 变体图可由 tools/gen_variant_maps.py 随时重建，不入库
+# （保留 server_embedded_variant_1.json 生成模板 + README）
+tools/variant_maps/unity_*.json
