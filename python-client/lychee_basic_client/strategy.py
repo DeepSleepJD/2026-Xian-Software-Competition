@@ -43,6 +43,8 @@ SCOUT_DEFAULT_PROCESS_REDUCE = 3
 SCOUT_MARKER_LIFETIME = 45
 GUARD_KEEP_FRUIT = 6         # never spend guard fruit below this (keep some to deliver)
 GUARD_SETUP_FRAMES = 5       # SET_GUARD read-bar (4) + activates next frame
+SQUAD_REINFORCE_COST = 2     # squad members consumed per SQUAD_REINFORCE (rules 6.4)
+GATE_GUARD_EXTRA_FRUIT = 1   # gate defense cap is 4 = 2 + 1*2; a 2nd fruit is wasted
 TASK_TIME = 8                # rough frames a task claim+complete costs (deadline gate)
 RACE_SAFETY = 8              # lead margin that must REMAIN after paying an op's frames
                              # pre-choke (we trust the ETA model -- horses/weather/scouts
@@ -109,6 +111,10 @@ class Strategy:
         self._guarded_round: dict[str, int] = {}
         # obstacle nodes we've dispatched a squad to clear (avoid re-dispatch)
         self._squad_sent: set[str] = set()
+        # guard-reinforcement bookkeeping: enemy weaken orders already counted,
+        # and per-node count of weakens we still owe a SQUAD_REINFORCE for
+        self._seen_weaken_orders: set[str] = set()
+        self._reinforce_debt: dict[str, int] = {}
         self._scout_sent: set[str] = set()
         self._guard_blocked: set[str] = set()   # enemy guards blocking us
         self.route_avoid: set[str] = set()       # nodes to route around (variants/testing)
@@ -173,6 +179,7 @@ class Strategy:
         self._account_process(inquire_data.get("events") or [])
         self._my_team = me.get("teamId")
         self._guard_blocked = self._enemy_guards(nodes_by_id)
+        self._account_enemy_weakens(inquire_data.get("events") or [], nodes_by_id)
         self._update_start_flags(me, opp)
         self._account_tasks(tasks)
         self._latest_tasks = tasks
@@ -196,6 +203,18 @@ class Strategy:
         # squad pre-clears obstacles ahead (separate quota) so the main car never
         # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
         squad = self._squad_action(node, me, opp, tasks, nodes_by_id, round_no, weather)
+
+        # Endgame gate ambush: the gate is the one true cut-vertex before the
+        # terminal (palace stations have branch bypasses), so while parked on it
+        # -- pre-RUSH wait or post-verify -- freeze the opponent mid-edge the
+        # moment they commit into the gate. Checked before rush-speed so the
+        # sprint buff isn't burned while camping.
+        if node == self.gate_node and (me.get("verified") or phase != "RUSH"):
+            ambush = self._gate_ambush_action(
+                me, opp, node, state, round_no, nodes_by_id, weather
+            )
+            if ambush:
+                return self._ordered_actions(ambush, squad, card)
 
         if self._rush_speed_action(me, state, phase):
             return self._ordered_actions([M.rush_speed()], squad, card)
@@ -469,6 +488,90 @@ class Strategy:
         g = nodes_by_id.get(node, {}).get("guard") or {}
         return bool(g.get("active") and g.get("ownerTeamId") == self._my_team and g.get("defense", 0) > 0)
 
+    # ---- guard reinforcement ----
+    def _account_enemy_weakens(self, events, nodes_by_id) -> None:
+        """Count enemy SQUAD_WEAKEN aimed at a guard we hold; each one is one
+        SQUAD_REINFORCE of debt. Keyed by orderId so the dispatch event and the
+        later landing event of the same order count once."""
+        for e in events:
+            etype = e.get("type")
+            if etype not in ("SQUAD_DISPATCH", "SQUAD_WEAKEN"):
+                continue
+            pl = e.get("payload") or {}
+            if pl.get("playerId") == self.player_id:
+                continue
+            if etype == "SQUAD_DISPATCH" and pl.get("action") != "SQUAD_WEAKEN":
+                continue
+            target = pl.get("targetNodeId")
+            order = pl.get("orderId")
+            if not target or (order and order in self._seen_weaken_orders):
+                continue
+            if not self._we_hold(target, nodes_by_id):
+                continue
+            if order:
+                self._seen_weaken_orders.add(order)
+            self._reinforce_debt[target] = self._reinforce_debt.get(target, 0) + 1
+
+    def _guard_reinforce_action(self, me, nodes_by_id) -> list:
+        """One SQUAD_REINFORCE per enemy weaken aimed at a still-live guard of
+        ours. Held while the guard sits at its defense cap (the +2 would be
+        wasted -- answer once the weaken lands) and dropped once the guard is
+        gone (a defense-0 guard is removed and can never be re-activated)."""
+        if int(me.get("squadAvailable", 0) or 0) < SQUAD_REINFORCE_COST:
+            return []
+        for nid in list(self._reinforce_debt):
+            if self._reinforce_debt[nid] <= 0:
+                continue
+            guard = (nodes_by_id.get(nid) or {}).get("guard") or {}
+            if not (guard.get("active") and guard.get("ownerTeamId") == self._my_team
+                    and guard.get("defense", 0) > 0):
+                self._reinforce_debt[nid] = 0
+                continue
+            if guard.get("defense", 0) >= self._guard_defense_cap(nid, nodes_by_id):
+                continue
+            self._reinforce_debt[nid] -= 1
+            return [M.squad_reinforce(nid)]
+        return []
+
+    def _guard_defense_cap(self, nid, nodes_by_id) -> int:
+        """Defense cap by node class (rules 6.2.1)."""
+        node = nodes_by_id.get(nid) or {}
+        if nid == self.gate_node:
+            return 4
+        if node.get("nodeType") == "KEY_PASS":
+            return 7
+        if node.get("hasObstacle"):
+            return 5
+        return 6
+
+    # ---- endgame gate ambush ----
+    def _gate_ambush_action(self, me, opp, node, state, round_no, nodes_by_id, weather=None) -> list:
+        """Camp the gate while we have delivery slack and SET_GUARD the instant
+        the opponent commits onto an edge into it -- they freeze mid-edge and
+        cannot verify. Fire-and-forget: once the trap is armed, the opponent is
+        already past/at the gate, they can no longer finish anyway, or our own
+        deadline nears, fall through to the normal delivery run."""
+        if state in BUSY_STATES or node != self.gate_node:
+            return []
+        if me.get("routeEdgeId") or me.get("nextNodeId"):
+            return []
+        if opp is None or opp.get("delivered") or opp.get("retired"):
+            return []
+        if opp.get("currentNodeId") in (self.gate_node, self.terminal_node) \
+           and not opp.get("routeEdgeId"):
+            return []
+        if self._we_hold(node, nodes_by_id):
+            return []
+        if not self._opponent_can_still_deliver(opp, round_no, nodes_by_id, weather):
+            return []
+        if self._must_deliver(node, me, opp, round_no, nodes_by_id, weather):
+            return []
+        if self._freeze_window_open(opp, node, round_no, weather) \
+           and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
+            self._guarded_round[node] = round_no
+            return [M.set_guard(node, extra_good_fruit=GATE_GUARD_EXTRA_FRUIT)]
+        return [M.wait()]
+
     def _freeze_window_open(self, opp, N, round_no=0, weather=None) -> bool:
         """The opponent has committed onto the edge into N and there is still enough
         of that edge left for our guard to finish setting up before they arrive."""
@@ -510,17 +613,17 @@ class Strategy:
         return None
 
     def _squad_action(self, node, me, opp, tasks, nodes_by_id, round_no=0, weather=None) -> list:
-        """Squad CLEARS obstacles on our path so the main car MOVEs through (we never
-        FORCED_PASS). Dispatch to the nearest uncleared obstacle ahead (clears in
-        parallel as we race).
-
-        NOTE: guard reinforcement (SQUAD_REINFORCE) is intentionally REMOVED for now
-        -- to be re-added separately. The blockade relies on freeze timing (fresh
-        max-defense guard set at the last moment) so a squad-poor opponent can't
-        weaken through it, not on healing."""
+        """Squad priorities: (1) REINFORCE a live guard of ours the enemy is
+        squad-weakening (+2 answers their -2, see _guard_reinforce_action);
+        (2) CLEAR obstacles on our path so the main car MOVEs through (we never
+        FORCED_PASS), dispatched to the nearest uncleared obstacle ahead;
+        (3) scout."""
         squad_available = int(me.get("squadAvailable", 0) or 0)
         if squad_available < 1:
             return []
+        reinforce = self._guard_reinforce_action(me, nodes_by_id)
+        if reinforce:
+            return reinforce
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         if squad_available >= 2:
             task_obstacle = self._post_freeze_task_obstacle(

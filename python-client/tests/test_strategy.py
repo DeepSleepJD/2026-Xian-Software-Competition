@@ -991,5 +991,143 @@ class RushTacticTests(unittest.TestCase):
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
 
+def _guard_nodes(guard_node, defense, team="RED", node_type=None):
+    nodes = [{"nodeId": f"S0{i}", "hasObstacle": False, "resourceStock": {}}
+             for i in range(1, 6)]
+    for n in nodes:
+        if n["nodeId"] == guard_node:
+            n["guard"] = {"active": defense > 0, "ownerTeamId": team,
+                          "defense": defense}
+            if node_type:
+                n["nodeType"] = node_type
+    return nodes
+
+
+def _weaken_dispatch(order, target, round_no):
+    return {"type": "SQUAD_DISPATCH", "round": round_no,
+            "payload": {"orderId": order, "playerId": 2002,
+                        "action": "SQUAD_WEAKEN", "targetNodeId": target,
+                        "completeRound": round_no + 3}}
+
+
+class GuardReinforceTests(unittest.TestCase):
+    def _decide(self, s, me, opp, nodes, events, round_no=50):
+        inq = _inq(round_no, me, opp, nodes=nodes)
+        inq["events"] = events
+        return s.decide(inq)
+
+    def test_reinforces_when_enemy_weaken_targets_our_guard(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S01", squadAvailable=4)
+        nodes = _guard_nodes("S03", defense=4)
+        act = self._decide(s, me, _opp("S02"), nodes,
+                           [_weaken_dispatch("W1", "S03", 49)])
+        self.assertIn({"action": "SQUAD_REINFORCE", "targetNodeId": "S03"}, act)
+
+    def test_one_reinforce_per_enemy_order(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S01", squadAvailable=8)
+        nodes = _guard_nodes("S03", defense=4)
+        ev = [_weaken_dispatch("W1", "S03", 49)]
+        act1 = self._decide(s, me, _opp("S02"), nodes, ev, round_no=50)
+        # same order re-observed (dispatch + landing share the orderId)
+        landing = {"type": "SQUAD_WEAKEN", "round": 52,
+                   "payload": {"orderId": "W1", "playerId": 2002,
+                               "targetNodeId": "S03", "before": 4, "after": 2}}
+        act2 = self._decide(s, me, _opp("S02"), nodes, [landing], round_no=53)
+        self.assertIn({"action": "SQUAD_REINFORCE", "targetNodeId": "S03"}, act1)
+        self.assertNotIn({"action": "SQUAD_REINFORCE", "targetNodeId": "S03"}, act2)
+
+    def test_holds_reinforce_while_guard_at_cap_then_answers(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S01", squadAvailable=4)
+        at_cap = _guard_nodes("S03", defense=6)
+        act1 = self._decide(s, me, _opp("S02"), at_cap,
+                            [_weaken_dispatch("W1", "S03", 49)], round_no=50)
+        self.assertNotIn({"action": "SQUAD_REINFORCE", "targetNodeId": "S03"}, act1)
+        # weaken landed -> defense below cap -> the held debt is answered
+        dropped = _guard_nodes("S03", defense=4)
+        act2 = self._decide(s, me, _opp("S02"), dropped, [], round_no=53)
+        self.assertIn({"action": "SQUAD_REINFORCE", "targetNodeId": "S03"}, act2)
+
+    def test_never_reinforces_a_dead_guard(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S01", squadAvailable=4)
+        live = _guard_nodes("S03", defense=2)
+        self._decide(s, me, _opp("S02"), live,
+                     [_weaken_dispatch("W1", "S03", 49),
+                      _weaken_dispatch("W2", "S03", 49)], round_no=50)
+        dead = _guard_nodes("S03", defense=0)
+        act = self._decide(s, me, _opp("S02"), dead, [], round_no=53)
+        self.assertNotIn({"action": "SQUAD_REINFORCE", "targetNodeId": "S03"}, act)
+
+    def test_needs_two_squad_members(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S01", squadAvailable=1)
+        nodes = _guard_nodes("S03", defense=4)
+        act = self._decide(s, me, _opp("S02"), nodes,
+                           [_weaken_dispatch("W1", "S03", 49)])
+        self.assertNotIn({"action": "SQUAD_REINFORCE", "targetNodeId": "S03"}, act)
+
+
+class GateAmbushTests(unittest.TestCase):
+    # gate S04, terminal S05 on the line map; we are parked on the gate
+    def test_freezes_opponent_committing_into_the_gate(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=0)
+        opp = _opp("S03", state="MOVING", nextNodeId="S04",
+                   routeEdgeId="E03", edgeProgressPermille=0)
+        act = s.decide(_inq(500, me, opp, phase="RUSH"))
+        self.assertIn(
+            {"action": "SET_GUARD", "targetNodeId": "S04", "extraGoodFruit": 1},
+            act,
+        )
+
+    def test_camps_the_gate_while_opponent_approaches(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=0)
+        act = s.decide(_inq(500, me, _opp("S02"), phase="RUSH"))
+        self.assertEqual({"action": "WAIT"}, act[0])
+
+    def test_delivers_once_opponent_reaches_the_gate_unfrozen(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=1)
+        act = s.decide(_inq(500, me, _opp("S04"), phase="RUSH"))
+        self.assertNotEqual({"action": "WAIT"}, act[0])
+        self.assertNotIn("SET_GUARD", [a["action"] for a in act])
+
+    def test_own_deadline_outranks_the_ambush(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=1)
+        act = s.decide(_inq(TOTAL_ROUNDS - 12, me, _opp("S02"), phase="RUSH"))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S05"}], act)
+
+    def test_no_ambush_when_opponent_cannot_finish(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=1)
+        act = s.decide(_inq(500, me, _opp("S02", retired=True), phase="RUSH"))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S05"}], act)
+
+    def test_trap_armed_means_go_deliver(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=1)
+        opp = _opp("S03", state="MOVING", nextNodeId="S04",
+                   routeEdgeId="E03", edgeProgressPermille=500)
+        nodes = _guard_nodes("S04", defense=4)
+        act = s.decide(_inq(510, me, opp, nodes=nodes, phase="RUSH"))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S05"}], act)
+
+    def test_arms_the_trap_pre_rush_while_waiting_at_the_gate(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S04", verified=False, goodFruit=20)
+        opp = _opp("S03", state="MOVING", nextNodeId="S04",
+                   routeEdgeId="E03", edgeProgressPermille=0)
+        act = s.decide(_inq(300, me, opp, phase="NORMAL"))
+        self.assertIn(
+            {"action": "SET_GUARD", "targetNodeId": "S04", "extraGoodFruit": 1},
+            act,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
