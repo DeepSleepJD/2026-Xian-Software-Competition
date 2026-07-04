@@ -32,8 +32,8 @@ TOTAL_ROUNDS = 600
 DELIVER_MARGIN = 10          # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
-DELIVERY_ABANDON_MARGIN = 0  # once ETA says delivery misses the deadline, switch
-                             # to task-priority instead of waiting on opponent choices
+DELIVERY_ABANDON_MARGIN = 50 # only stop forcing delivery once the ETA is this far
+                             # beyond the deadline; e.g. ETA=200 abandons at 450
 DENY_DELIVER_MARGIN = 0      # no buffer while an unsecured blockade is the only thing
                              # preventing the opponent from finishing
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
@@ -204,8 +204,10 @@ class Strategy:
         # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
         squad = self._squad_action(node, me, opp, tasks, nodes_by_id, round_no, weather)
 
-        if self._should_abandon_delivery(node, me, round_no, nodes_by_id, weather):
-            self._enter_task_priority(abandon_delivery=True)
+        # RUSH_SPEED IS a main-car action and is only valid mid-move -> issue it (as THE
+        # main action) while we're MOVING; never when idle/parked (invalid + wasted).
+        if self._rush_speed_action(me, state, phase):
+            return self._ordered_actions([M.rush_speed()], squad, card)
 
         # Highest-priority local ambush: whenever we are already standing on a
         # node the opponent is about to enter, arm it; if they are parked one hop
@@ -228,9 +230,6 @@ class Strategy:
             if ambush:
                 return self._ordered_actions(ambush, squad, card)
 
-        if self._rush_speed_action(me, state, phase):
-            return self._ordered_actions([M.rush_speed()], squad, card)
-
         # once verified we've committed to the delivery run -> always finish it
         # (we only ever VERIFY during our own delivery push).
         if me.get("verified"):
@@ -239,6 +238,9 @@ class Strategy:
                 round_no, weather
             )
             return self._ordered_actions(main, squad, card)
+
+        if self._should_abandon_delivery(node, me, round_no, nodes_by_id, weather):
+            self._enter_task_priority(abandon_delivery=True)
 
         # Delivery safety. If the opponent can still finish through an unsecured
         # choke, use the hard latest-departure time instead of the normal buffer.
@@ -504,8 +506,6 @@ class Strategy:
         if state in BUSY_STATES or not node:
             return []
         if me.get("routeEdgeId") or me.get("nextNodeId"):
-            return []
-        if self._delivery_abandoned:
             return []
         if node == self.terminal_node:
             return []
@@ -1226,7 +1226,8 @@ class Strategy:
 
     # ---- delivery-time safety ----
     def _rush_speed_action(self, me, state, phase) -> bool:
-        if phase != "RUSH" or state in BUSY_STATES:
+        # RUSH_SPEED is a main-car action valid only DURING a move (state MOVING).
+        if phase != "RUSH" or state != "MOVING":
             return False
         if me.get("delivered") or me.get("retired"):
             return False
@@ -1844,6 +1845,9 @@ class Strategy:
                 return "ABSTAIN"
             if me.get("guardActionPoint", 0) > 0:
                 return "BING_ZHENG"
+            return "ABSTAIN"
+        # already won this contest 2-0 -> the 3rd tap is moot, save the card
+        if contest.get("roundIndex") == 3 and self._contest_points(contest) == (2, 0):
             return "ABSTAIN"
         return pick_card(me, contest)
 

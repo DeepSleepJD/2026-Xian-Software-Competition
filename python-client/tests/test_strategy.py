@@ -964,13 +964,14 @@ class OpeningContestTests(unittest.TestCase):
 
         self.assertEqual("ABSTAIN", act[0]["card"])
 
-    def test_third_tap_keeps_playing_xian_gong_when_already_up_two_zero(self) -> None:
+    def test_third_tap_abstains_when_already_up_two_zero(self) -> None:
         s = _line_strategy()
         me = _me("S02", freshness=95, goodFruit=20)
 
         act = s._card(me, [self._contest(3, red_point=2, blue_point=0)], 50)
 
-        self.assertEqual("XIAN_GONG", act[0]["card"])
+        # already won 2-0 -> 3rd tap is moot, save the card
+        self.assertEqual("ABSTAIN", act[0]["card"])
 
     def test_third_tap_uses_xian_gong_unless_already_up_two_zero(self) -> None:
         s = _line_strategy()
@@ -980,13 +981,13 @@ class OpeningContestTests(unittest.TestCase):
 
         self.assertEqual("XIAN_GONG", act[0]["card"])
 
-    def test_third_tap_keeps_playing_xian_gong_on_blue_side_too(self) -> None:
+    def test_third_tap_abstains_when_already_up_two_zero_on_blue_side_too(self) -> None:
         s = Strategy(2002)
         me = {"playerId": 2002, "goodFruit": 20}
 
         act = s._card(me, [self._contest(3, red_point=0, blue_point=2)], 50)
 
-        self.assertEqual("XIAN_GONG", act[0]["card"])
+        self.assertEqual("ABSTAIN", act[0]["card"])
 
     def test_low_freshness_blue_side_abstains_when_already_up_two_zero(self) -> None:
         s = Strategy(2002)
@@ -998,12 +999,13 @@ class OpeningContestTests(unittest.TestCase):
 
 
 class DeliveryAbandonTests(unittest.TestCase):
-    def test_eta_200_abandons_at_round_400_not_399(self) -> None:
+    def test_eta_200_abandons_at_round_450_not_449(self) -> None:
+        # DELIVERY_ABANDON_MARGIN=50: ETA 200 abandons at 600+50-200 = round 450
         s = Strategy(1001)
         s._frames_to_deliver = lambda *args, **kwargs: 200
 
-        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 399, {}))
-        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 400, {}))
+        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 449, {}))
+        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 450, {}))
 
     def test_switches_to_task_priority_when_delivery_eta_misses_deadline(self) -> None:
         s = Strategy(1001)
@@ -1035,37 +1037,6 @@ class DeliveryAbandonTests(unittest.TestCase):
         self.assertTrue(s._delivery_abandoned)
         self.assertEqual([{"action": "MOVE", "targetNodeId": "T1"}], act)
 
-    def test_delivery_abandon_overrides_adjacent_local_wait(self) -> None:
-        s = Strategy(1001)
-        s.start_node, s.gate_node, s.terminal_node = "S01", "S03", "S04"
-        s._my_team = "RED"
-        s.graph.load_edges([
-            {"fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD",
-             "distance": 30, "bidirectional": True},
-            {"fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD",
-             "distance": 30, "bidirectional": True},
-            {"fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD",
-             "distance": 30, "bidirectional": True},
-            {"fromNodeId": "S01", "toNodeId": "T1", "routeType": "ROAD",
-             "distance": 5, "bidirectional": True},
-        ])
-        nodes = [
-            {"nodeId": n, "hasObstacle": False, "resourceStock": {}}
-            for n in ("S01", "S02", "S03", "S04", "T1")
-        ]
-        tasks = [{
-            "taskId": "T_SIDE", "nodeId": "T1", "taskTemplateId": "T02",
-            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
-            "active": True, "completed": False, "failed": False,
-            "ownerPlayerId": 0, "expireRound": 590,
-        }]
-
-        act = s.decide(_inq(520, _me("S02"), _opp("S01"), nodes=nodes, tasks=tasks))
-
-        self.assertTrue(s._delivery_abandoned)
-        self.assertNotEqual([{"action": "WAIT"}], act)
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "S01"}], act)
-
 
 class RushTacticTests(unittest.TestCase):
     def test_uses_rush_speed_as_soon_as_rush_phase_allows_it(self) -> None:
@@ -1077,6 +1048,7 @@ class RushTacticTests(unittest.TestCase):
 
         act = s.decide(_inq(451, me, _opp("S01"), phase="RUSH"))
 
+        # RUSH_SPEED is the main-car action for this frame (issued only while MOVING)
         self.assertEqual([{"action": "RUSH_SPEED"}], act)
 
     def test_does_not_use_rush_speed_over_active_horse(self) -> None:
