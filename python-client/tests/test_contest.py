@@ -46,8 +46,13 @@ class ContestTests(unittest.TestCase):
 
     def test_pick_card_spends_xian_gong_when_affordable(self) -> None:
         me = {"guardActionPoint": 2, "resources": {"PASS_TOKEN": 1},
-              "freshness": 40, "goodFruit": 20}
+              "freshness": 95, "goodFruit": 20}
         self.assertEqual("XIAN_GONG", pick_card(me, _contest("TASK")))
+
+    def test_pick_card_does_not_use_xian_gong_below_freshness_floor(self) -> None:
+        me = {"guardActionPoint": 2, "resources": {"PASS_TOKEN": 1},
+              "freshness": 79, "goodFruit": 20}
+        self.assertEqual("BING_ZHENG", pick_card(me, _contest("TASK")))
 
     def test_pick_card_falls_back_to_guard_point_when_good_fruit_is_gone(self) -> None:
         me = {"guardActionPoint": 2, "resources": {"PASS_TOKEN": 1},

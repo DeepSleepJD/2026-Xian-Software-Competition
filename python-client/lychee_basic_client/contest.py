@@ -7,10 +7,11 @@ The card matrix is rock-paper-scissors-like:
     YAN_DIE    beats QIANG_XING          ; loses to XIAN_GONG, BING_ZHENG
 
 With hidden simultaneous choices there is no dominant pure play, so we use a
-resource-aware heuristic. If we still have good fruit, spend XIAN_GONG even on
-low-value windows: repeated window draws are worse than the fruit cost because
-they can lock both players on a process node for hundreds of frames. Once good
-fruit is gone, fall back to the cheapest card we can still pay.
+resource-aware heuristic. If we still have good fruit and enough freshness, spend
+XIAN_GONG even on low-value windows: repeated window draws are worse than the
+fruit cost because they can lock both players on a process node for hundreds of
+frames. Once good fruit is gone or freshness is too low, fall back to the
+cheapest card we can still pay.
 """
 from typing import Any, Optional
 
@@ -24,6 +25,13 @@ CONTEST_PRIORITY = {
     "RESOURCE": 15,
 }
 HORSE_BUFFS = {"FAST_HORSE", "SHORT_HORSE", "RUSH_SPEED"}
+
+
+def _freshness(me: dict[str, Any]) -> float:
+    try:
+        return float(me.get("freshness", 100) or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def active_contest(
@@ -64,7 +72,7 @@ def pick_card(me: dict[str, Any], contest: dict[str, Any]) -> str:
     res = me.get("resources", {}) or {}
     buffs = {b.get("type") for b in me.get("buffs", [])}
 
-    if me.get("goodFruit", 0) > 0:
+    if me.get("goodFruit", 0) > 0 and _freshness(me) >= 80:
         return "XIAN_GONG"
     if me.get("guardActionPoint", 0) > 0:
         return "BING_ZHENG"

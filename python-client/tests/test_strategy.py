@@ -918,7 +918,7 @@ class OpeningContestTests(unittest.TestCase):
 
     def test_plays_xian_gong_on_first_two_taps(self) -> None:
         s = _line_strategy()
-        me = _me("S02", freshness=10, goodFruit=20)
+        me = _me("S02", freshness=95, goodFruit=20)
 
         for ri in (1, 2):
             act = s._card(me, [self._contest(ri)], 50)
@@ -936,6 +936,33 @@ class OpeningContestTests(unittest.TestCase):
         act = s._card(me, [self._contest(1)], 50)
 
         self.assertEqual("BING_ZHENG", act[0]["card"])
+
+    def test_low_freshness_uses_bing_zheng_over_invalid_xian_gong(self) -> None:
+        s = _line_strategy()
+        me = _me("S02", freshness=79, goodFruit=20, guardActionPoint=4)
+
+        act = s._card(me, [self._contest(1)], 50)
+
+        self.assertEqual("BING_ZHENG", act[0]["card"])
+
+    def test_low_freshness_abstains_without_bing_zheng(self) -> None:
+        s = _line_strategy()
+        me = _me(
+            "S02", freshness=79, goodFruit=20, guardActionPoint=0,
+            resources={"PASS_TOKEN": 1},
+        )
+
+        act = s._card(me, [self._contest(1)], 50)
+
+        self.assertEqual("ABSTAIN", act[0]["card"])
+
+    def test_low_freshness_abstains_when_already_up_two_zero(self) -> None:
+        s = _line_strategy()
+        me = _me("S02", freshness=79, goodFruit=20, guardActionPoint=4)
+
+        act = s._card(me, [self._contest(3, red_point=2, blue_point=0)], 50)
+
+        self.assertEqual("ABSTAIN", act[0]["card"])
 
     def test_third_tap_keeps_playing_xian_gong_when_already_up_two_zero(self) -> None:
         s = _line_strategy()
@@ -960,6 +987,14 @@ class OpeningContestTests(unittest.TestCase):
         act = s._card(me, [self._contest(3, red_point=0, blue_point=2)], 50)
 
         self.assertEqual("XIAN_GONG", act[0]["card"])
+
+    def test_low_freshness_blue_side_abstains_when_already_up_two_zero(self) -> None:
+        s = Strategy(2002)
+        me = {"playerId": 2002, "freshness": 79, "goodFruit": 20, "guardActionPoint": 4}
+
+        act = s._card(me, [self._contest(3, red_point=0, blue_point=2)], 50)
+
+        self.assertEqual("ABSTAIN", act[0]["card"])
 
 
 class DeliveryAbandonTests(unittest.TestCase):

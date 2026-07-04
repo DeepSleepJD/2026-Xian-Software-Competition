@@ -1839,7 +1839,27 @@ class Strategy:
         return [M.window_card(c["contestId"], card)]
 
     def _window_card_choice(self, me, contest) -> str:
+        if self._freshness(me) < 80:
+            if self._contest_points(contest)[0] >= 2:
+                return "ABSTAIN"
+            if me.get("guardActionPoint", 0) > 0:
+                return "BING_ZHENG"
+            return "ABSTAIN"
         return pick_card(me, contest)
+
+    @staticmethod
+    def _freshness(me) -> float:
+        try:
+            return float(me.get("freshness", 100) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _contest_points(self, contest) -> tuple[int, int]:
+        red = int(contest.get("redPoint", 0) or 0)
+        blue = int(contest.get("bluePoint", 0) or 0)
+        if contest.get("redPlayerId") == self.player_id:
+            return red, blue
+        return blue, red
 
     def _needs_process(self, node, nodes_by_id) -> bool:
         if node in (self.gate_node, self.terminal_node):
