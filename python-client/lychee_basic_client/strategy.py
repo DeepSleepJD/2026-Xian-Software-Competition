@@ -58,6 +58,9 @@ SQUAD_CLEAR_LEAD_HOPS = 2    # only pre-clear obstacles within this many hops ah
 PROCESS_STUCK_LIMIT = 14     # if a process won't complete after this many tries (a
                              # co-occupation contest keeps blocking it), abandon it and
                              # move on -- delivery must never be held hostage to a process
+OBSTACLE_WAIT_LIMIT = 8      # frames to wait for the squad to clear an obstacle ahead
+                             # before the MAIN clears it itself -- never stall forever on
+                             # an obstacle the squad didn't (or couldn't) clear
 
 # main-car states where the engine is running our action; don't interrupt
 BUSY_STATES = {"PROCESSING", "VERIFYING", "FORCED_PASSING", "RESTING", "CONTESTING"}
@@ -91,6 +94,8 @@ class Strategy:
         self._tasks: list = []
         self._stuck_node = None
         self._stuck_tries = 0
+        self._obs_wait_node = None      # obstacle we're waiting on the squad to clear
+        self._obs_wait_tries = 0
         self._last_forced_pass = -10   # round of our last FORCED_PASS (no two in a row)
 
     # ---- setup ----
@@ -495,8 +500,15 @@ class Strategy:
             self._last_forced_pass = self._round
             return [M.forced_pass(nxt)]
         if nodes_by_id.get(nxt, {}).get("hasObstacle"):
-            # NO FORCED_PASS for obstacles (it chained into FORCED_PASS_REPEAT). The squad
-            # clears the obstacle in parallel (_squad_action); wait a frame, then MOVE.
+            # The squad clears the obstacle in parallel (_squad_action) and we MOVE
+            # through. But NEVER stall forever: if it isn't cleared after a short grace
+            # (squad out of manpower, clearing a different path, or its dispatch was
+            # rejected), the MAIN clears it itself so we always keep moving.
+            if nxt != self._obs_wait_node:
+                self._obs_wait_node, self._obs_wait_tries = nxt, 0
+            self._obs_wait_tries += 1
+            if self._obs_wait_tries > OBSTACLE_WAIT_LIMIT:
+                return [M.clear(nxt)]
             return [M.wait()]
         return [M.move(nxt)]
 
