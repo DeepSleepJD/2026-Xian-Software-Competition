@@ -31,6 +31,9 @@ GUARD_KEEP_FRUIT = 6         # never spend guard fruit below this (keep some to 
 GUARD_SETUP_FRAMES = 5       # SET_GUARD read-bar (4) + activates next frame
 TASK_TIME = 8                # rough frames a task claim+complete costs (spare-time gate)
 RACE_SAFETY = 30             # only task pre-choke if we lead the race to it by > this
+RACE_LEAD = 8                # min frame lead over the enemy at the choke to bother setting
+                             # the S10 delay-guard (guard read-bar 4 + activate 1 + margin);
+                             # below this the race is too close -> skip the guard, just go
 OPP_SPEED = 1.25             # assume the opponent can use a fast horse (conservative:
                              # never overestimate our lead in the race to a choke)
 # weather -> per-route-type move-cost multiplier (server config; only these slow moves;
@@ -180,32 +183,36 @@ class Strategy:
         if self._must_deliver(node, me, round_no):
             return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
 
-        # 4. blockade: race to and camp the first common choke the opponent must cross
+        # 4. blockade-DELAY (set-and-go): race to the choke; the instant we're on it with
+        # the required lead (RACE_LEAD, checked in _camp_choke), drop ONE guard to tax /
+        # delay the enemy, then move straight on to scavenge + deliver. NO camping --
+        # front-half speed buys back-half initiative. (A single guard can't seal on this
+        # map -- the post-S10 branch + 2-guard cap defeat it -- so we don't try; we just
+        # cost the enemy a forced-pass/weather delay and win on speed + score.)
         N = self._camp_choke(node, me, opp, nodes_by_id)
         if N is not None:
-            if node == N:
-                # (b) opponent has committed onto the edge in -> freeze (fresh guard)
-                if self._freeze_window_open(opp, N) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
-                    if self._first_guard_node is None:
-                        self._first_guard_node = N
-                    self._guarded_round[N] = round_no
-                    return [M.set_guard(N, extra_good_fruit=self._guard_fruit(me))]
-                # hold the choke; only in this genuine idle wait may we grab a task
-                if self._spare_for_task(node, me, opp, round_no, nodes_by_id):
-                    t = self._free_task_here(node, tasks, me)
-                    if t:
-                        return t
-                return [M.wait()]
-            return self._advance_to(N, me, node, state, phase, nodes_by_id)  # race there
+            if node != N:
+                return self._advance_to(N, me, node, state, phase, nodes_by_id)  # race, no tasks
+            if not self._we_hold(N, nodes_by_id):
+                if self._first_guard_node is None:
+                    self._first_guard_node = N
+                self._guarded_round[N] = round_no
+                return [M.set_guard(N, extra_good_fruit=self._guard_fruit(me))]
+            # guard already dropped -> fall through to deliver + scavenge
 
-        # 5. nothing to intercept (opponent walled off / past every choke) -> deliver.
-        # Only the forced pre-RUSH gate wait is genuine idle time for a task.
+        # 5. no interception left -> SCAVENGE for score, then deliver. We have the back-
+        # half initiative (front-half speed bought it): while there's delivery-margin
+        # surplus, detour to the nearest claimable task and grab it; when nothing is
+        # affordable (margin tight), run to the gate and deliver.
+        tgt = self._scavenge_target(node, me, round_no, nodes_by_id)
+        if tgt is not None and tgt != node:
+            return self._advance_to(tgt, me, node, state, phase, nodes_by_id)
+        if tgt == node:
+            t = self._free_task_here(node, self._tasks, me)
+            if t:
+                return t
         if node == self.gate_node and phase != "RUSH":
-            if self._spare_for_task(node, me, opp, round_no, nodes_by_id):
-                t = self._free_task_here(node, tasks, me)
-                if t:
-                    return t
-            return [M.wait()]
+            return [M.wait()]  # can't verify before RUSH
         return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
 
     def _camp_choke(self, node, me, opp, nodes_by_id):
@@ -225,10 +232,10 @@ class Strategy:
                 continue
             # must be able to arrive AND finish the guard before the opponent gets there,
             # else we can't intercept this choke (don't chase an opponent we can't beat)
-            our_eta = self.graph.path_frames(node, c, speed=self._me_speed(me)) + GUARD_SETUP_FRAMES
+            our_eta = self.graph.path_frames(node, c, speed=self._me_speed(me)) + RACE_LEAD
             opp_eta = self.graph.path_frames(opp_node, c, speed=self._opp_speed(opp, nodes_by_id)) \
                 if opp_node else float("inf")
-            if our_eta <= opp_eta:
+            if our_eta <= opp_eta:   # we can reach c and arm the delay-guard >=RACE_LEAD ahead
                 return c
         return None
 
@@ -506,6 +513,24 @@ class Strategy:
                and not t.get("failed") and not t.get("ownerPlayerId"):
                 return [M.claim_task(t["taskId"])]
         return None
+
+    def _scavenge_target(self, node, me, round_no, nodes_by_id):
+        """Nearest node carrying a claimable task we can detour to, grab, and still
+        deliver before the deadline. None when nothing is affordable -> go deliver."""
+        best, best_f = None, float("inf")
+        for t in self._tasks:
+            if not t.get("active") or t.get("completed") or t.get("failed") or t.get("ownerPlayerId"):
+                continue
+            tn = t.get("nodeId")
+            if not tn or tn == self.gate_node:
+                continue
+            f = self.graph.path_frames(node, tn)
+            if f >= best_f or f == float("inf"):
+                continue
+            # affordable: reach it + claim + still deliver from there within the deadline
+            if round_no + f + TASK_TIME + self._frames_to_deliver(tn, me) + DELIVER_MARGIN < TOTAL_ROUNDS:
+                best, best_f = tn, f
+        return best
 
     # ---- delivery-time safety ----
     def _must_deliver(self, node, me, round_no) -> bool:

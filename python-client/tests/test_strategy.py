@@ -61,10 +61,10 @@ class BlockadeTests(unittest.TestCase):
         act = s.decide(_inq(50, me, opp))
         self.assertIn({"action": "SET_GUARD", "targetNodeId": "S02", "extraGoodFruit": 2}, act)
 
-    def test_camps_not_guards_before_opponent_commits(self) -> None:
+    def test_no_delay_guard_when_lead_too_small(self) -> None:
         s = _line_strategy(gate="S04")
         me = _me("S02", goodFruit=20)
-        opp = _opp("S01")  # parked, not committed -> we camp (wait), don't set early
+        opp = _opp("S02")  # co-located: we don't lead by RACE_LEAD -> skip the delay-guard
         act = s.decide(_inq(50, me, opp))
         self.assertNotIn("SET_GUARD", [a["action"] for a in act])
 
