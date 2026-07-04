@@ -91,6 +91,7 @@ class Strategy:
         self._tasks: list = []
         self._stuck_node = None
         self._stuck_tries = 0
+        self._last_forced_pass = -10   # round of our last FORCED_PASS (no two in a row)
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -192,13 +193,15 @@ class Strategy:
         N = self._camp_choke(node, me, opp, nodes_by_id)
         if N is not None:
             if node != N:
-                return self._advance_to(N, me, node, state, phase, nodes_by_id)  # race, no tasks
-            if not self._we_hold(N, nodes_by_id):
+                return self._advance_to(N, me, node, state, phase, nodes_by_id)  # RACE, no tasks
+            # on the choke: drop the delay-guard only if we lead by >=RACE_LEAD (arm it
+            # before the enemy arrives); else skip and move on to scavenge (race too close).
+            if not self._we_hold(N, nodes_by_id) and self._lead_at(N, me, opp, nodes_by_id) >= RACE_LEAD:
                 if self._first_guard_node is None:
                     self._first_guard_node = N
                 self._guarded_round[N] = round_no
                 return [M.set_guard(N, extra_good_fruit=self._guard_fruit(me))]
-            # guard already dropped -> fall through to deliver + scavenge
+            # guard dropped (or race too close) -> fall through to deliver + scavenge
 
         # 5. no interception left -> SCAVENGE for score, then deliver. We have the back-
         # half initiative (front-half speed bought it): while there's delivery-margin
@@ -223,21 +226,24 @@ class Strategy:
         us to win the race (can't intercept -> stop chasing, go deliver)."""
         if opp is None or self._opp_walled_off(opp, nodes_by_id):
             return None
-        opp_node = opp.get("currentNodeId")
         for c in reversed(self.chokes):  # start-side first (the opponent hits it first)
             if self._we_hold(c, nodes_by_id) or not self._opp_must_cross(c, opp):
                 continue
             # never backtrack to a choke we've already passed
             if node != c and self.graph.path_frames(node, self.gate_node, avoid={c}) != float("inf"):
                 continue
-            # must be able to arrive AND finish the guard before the opponent gets there,
-            # else we can't intercept this choke (don't chase an opponent we can't beat)
-            our_eta = self.graph.path_frames(node, c, speed=self._me_speed(me)) + RACE_LEAD
-            opp_eta = self.graph.path_frames(opp_node, c, speed=self._opp_speed(opp, nodes_by_id)) \
-                if opp_node else float("inf")
-            if our_eta <= opp_eta:   # we can reach c and arm the delay-guard >=RACE_LEAD ahead
-                return c
+            # ALWAYS race to it (front-half speed decides who camps vs gets frozen). Whether
+            # we actually drop the delay-guard on arrival is the >=RACE_LEAD check in P4.
+            return c
         return None
+
+    def _lead_at(self, c, me, opp, nodes_by_id) -> float:
+        """Frame lead over the opponent in reaching choke c (opp ETA - our ETA), horse-aware."""
+        opp_node = opp.get("currentNodeId") if opp else None
+        our_eta = self.graph.path_frames(me.get("currentNodeId"), c, speed=self._me_speed(me))
+        opp_eta = self.graph.path_frames(opp_node, c, speed=self._opp_speed(opp, nodes_by_id)) \
+            if opp_node else float("inf")
+        return opp_eta - our_eta
 
     def _spare_for_task(self, node, me, opp, round_no, nodes_by_id) -> bool:
         """Do a task only with genuine spare time: it must not push us past our
@@ -478,13 +484,19 @@ class Strategy:
                                       weather_fn=self._wmult, base_round=self._round)
         if not nxt:
             return []
-        if nodes_by_id.get(nxt, {}).get("hasObstacle") or nxt in self._guard_blocked:
-            # NO FORCED_PASS (it chained into FORCED_PASS_REPEAT and stalled us). A squad
+        if nxt in self._guard_blocked:
+            # ENEMY GUARD on the next hop. If we can reroute around it we already would
+            # have (fastest_hop avoids _guard_blocked first); reaching here means it's on
+            # a node we CAN'T avoid (a cut-vertex like S10) -> FORCED_PASS through it so we
+            # never get blockaded to death. Two FORCED_PASSes in a row are rejected
+            # (FORCED_PASS_REPEAT), so alternate with a single wait if we just did one.
+            if self._last_forced_pass == self._round - 1:
+                return [M.wait()]
+            self._last_forced_pass = self._round
+            return [M.forced_pass(nxt)]
+        if nodes_by_id.get(nxt, {}).get("hasObstacle"):
+            # NO FORCED_PASS for obstacles (it chained into FORCED_PASS_REPEAT). The squad
             # clears the obstacle in parallel (_squad_action); wait a frame, then MOVE.
-            # NOTE: the fix branch's "opening first-hop main-clear" was absorbed & tested
-            # but REVERTED for THIS map -- our first-hop obstacle (S06) is across a long
-            # 79f edge, so main-clear saves ~0 vs the squad yet disrupts task timing
-            # (526 vs 618). It only pays where the first-hop obstacle sits on a short edge.
             return [M.wait()]
         return [M.move(nxt)]
 
