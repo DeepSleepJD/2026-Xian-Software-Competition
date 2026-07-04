@@ -22,12 +22,12 @@ class AggressiveStrategy(Strategy):
             if first:
                 self.route_avoid = {first}
 
-    def _blockade(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id):
+    def _blockade(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather=None):
         self._ensure_diverged(nodes_by_id)
         dest = self.terminal_node if me.get("verified") else self.gate_node
-        return self._advance_to(dest, me, node, state, phase, nodes_by_id)
+        return self._advance_to(dest, me, node, state, phase, nodes_by_id, tasks, round_no, weather)
 
-    def _squad_action(self, node, me, opp, nodes_by_id):
+    def _squad_action(self, node, me, opp, nodes_by_id, round_no=0, weather=None):
         """Break through: weaken the enemy guard on our route; else clear our own
         obstacles so we can keep moving."""
         if me.get("squadAvailable", 0) < 2:

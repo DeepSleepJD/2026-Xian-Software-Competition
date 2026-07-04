@@ -40,6 +40,14 @@ HORSE_MOVE_PER_FRAME = {"FAST_HORSE": 1200, "SHORT_HORSE": 1150}
 HORSE_DURATION = {"FAST_HORSE": 20, "SHORT_HORSE": 14}
 RESOURCE_CLAIM_FRAMES = 2
 START_OBSTACLE_CLEAR_FRAMES = 6
+WEATHER_MOVE_MULTIPLIER = {
+    ("HEAVY_RAIN", "WATER"): 1350,
+    ("MOUNTAIN_FOG", "MOUNTAIN"): 1100,
+}
+WEATHER_PROCESS_EXTRA = {
+    ("HEAVY_RAIN", "BOARD"): 4,
+    ("HEAVY_RAIN", "WATER_TRANSFER"): 4,
+}
 OBSTACLE_PENALTY = 0         # routing cost of crossing an obstacle node: obstacles are
                              # squad-cleared in parallel now (near-free), so don't avoid
                              # them -- take the true shortest route (may use shortcuts)
@@ -129,6 +137,7 @@ class Strategy:
         round_no = inquire_data.get("round", 0)
         tasks = inquire_data.get("tasks", [])
         contests = inquire_data.get("contests", [])
+        weather = inquire_data.get("weather", {})
         nodes_by_id = {n["nodeId"]: n for n in inquire_data.get("nodes", [])}
 
         if node != self._last_node:
@@ -147,22 +156,26 @@ class Strategy:
 
         # squad pre-clears obstacles ahead (separate quota) so the main car never
         # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
-        squad = self._squad_action(node, me, opp, nodes_by_id)
+        squad = self._squad_action(node, me, opp, nodes_by_id, round_no, weather)
 
         # once verified we've committed to the delivery run -> always finish it
         # (we only ever VERIFY during our own delivery push).
         if me.get("verified"):
             return card + squad + self._advance_to(
-                self.terminal_node, me, node, state, phase, nodes_by_id, tasks
+                self.terminal_node, me, node, state, phase, nodes_by_id, tasks,
+                round_no, weather
             )
 
         # delivery safety: if we can't afford to block any longer, go to the gate.
-        if self._must_deliver(node, me, round_no, nodes_by_id):
+        if self._must_deliver(node, me, round_no, nodes_by_id, weather):
             return card + squad + self._advance_to(
-                self.gate_node, me, node, state, phase, nodes_by_id, tasks
+                self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+                round_no, weather
             )
 
-        main = self._blockade(me, opp, node, state, phase, round_no, tasks, nodes_by_id)
+        main = self._blockade(
+            me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather
+        )
         main = squad + main
         # remember opponent position for next-frame "just departed" detection
         if opp is not None:
@@ -171,7 +184,7 @@ class Strategy:
         return card + main
 
     # ---- blockade / phase logic ----
-    def _blockade(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id):
+    def _blockade(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather=None):
         """Goal: WE deliver, the opponent doesn't. Camp the first choke the opponent
         must cross and, the instant they commit ONTO the edge into it (state MOVING,
         with enough edge left for the guard to activate), SET_GUARD -- they arrive to
@@ -188,7 +201,10 @@ class Strategy:
         # spamming SET_GUARD. currentNodeId still reads the edge's start node, so gate
         # this on routeEdgeId, not on `node`. Just push to the far end.
         if me.get("routeEdgeId") and me.get("nextNodeId"):
-            return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id, tasks)
+            return self._advance_to(
+                self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+                round_no, weather
+            )
 
         # FREEZE: camp on a choke the opponent must still cross and SET_GUARD only the
         # instant they've COMMITTED onto the edge into it (MOVING, nextNode==choke) AND
@@ -198,7 +214,7 @@ class Strategy:
         # delivery deadline (_must_deliver upstream) drags us off before we're too late.
         if node in self.chokes and not self._we_hold(node, nodes_by_id) \
            and self._opp_must_cross(node, opp) and not self._opp_walled_off(opp, nodes_by_id):
-            if self._freeze_window_open(opp, node) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
+            if self._freeze_window_open(opp, node, round_no, weather) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
                 if self._first_guard_node is None:
                     self._first_guard_node = node
                 self._guarded_round[node] = round_no
@@ -206,25 +222,28 @@ class Strategy:
             # opponent not committed yet -> camp; use the wait for a task ONLY if we
             # have spare time (won't miss the freeze / delivery -- see _spare_for_task)
             t = self._free_task_here(node, tasks, me)
-            if t and self._spare_for_task(node, me, opp, round_no, nodes_by_id):
+            if t and self._spare_for_task(node, me, opp, round_no, nodes_by_id, weather):
                 return t
             return [M.wait()]
 
         # a task anywhere on the way -- but only with spare time: doing it must NOT let
         # the opponent beat us to an unsecured choke, nor risk our own delivery.
         here = self._free_task_here(node, tasks, me)
-        if here and self._spare_for_task(node, me, opp, round_no, nodes_by_id):
+        if here and self._spare_for_task(node, me, opp, round_no, nodes_by_id, weather):
             return here
         if node == self.gate_node and not me.get("verified") and phase != "RUSH":
             return [M.wait()]
-        return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id, tasks)
+        return self._advance_to(
+            self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+            round_no, weather
+        )
 
-    def _spare_for_task(self, node, me, opp, round_no, nodes_by_id) -> bool:
+    def _spare_for_task(self, node, me, opp, round_no, nodes_by_id, weather=None) -> bool:
         """Do a task only with genuine spare time: it must not push us past our
         delivery deadline, and (before the blockade is secured) must not let the
         opponent reach the nearest choke we still need before we do."""
         # (a) delivery must survive the task's time cost
-        if round_no + TASK_TIME + self._frames_to_deliver(node, me, nodes_by_id) + DELIVER_MARGIN >= TOTAL_ROUNDS:
+        if round_no + TASK_TIME + self._frames_to_deliver(node, me, nodes_by_id, round_no, weather) + DELIVER_MARGIN >= TOTAL_ROUNDS:
             return False
         # (b) the choke race: the nearest choke ahead that the opponent must still
         # cross and we don't yet hold -- a task must not lose us that race
@@ -237,8 +256,12 @@ class Strategy:
             # only chokes we're at or still before (haven't passed)
             if node != c and self.graph.path_frames(node, self.gate_node, avoid={c}) != float("inf"):
                 continue
-            our_eta = self._route_frames(node, c, me, nodes_by_id) + GUARD_SETUP_FRAMES
-            opp_eta = self._route_frames(opp_node, c, opp, nodes_by_id) if opp_node else float("inf")
+            our_eta = self._route_frames(
+                node, c, me, nodes_by_id, round_no=round_no, weather=weather
+            ) + GUARD_SETUP_FRAMES
+            opp_eta = self._route_frames(
+                opp_node, c, opp, nodes_by_id, round_no=round_no, weather=weather
+            ) if opp_node else float("inf")
             # only spare if we're COMFORTABLY ahead to the choke -- a mere tie is not
             # spare (a neck-and-neck opponent leaves no time for tasks before we camp)
             return opp_eta - our_eta > TASK_TIME + RACE_SAFETY
@@ -275,19 +298,28 @@ class Strategy:
         g = nodes_by_id.get(node, {}).get("guard") or {}
         return bool(g.get("active") and g.get("ownerTeamId") == self._my_team and g.get("defense", 0) > 0)
 
-    def _freeze_window_open(self, opp, N) -> bool:
+    def _freeze_window_open(self, opp, N, round_no=0, weather=None) -> bool:
         """The opponent has committed onto the edge into N and there is still enough
         of that edge left for our guard to finish setting up before they arrive."""
         if opp is None or opp.get("state") != "MOVING" or opp.get("nextNodeId") != N:
             return False
-        return self._opp_remaining_edge_frames(opp) >= GUARD_SETUP_FRAMES + FREEZE_SAFETY
+        return self._opp_remaining_edge_frames(opp, round_no, weather) >= GUARD_SETUP_FRAMES + FREEZE_SAFETY
 
-    def _opp_remaining_edge_frames(self, opp) -> int:
-        ef = self.graph.edge_frames(opp.get("currentNodeId"), opp.get("nextNodeId"))
-        if not ef:
+    def _opp_remaining_edge_frames(self, opp, round_no=0, weather=None) -> int:
+        edge = self._edge_info(opp.get("currentNodeId"), opp.get("nextNodeId"))
+        if edge is None:
             return 0
+        route_type, distance = edge
+        required = math.ceil(distance * ROUTE_COST_COEF.get(route_type, 1500))
         permille = opp.get("edgeProgressPermille", 0) or 0
-        return math.ceil((1 - permille / 1000.0) * ef)
+        remaining = max(0, math.ceil(required * (1000 - permille) / 1000))
+        if remaining <= 0:
+            return 0
+        horse, horse_left, held = self._initial_horse_state(opp)
+        frames, _horse, _left, _held = self._travel_required_frames(
+            remaining, route_type, horse, horse_left, held, round_no, weather, round_no
+        )
+        return frames
 
     def _stopped_anyway(self, node, me, phase, nodes_by_id) -> bool:
         """True where we're forced to stop regardless of tasks: a mandatory process
@@ -308,7 +340,7 @@ class Strategy:
                 return h
         return None
 
-    def _squad_action(self, node, me, opp, nodes_by_id) -> list:
+    def _squad_action(self, node, me, opp, nodes_by_id, round_no=0, weather=None) -> list:
         """Squad CLEARS obstacles on our path so the main car MOVEs through (we never
         FORCED_PASS). Dispatch to the nearest uncleared obstacle ahead (clears in
         parallel as we race).
@@ -320,7 +352,10 @@ class Strategy:
         if me.get("squadAvailable", 0) < 2:
             return []
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
-        plan = self._route_plan(node, self.gate_node, me, nodes_by_id, obstacles=obstacles)
+        plan = self._route_plan(
+            node, self.gate_node, me, nodes_by_id, obstacles=obstacles,
+            round_no=round_no, weather=weather
+        )
         path = plan.path
         for idx, nid in enumerate(path[1:], start=1):
             if idx == 1 and self._is_opening_first_hop_obstacle(node, nid, nodes_by_id, me):
@@ -340,7 +375,10 @@ class Strategy:
         return self.graph.path_frames(node, self.gate_node) < self.graph.path_frames(opp_node, self.gate_node)
 
     # ---- navigation ----
-    def _advance_to(self, dest, me, node, state, phase, nodes_by_id, tasks=None):
+    def _advance_to(
+        self, dest, me, node, state, phase, nodes_by_id, tasks=None,
+        round_no=0, weather=None
+    ):
         """One step toward dest: continue an edge, process/verify, force past an
         obstacle, else MOVE. Handles the WAITING-on-edge continuation."""
         if state in BUSY_STATES:
@@ -361,9 +399,15 @@ class Strategy:
             return [M.process(node)]
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         avoid = self._guard_blocked | self.route_avoid
-        plan = self._route_plan(node, dest, me, nodes_by_id, avoid=avoid, obstacles=obstacles)
+        plan = self._route_plan(
+            node, dest, me, nodes_by_id, avoid=avoid, obstacles=obstacles,
+            round_no=round_no, weather=weather
+        )
         if plan.frames == float("inf"):
-            plan = self._route_plan(node, dest, me, nodes_by_id, obstacles=obstacles)
+            plan = self._route_plan(
+                node, dest, me, nodes_by_id, obstacles=obstacles,
+                round_no=round_no, weather=weather
+            )
         if plan.first_claim:
             return [M.claim_resource(node, plan.first_claim)]
         nxt = plan.next_hop
@@ -407,23 +451,39 @@ class Strategy:
         return None
 
     # ---- delivery-time safety ----
-    def _must_deliver(self, node, me, round_no, nodes_by_id) -> bool:
-        need = self._frames_to_deliver(node, me, nodes_by_id)
+    def _must_deliver(self, node, me, round_no, nodes_by_id, weather=None) -> bool:
+        need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
         return round_no + need + DELIVER_MARGIN >= TOTAL_ROUNDS
 
-    def _frames_to_deliver(self, node, me, nodes_by_id) -> float:
-        to_gate = 0 if me.get("verified") else self._route_frames(node, self.gate_node, me, nodes_by_id)
+    def _frames_to_deliver(self, node, me, nodes_by_id, round_no=0, weather=None) -> float:
+        to_gate = 0 if me.get("verified") else self._route_frames(
+            node, self.gate_node, me, nodes_by_id, round_no=round_no,
+            weather=weather, weather_base_round=round_no
+        )
+        if to_gate == float("inf"):
+            return float("inf")
         verify = 0 if me.get("verified") else VERIFY_FRAMES
         start = self.gate_node if not me.get("verified") else node
-        to_term = self._route_frames(start, self.terminal_node, me, nodes_by_id)
+        to_term = self._route_frames(
+            start, self.terminal_node, me, nodes_by_id,
+            round_no=round_no + to_gate + verify, weather=weather,
+            weather_base_round=round_no
+        )
         return to_gate + verify + to_term + DELIVER_FRAMES
 
     # ---- context-aware routing ----
-    def _route_frames(self, src, dst, actor, nodes_by_id, avoid=None, obstacles=None) -> float:
-        return self._route_plan(src, dst, actor, nodes_by_id, avoid, obstacles).frames
+    def _route_frames(
+        self, src, dst, actor, nodes_by_id, avoid=None, obstacles=None,
+        round_no=0, weather=None, weather_base_round=None
+    ) -> float:
+        return self._route_plan(
+            src, dst, actor, nodes_by_id, avoid, obstacles, round_no, weather,
+            weather_base_round
+        ).frames
 
     def _route_plan(
-        self, src, dst, actor, nodes_by_id, avoid=None, obstacles=None
+        self, src, dst, actor, nodes_by_id, avoid=None, obstacles=None,
+        round_no=0, weather=None, weather_base_round=None
     ) -> RoutePlan:
         """Fewest-frame route with actor-local horse state and our opening obstacle rule.
 
@@ -437,6 +497,8 @@ class Strategy:
         if src == dst:
             return RoutePlan(0, [src])
 
+        if weather_base_round is None:
+            weather_base_round = round_no
         avoid = avoid or set()
         obstacles = obstacles or {
             nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")
@@ -473,13 +535,22 @@ class Strategy:
             for v, rt, dd in self.graph.adj.get(u, []):
                 if v in avoid:
                     continue
-                edge_frames, nh, nh_left, nheld = self._horse_edge_frames(
-                    rt, dd, horse, horse_left, held_horse
-                )
-                nd = d + edge_frames + self.graph.process_rounds.get(v, 0)
+                pre_edge_wait = 0
                 if (not moved and self._opening_first_hop_applies(actor, src, u)
                         and v in obstacles):
-                    nd += START_OBSTACLE_CLEAR_FRAMES
+                    pre_edge_wait = START_OBSTACLE_CLEAR_FRAMES
+                wh, wh_left = self._spend_horse_wait(horse, horse_left, pre_edge_wait)
+                edge_start_round = round_no + d + pre_edge_wait
+                edge_frames, nh, nh_left, nheld = self._horse_edge_frames(
+                    rt, dd, wh, wh_left, held_horse, edge_start_round,
+                    weather, weather_base_round
+                )
+                process_start_round = edge_start_round + edge_frames
+                process_frames = self._process_frames(
+                    v, nodes_by_id, process_start_round, weather, weather_base_round
+                )
+                nh, nh_left = self._spend_horse_wait(nh, nh_left, process_frames)
+                nd = d + pre_edge_wait + edge_frames + process_frames
                 ns = (v, nh, nh_left, nheld, claimed, True)
                 if nd < dist.get(ns, math.inf):
                     dist[ns] = nd
@@ -549,26 +620,123 @@ class Strategy:
     def _resource_claim_frames(self, node, resource_type) -> int:
         return self._resource_claim_rounds.get((node, resource_type), RESOURCE_CLAIM_FRAMES)
 
-    def _horse_edge_frames(self, route_type, distance, horse, horse_left, held):
+    def _horse_edge_frames(
+        self, route_type, distance, horse, horse_left, held, start_round=0,
+        weather=None, weather_base_round=0
+    ):
+        required = math.ceil(distance * ROUTE_COST_COEF.get(route_type, 1500))
+        return self._travel_required_frames(
+            required, route_type, horse, horse_left, held, start_round,
+            weather, weather_base_round
+        )
+
+    def _travel_required_frames(
+        self, required, route_type, horse, horse_left, held, start_round=0,
+        weather=None, weather_base_round=0
+    ):
         if (not horse or horse_left <= 0) and held:
             horse = held
             horse_left = HORSE_DURATION[held]
             held = None
-        required = math.ceil(distance * ROUTE_COST_COEF.get(route_type, 1500))
-        if not horse or horse_left <= 0:
-            return max(1, math.ceil(required / BASE_MOVE_PER_FRAME)), None, 0, held
+        progress = 0
+        frames = 0
+        while progress < required:
+            if horse and horse_left > 0:
+                base_speed = HORSE_MOVE_PER_FRAME[horse]
+                horse_left -= 1
+            else:
+                base_speed = BASE_MOVE_PER_FRAME
+                horse = None
+                horse_left = 0
+            multiplier = self._weather_move_multiplier(
+                route_type, start_round + frames, weather, weather_base_round
+            )
+            progress += max(1, math.floor(base_speed * 1000 / multiplier))
+            frames += 1
+            if horse and horse_left <= 0:
+                horse = None
+        return frames, horse, horse_left, held
 
-        speed = HORSE_MOVE_PER_FRAME[horse]
-        boosted = horse_left * speed
-        if required <= boosted:
-            frames = max(1, math.ceil(required / speed))
-            left = horse_left - frames
-            if left > 0:
-                return frames, horse, left, held
-            return frames, None, 0, held
+    @staticmethod
+    def _spend_horse_wait(horse, horse_left, frames) -> tuple[Optional[str], int]:
+        if not horse or horse_left <= 0 or frames <= 0:
+            return horse, horse_left
+        left = horse_left - frames
+        if left <= 0:
+            return None, 0
+        return horse, left
 
-        frames = horse_left + math.ceil((required - boosted) / BASE_MOVE_PER_FRAME)
-        return frames, None, 0, held
+    def _process_frames(self, node, nodes_by_id, start_round, weather=None, weather_base_round=0) -> int:
+        base = self.graph.process_rounds.get(node, 0)
+        if base <= 0:
+            return 0
+        process_type = nodes_by_id.get(node, {}).get("processType")
+        extra = self._weather_process_extra(process_type, start_round, weather, weather_base_round)
+        return base + extra
+
+    def _weather_process_extra(self, process_type, frame_round, weather=None, weather_base_round=0) -> int:
+        if not process_type:
+            return 0
+        extra = 0
+        for w in self._weather_entries(weather, weather_base_round):
+            if not (w["start"] <= frame_round < w["end"]):
+                continue
+            extra = max(extra, WEATHER_PROCESS_EXTRA.get((w["type"], process_type), 0))
+        return extra
+
+    def _weather_move_multiplier(self, route_type, frame_round, weather=None, weather_base_round=0) -> int:
+        multiplier = 1000
+        for w in self._weather_entries(weather, weather_base_round):
+            if not (w["start"] <= frame_round < w["end"]):
+                continue
+            if w["region"] not in (None, "ALL", route_type):
+                continue
+            multiplier = max(
+                multiplier,
+                WEATHER_MOVE_MULTIPLIER.get((w["type"], route_type), 1000),
+            )
+        return multiplier
+
+    @staticmethod
+    def _weather_entries(weather=None, base_round=0) -> list[dict[str, Any]]:
+        if not weather:
+            return []
+        entries: list[dict[str, Any]] = []
+        for w in weather.get("active") or []:
+            start = int(w.get("startRound", base_round) or base_round)
+            if "durationRound" in w and "startRound" in w:
+                end = start + int(w.get("durationRound", 0) or 0)
+            elif "remainRound" in w:
+                start = base_round
+                end = start + int(w.get("remainRound", 0) or 0)
+            else:
+                end = start + 1
+            if end > start:
+                entries.append({
+                    "type": w.get("type"),
+                    "region": w.get("region"),
+                    "start": start,
+                    "end": end,
+                })
+        for w in weather.get("forecast") or []:
+            if "startRound" not in w or "durationRound" not in w:
+                continue
+            start = int(w.get("startRound", 0) or 0)
+            end = start + int(w.get("durationRound", 0) or 0)
+            if end > start:
+                entries.append({
+                    "type": w.get("type"),
+                    "region": w.get("region"),
+                    "start": start,
+                    "end": end,
+                })
+        return entries
+
+    def _edge_info(self, a: str, b: str) -> Optional[tuple[str, int]]:
+        for v, rt, dd in self.graph.adj.get(a, []):
+            if v == b:
+                return rt, dd
+        return None
 
     def _opening_first_hop_applies(self, actor, route_src, current_node) -> bool:
         if route_src != self.start_node or current_node != self.start_node:

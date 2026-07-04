@@ -180,6 +180,95 @@ class RoutePlanTests(unittest.TestCase):
         self.assertEqual(["S01", "A", "G"], plan.path)
         self.assertEqual(150, plan.frames)
 
+    def test_route_plan_applies_active_heavy_rain_to_water_edges(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "G", "G"
+        s._left_start = True
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "G", "routeType": "WATER",
+             "distance": 10, "bidirectional": True},
+        ])
+        nodes = {
+            "S01": {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            "G": {"nodeId": "G", "hasObstacle": False, "resourceStock": {}},
+        }
+        weather = {"active": [{"type": "HEAVY_RAIN", "region": "WATER", "remainRound": 99}]}
+
+        self.assertEqual(13, s._route_plan("S01", "G", _me("S01"), nodes).frames)
+        self.assertEqual(
+            17,
+            s._route_plan("S01", "G", _me("S01"), nodes, round_no=100, weather=weather).frames,
+        )
+
+    def test_route_plan_applies_forecast_weather_mid_edge(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "G", "G"
+        s._left_start = True
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "G", "routeType": "MOUNTAIN",
+             "distance": 20, "bidirectional": True},
+        ])
+        nodes = {
+            "S01": {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            "G": {"nodeId": "G", "hasObstacle": False, "resourceStock": {}},
+        }
+        weather = {
+            "forecast": [{
+                "type": "MOUNTAIN_FOG", "region": "MOUNTAIN",
+                "startRound": 110, "durationRound": 100,
+            }]
+        }
+
+        self.assertEqual(
+            39,
+            s._route_plan("S01", "G", _me("S01"), nodes, round_no=100, weather=weather).frames,
+        )
+
+    def test_route_plan_adds_rain_time_to_water_process_nodes(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "G", "G"
+        s._left_start = True
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "S04", "routeType": "ROAD",
+             "distance": 1, "bidirectional": True},
+        ])
+        s.graph.process_rounds = {"S04": 7}
+        nodes = {
+            "S01": {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            "S04": {
+                "nodeId": "S04", "hasObstacle": False, "resourceStock": {},
+                "processType": "BOARD",
+            },
+        }
+        weather = {"active": [{"type": "HEAVY_RAIN", "region": "WATER", "remainRound": 99}]}
+
+        self.assertEqual(
+            13,
+            s._route_plan("S01", "S04", _me("S01"), nodes, round_no=100, weather=weather).frames,
+        )
+
+    def test_active_weather_remain_round_uses_original_base_round(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "G", "G"
+        s._left_start = True
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "G", "routeType": "WATER",
+             "distance": 10, "bidirectional": True},
+        ])
+        nodes = {
+            "S01": {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            "G": {"nodeId": "G", "hasObstacle": False, "resourceStock": {}},
+        }
+        weather = {"active": [{"type": "HEAVY_RAIN", "region": "WATER", "remainRound": 5}]}
+
+        self.assertEqual(
+            13,
+            s._route_plan(
+                "S01", "G", _me("S01"), nodes, round_no=110, weather=weather,
+                weather_base_round=100,
+            ).frames,
+        )
+
 
 class OpeningContestTests(unittest.TestCase):
     def _contest(self, ri=1):
