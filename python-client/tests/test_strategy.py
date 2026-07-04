@@ -155,6 +155,23 @@ class BlockadeTests(unittest.TestCase):
 
         self.assertIn({"action": "SQUAD_CLEAR", "targetNodeId": "S03"}, act)
         self.assertIn({"action": "MOVE", "targetNodeId": "S02"}, act)
+        self.assertEqual("MOVE", act[0]["action"])
+
+    def test_main_action_stays_first_when_squad_runs_while_busy(self) -> None:
+        s = _line_strategy(gate="S03")
+        me = _me("S01", state="PROCESSING", squadAvailable=2)
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S03", "hasObstacle": True, "resourceStock": {}},
+        ]
+
+        act = s.decide(_inq(10, me, _opp("S01"), nodes=nodes))
+
+        self.assertEqual([
+            {"action": "WAIT"},
+            {"action": "SQUAD_CLEAR", "targetNodeId": "S03"},
+        ], act)
 
     def test_opening_clear_prefers_t04_when_available(self) -> None:
         s = _line_strategy(gate="S03")

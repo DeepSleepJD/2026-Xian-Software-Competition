@@ -161,27 +161,37 @@ class Strategy:
         # once verified we've committed to the delivery run -> always finish it
         # (we only ever VERIFY during our own delivery push).
         if me.get("verified"):
-            return card + squad + self._advance_to(
+            main = self._advance_to(
                 self.terminal_node, me, node, state, phase, nodes_by_id, tasks,
                 round_no, weather
             )
+            return self._ordered_actions(main, squad, card)
 
         # delivery safety: if we can't afford to block any longer, go to the gate.
         if self._must_deliver(node, me, round_no, nodes_by_id, weather):
-            return card + squad + self._advance_to(
+            main = self._advance_to(
                 self.gate_node, me, node, state, phase, nodes_by_id, tasks,
                 round_no, weather
             )
+            return self._ordered_actions(main, squad, card)
 
         main = self._blockade(
             me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather
         )
-        main = squad + main
         # remember opponent position for next-frame "just departed" detection
         if opp is not None:
             self._opp_prev_node = opp.get("currentNodeId")
             self._opp_prev_edge = opp.get("routeEdgeId")
-        return card + main
+        return self._ordered_actions(main, squad, card)
+
+    @staticmethod
+    def _ordered_actions(main, squad=None, card=None):
+        """Server expects the main-car action first; side-channel actions follow."""
+        squad = squad or []
+        card = card or []
+        if not main:
+            return ([M.wait()] if squad or card else []) + squad + card
+        return main + squad + card
 
     # ---- blockade / phase logic ----
     def _blockade(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather=None):
