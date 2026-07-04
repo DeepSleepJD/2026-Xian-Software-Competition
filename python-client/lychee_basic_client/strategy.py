@@ -168,7 +168,7 @@ class Strategy:
             return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
 
         # 4. blockade: race to and camp the first common choke the opponent must cross
-        N = self._camp_choke(node, opp, nodes_by_id)
+        N = self._camp_choke(node, me, opp, nodes_by_id)
         if N is not None:
             if node == N:
                 # (b) opponent has committed onto the edge in -> freeze (fresh guard)
@@ -195,17 +195,27 @@ class Strategy:
             return [M.wait()]
         return self._advance_to(self.gate_node, me, node, state, phase, nodes_by_id)
 
-    def _camp_choke(self, node, opp, nodes_by_id):
+    def _camp_choke(self, node, me, opp, nodes_by_id):
         """The first (start-side) common choke the opponent must still cross that we
-        don't already hold and haven't passed -- the one to race to and camp on. None
-        when the opponent is walled off or past every choke (blockade done -> deliver)."""
+        don't already hold, haven't passed, AND can reach + arm a guard before the
+        opponent does -- the one to race to and camp on. None when the opponent is
+        walled off, past every choke, or already too close to any remaining choke for
+        us to win the race (can't intercept -> stop chasing, go deliver)."""
         if opp is None or self._opp_walled_off(opp, nodes_by_id):
             return None
+        opp_node = opp.get("currentNodeId")
         for c in reversed(self.chokes):  # start-side first (the opponent hits it first)
             if self._we_hold(c, nodes_by_id) or not self._opp_must_cross(c, opp):
                 continue
-            # only if we're on it or still before it (never backtrack to a passed choke)
-            if node == c or self.graph.path_frames(node, self.gate_node, avoid={c}) == float("inf"):
+            # never backtrack to a choke we've already passed
+            if node != c and self.graph.path_frames(node, self.gate_node, avoid={c}) != float("inf"):
+                continue
+            # must be able to arrive AND finish the guard before the opponent gets there,
+            # else we can't intercept this choke (don't chase an opponent we can't beat)
+            our_eta = self.graph.path_frames(node, c, speed=self._me_speed(me)) + GUARD_SETUP_FRAMES
+            opp_eta = self.graph.path_frames(opp_node, c, speed=self._opp_speed(opp, nodes_by_id)) \
+                if opp_node else float("inf")
+            if our_eta <= opp_eta:
                 return c
         return None
 

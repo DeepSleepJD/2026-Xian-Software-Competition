@@ -51,3 +51,39 @@ class AggressiveStrategy(Strategy):
                 self._squad_sent.add(nid)
                 return [M.squad_clear(nid)]
         return []
+
+
+class StallStrategy(Strategy):
+    """A patient, REACTIVE opponent to test the ⑤⑥ fix: it advances to the doorstep of
+    the first common choke and WAITS there -- never committing onto the edge (so our
+    freeze can never fire) -- until we abandon the choke; only then does it rush to
+    deliver. If we camp to our true delivery extreme, it commits too late to make its
+    own 600-frame deadline (WE deliver, it doesn't). If we leave early, it slips through."""
+
+    def _ensure_diverged(self, nodes_by_id):
+        if not self.route_avoid and self.graph.adj:
+            obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
+            first = self.graph.fastest_hop(self.start_node, self.gate_node, obstacles=obstacles)
+            if first:
+                self.route_avoid = {first}
+
+    def _first_choke(self, node):
+        for c in reversed(self.chokes):  # start-side first
+            if self.graph.path_frames(node, self.gate_node, avoid={c}) == float("inf"):
+                return c
+        return None
+
+    def _main_action(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id):
+        if state in ("MOVING", "PROCESSING", "CONTESTING"):
+            return []
+        if me.get("routeEdgeId") and me.get("nextNodeId"):
+            return [M.move(me["nextNodeId"])]
+        self._ensure_diverged(nodes_by_id)
+        dest = self.terminal_node if me.get("verified") else self.gate_node
+        C = self._first_choke(node)
+        if C is not None and node != C:
+            nxt = self.graph.fastest_hop(node, dest, avoid=self.route_avoid)
+            # about to commit INTO the choke while the enemy still camps it -> stall
+            if nxt == C and opp is not None and opp.get("currentNodeId") == C:
+                return [M.wait()]
+        return self._advance_to(dest, me, node, state, phase, nodes_by_id)

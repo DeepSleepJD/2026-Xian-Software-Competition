@@ -30,7 +30,7 @@ def parse_args() -> Config:
     parser.add_argument(
         "--strategy",
         default="default",
-        choices=["default", "aggressive"],
+        choices=["default", "aggressive", "stall"],
         help="'aggressive' = the choke-guarding sparring opponent for local "
         "adversarial testing; 'default' = our real client",
     )

@@ -16,6 +16,9 @@ def _make_strategy(config: Config) -> Strategy:
     if config.strategy == "aggressive":
         from .sparring import AggressiveStrategy
         return AggressiveStrategy(config.player_id)
+    if config.strategy == "stall":
+        from .sparring import StallStrategy
+        return StallStrategy(config.player_id)
     return Strategy(config.player_id)
 
 
