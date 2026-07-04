@@ -1,17 +1,20 @@
-"""Blockade strategy.
+"""Blockade strategy: win the race to the first choke, freeze once, then farm.
 
-Plan (feature/blockade-strategy):
-  1. From the map, find the robust-fastest route to the gate and the choke points
-     (cut-vertices) the opponent must pass through.
-  2. Race ahead to the choke and park there before the opponent.
-  3. The instant the opponent commits toward the choke (just leaves the previous
-     station), SET_GUARD so they are forced to reroute and lose that leg.
-  4. Keep the choke (and later chokes) blocked -- re-guard as it weathers and
-     follow the opponent's detour -- so the opponent can never deliver in 600.
-  5. Normally protect our own delivery with a buffer, but while the opponent can
-     still finish and we still have a live choke to deny, use the hard delivery
-     deadline instead of leaving the blockade early. In slack time we pick up
-     nearby tasks.
+Plan (feature/blockade-strategy-fix, 2026-07-05):
+  1. From the map, find the choke points (cut-vertices) the opponent must pass.
+     The OPENING ROUTE is chosen to win the race to the first start-side choke
+     (delivery speed is only the tiebreak): on shortcut maps (S10-S13 / S11-S14
+     edges) that choke is the ONLY deniable node, so first entry decides the
+     whole denial game.
+  2. Race there. En route, spend frames on a task / ice-box claim ONLY if the
+     lead survives it: opp_eta - our_eta > op_frames + RACE_SAFETY.
+  3. Camp the choke; the instant the opponent commits onto the edge into it
+     (MOVING with >= guard-setup frames of edge left), SET_GUARD -- they arrive
+     to a blocked node and freeze mid-edge.
+  4. Fire-and-forget: once our guard is ACTIVE we leave and never re-guard
+     (downstream chokes are bypassable on shortcut maps anyway). From there we
+     farm FORWARD tasks to TASK_BASE_TARGET and net-positive resources, then
+     deliver inside the normal buffer.
 
 The window-card / contest layer is reused as-is; only navigation + guarding is new.
 """
@@ -37,8 +40,10 @@ SCOUT_DEFAULT_PROCESS_REDUCE = 3
 SCOUT_MARKER_LIFETIME = 45
 GUARD_KEEP_FRUIT = 6         # never spend guard fruit below this (keep some to deliver)
 GUARD_SETUP_FRAMES = 5       # SET_GUARD read-bar (4) + activates next frame
-TASK_TIME = 8                # rough frames a task claim+complete costs (spare-time gate)
-RACE_SAFETY = 30             # only task pre-choke if we lead the race to it by > this
+TASK_TIME = 8                # rough frames a task claim+complete costs (deadline gate)
+RACE_SAFETY = 8              # lead margin that must REMAIN after paying an op's frames
+                             # pre-choke (we trust the ETA model -- horses/weather/scouts
+                             # are simulated -- so this only covers guard-setup jitter)
 FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before arrival
 TASK_BASE_TARGET = 130       # enough to fill delivery/task milestones; then deliver
 TASK_FRAME_SCORE_COST = 0.12 # rough score lost per extra task-detour frame
@@ -164,6 +169,15 @@ class Strategy:
         self._latest_tasks = tasks
         self._maybe_choose_opening_route(me, node, round_no, tasks, nodes_by_id, weather)
 
+        # Fire-and-forget: the freeze guard is ACTIVE -> the blockade did its job.
+        # Never re-guard; farm forward tasks/resources and finish our own run.
+        if (
+            self._first_guard_node is not None
+            and not self._task_priority_mode
+            and self._we_hold(self._first_guard_node, nodes_by_id)
+        ):
+            self._enter_task_priority()
+
         if me.get("delivered") or me.get("retired"):
             return []
 
@@ -255,7 +269,7 @@ class Strategy:
         # once the opponent can no longer finish, the normal delivery buffer drags
         # us off to score.
         if self._first_choke_failed(node, me, opp, round_no, weather):
-            self._task_priority_mode = True
+            self._enter_task_priority()
             return self._task_priority_action(
                 me, node, state, phase, round_no, tasks, nodes_by_id, weather
             )
@@ -275,18 +289,18 @@ class Strategy:
                 ):
                     return self._claim_task_action(t)
                 return [M.wait()]
-            # opponent not committed yet -> camp; use the wait for a task ONLY if we
-            # have spare time (won't miss the freeze / delivery -- see _spare_for_task)
-            t = self._free_task_here(node, tasks, me, round_no)
-            if t and self._spare_for_task(node, me, opp, round_no, nodes_by_id, weather):
-                return t
+            # opponent not committed yet -> camp; use the wait for a task / ice-box
+            # ONLY if the lead survives the op (won't miss the freeze / delivery)
+            act = self._spare_op_here(node, me, opp, round_no, tasks, nodes_by_id, weather)
+            if act:
+                return act
             return [M.wait()]
 
-        # a task anywhere on the way -- but only with spare time: doing it must NOT let
-        # the opponent beat us to an unsecured choke, nor risk our own delivery.
-        here = self._free_task_here(node, tasks, me, round_no)
-        if here and self._spare_for_task(node, me, opp, round_no, nodes_by_id, weather):
-            return here
+        # a task / ice-box on the way -- but only with spare time: the op must NOT
+        # let the opponent beat us to an unsecured choke, nor risk our own delivery.
+        act = self._spare_op_here(node, me, opp, round_no, tasks, nodes_by_id, weather)
+        if act:
+            return act
         if node == self.gate_node and not me.get("verified") and phase != "RUSH":
             return [M.wait()]
         return self._advance_to(
@@ -295,7 +309,17 @@ class Strategy:
         )
 
     def _rolling_blockade_active(self) -> bool:
+        # only reachable as a fizzle-retry: guard attempted but never activated
+        # (once it activates, decide() flips to task-priority and we never return)
         return self._first_guard_node is not None and not self._task_priority_mode
+
+    def _enter_task_priority(self) -> None:
+        """The blockade phase is over (freeze active, or first choke unwinnable):
+        farm forward tasks/resources under the normal delivery buffer. The opening
+        corridor lock has served its purpose -- drop it so the farm planner may
+        use every forward node."""
+        self._task_priority_mode = True
+        self.route_avoid = set()
 
     def _first_choke_failed(self, node, me, opp, round_no, weather=None) -> bool:
         """The first start-side choke is no longer a viable freeze point."""
@@ -344,15 +368,43 @@ class Strategy:
             return True
         return opp_eta >= task_frames + GUARD_SETUP_FRAMES + FREEZE_SAFETY
 
-    def _spare_for_task(self, node, me, opp, round_no, nodes_by_id, weather=None) -> bool:
-        """Do a task only with genuine spare time: it must not push us past our
-        delivery deadline, and (before the blockade is secured) must not let the
-        opponent reach the nearest choke we still need before we do."""
-        # (a) delivery must survive the task's time cost
-        if round_no + TASK_TIME + self._frames_to_deliver(node, me, nodes_by_id, round_no, weather) + DELIVER_MARGIN >= TOTAL_ROUNDS:
+    def _spare_op_here(self, node, me, opp, round_no, tasks, nodes_by_id, weather=None):
+        """A task claim or ICE_BOX claim at this node, if its frame cost fits both
+        the delivery deadline and the choke race. Tasks first (worth more)."""
+        t = self._claimable_task_here(node, tasks, me, round_no)
+        if t is not None:
+            op = self._task_op_frames(t, me, round_no, nodes_by_id)
+            if self._spare_for_op(node, me, opp, op, round_no, nodes_by_id, weather):
+                return self._claim_task_action(t)
+        ice = self._ice_claim_frames_here(node, me, nodes_by_id, round_no)
+        if ice is not None and self._spare_for_op(node, me, opp, ice, round_no, nodes_by_id, weather):
+            return [M.claim_resource(node, ICE_BOX)]
+        return None
+
+    def _task_op_frames(self, task, me, round_no, nodes_by_id) -> int:
+        """Frames a task holds us at its node: the claim action + processing."""
+        return 1 + self._task_process_frames(task, nodes_by_id, me, round_no, round_no)
+
+    def _ice_claim_frames_here(self, node, me, nodes_by_id, round_no) -> Optional[int]:
+        """Claim frames for an ICE_BOX in stock at this node, else None. Ice is the
+        one resource always worth a stop when the frames are spare: it restores
+        freshness at delivery (the router auto-claims horses; other resource types
+        have no modelled effect, so we skip them)."""
+        stock = nodes_by_id.get(node, {}).get("resourceStock") or {}
+        if int(stock.get(ICE_BOX, 0) or 0) <= 0:
+            return None
+        return self._resource_claim_frames(node, ICE_BOX, nodes_by_id, round_no, me, round_no)
+
+    def _spare_for_op(self, node, me, opp, op_frames, round_no, nodes_by_id, weather=None) -> bool:
+        """Spend op_frames at this node only with genuine spare time: the op must
+        not push us past our delivery deadline, and (before the blockade is
+        secured) must leave RACE_SAFETY frames of lead to the nearest choke we
+        still need AFTER paying for the op."""
+        # (a) delivery must survive the op's time cost
+        if round_no + op_frames + self._frames_to_deliver(node, me, nodes_by_id, round_no, weather) + DELIVER_MARGIN >= TOTAL_ROUNDS:
             return False
         # (b) the choke race: the nearest choke ahead that the opponent must still
-        # cross and we don't yet hold -- a task must not lose us that race
+        # cross and we don't yet hold -- the op must not lose us that race
         if opp is None:
             return True
         opp_node = opp.get("currentNodeId")
@@ -368,10 +420,8 @@ class Strategy:
             opp_eta = self._eta_to_node(
                 opp, c, nodes_by_id, round_no=round_no, weather=weather
             ) if opp_node else float("inf")
-            # only spare if we're COMFORTABLY ahead to the choke -- a mere tie is not
-            # spare (a neck-and-neck opponent leaves no time for tasks before we camp)
-            return opp_eta - our_eta > TASK_TIME + RACE_SAFETY
-        return True  # no unsecured choke ahead -> race already won, task is safe
+            return opp_eta - our_eta > op_frames + RACE_SAFETY
+        return True  # no unsecured choke ahead -> race already won, the op is safe
 
     def _opp_walled_off(self, opp, nodes_by_id) -> bool:
         """True if the opponent already can't reach the gate without crossing one of
@@ -551,7 +601,35 @@ class Strategy:
         if squad_budget < 0:
             return None
         savings = self._opening_scout_savings(path, tasks, nodes_by_id, squad_budget)
-        return base - savings, path
+        race = self._opening_choke_race_frames(
+            path, me, tasks, nodes_by_id, squad_budget, avoid, obstacles,
+            round_no, weather
+        )
+        # PRIMARY: win the race to the first start-side choke (the only deniable
+        # node on shortcut maps). Total delivery speed is the tiebreak.
+        return (race, base - savings), path
+
+    def _opening_choke_race_frames(
+        self, path, me, tasks, nodes_by_id, squad_budget, avoid, obstacles,
+        round_no, weather=None
+    ) -> float:
+        """Frames to REACH the first start-side choke along this corridor (arrival
+        matters, not through-processing), minus the scout savings realizable
+        before it. 0 on choke-less maps so the delivery tiebreak decides alone."""
+        choke = self._first_start_side_choke()
+        if not choke:
+            return 0.0
+        if choke not in path:
+            return float("inf")
+        frames = self._route_frames(
+            self.start_node, choke, me, nodes_by_id, avoid=avoid,
+            obstacles=obstacles, round_no=round_no, weather=weather,
+            process_destination=False
+        )
+        if frames == float("inf"):
+            return frames
+        prefix = path[:path.index(choke) + 1]
+        return frames - self._opening_scout_savings(prefix, tasks, nodes_by_id, squad_budget)
 
     def _opening_scout_budget(self, path, me, nodes_by_id) -> int:
         budget = int(me.get("squadAvailable", 0) or 0)
@@ -733,18 +811,10 @@ class Strategy:
             return [M.wait()]  # can't verify before RUSH
         return []
 
-    # ---- opportunistic (free) task pickup ----
-    def _free_task_here(self, node, tasks, me, round_no=0):
-        """Claim a task sitting on the node we're already stopped at -- no detour,
-        no dedicated stop (called only from _stopped_anyway)."""
-        task = self._claimable_task_here(node, tasks, me, round_no)
-        if task is not None:
-            return [M.claim_task(task["taskId"])]
-        return None
-
     def _task_priority_action(self, me, node, state, phase, round_no, tasks, nodes_by_id, weather=None):
-        """Fallback after the first choke is no longer enforceable: farm worthwhile
-        task points under the normal delivery buffer, then complete delivery."""
+        """Farm phase (after the freeze landed, or the first choke became
+        unwinnable): claim worthwhile tasks and ice-boxes under the normal
+        delivery buffer, then complete delivery."""
         if state in BUSY_STATES:
             return []
         if me.get("routeEdgeId") and me.get("nextNodeId"):
@@ -755,6 +825,11 @@ class Strategy:
         task = self._claimable_task_here(node, tasks, me, round_no)
         if task is not None:
             return self._claim_task_action(task)
+        ice = self._ice_claim_frames_here(node, me, nodes_by_id, round_no)
+        if ice is not None and round_no + ice + self._frames_to_deliver(
+            node, me, nodes_by_id, round_no, weather
+        ) + DELIVER_MARGIN < TOTAL_ROUNDS:
+            return [M.claim_resource(node, ICE_BOX)]
         if node == self.gate_node and not me.get("verified") and phase != "RUSH":
             return [M.wait()]
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
@@ -819,6 +894,12 @@ class Strategy:
         if self._task_base_score(me) >= TASK_BASE_TARGET:
             return None
         direct = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
+        # farm FORWARD only: never route back across our own freeze guard (the
+        # frozen opponent unfreezes the moment the guard drops, and re-entry of a
+        # guarded node is not a modelled move)
+        avoid = self._guard_blocked | self.route_avoid
+        if self._first_guard_node:
+            avoid = avoid | {self._first_guard_node}
         best_node = None
         best_net = 0.0
         for task in tasks:
@@ -829,7 +910,7 @@ class Strategy:
                 continue
             to_task = self._eta_to_node(
                 me, target, nodes_by_id, round_no=round_no,
-                weather=weather, avoid=self._guard_blocked | self.route_avoid
+                weather=weather, avoid=avoid
             )
             if to_task == float("inf"):
                 continue

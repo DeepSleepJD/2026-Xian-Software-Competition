@@ -124,7 +124,9 @@ class BlockadeTests(unittest.TestCase):
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
-    def test_rolls_blockade_to_next_choke_even_when_previous_guard_walls_off(self) -> None:
+    def test_active_guard_flips_to_farm_and_advances(self) -> None:
+        # fire-and-forget: once our freeze guard is ACTIVE we stop camping, flip
+        # to task-priority farming and walk our own run
         s = _line_strategy(gate="S04")
         s._first_guard_node = "S02"
         nodes = [
@@ -137,9 +139,10 @@ class BlockadeTests(unittest.TestCase):
 
         act = s.decide(_inq(70, _me("S03"), _opp("S01"), nodes=nodes))
 
-        self.assertEqual([{"action": "WAIT"}], act)
+        self.assertTrue(s._task_priority_mode)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S04"}], act)
 
-    def test_rolling_blockade_takes_local_task_when_opponent_is_far_enough(self) -> None:
+    def test_farm_after_freeze_takes_local_task(self) -> None:
         s = _line_strategy(gate="S04")
         s._first_guard_node = "S02"
         nodes = [
@@ -160,7 +163,9 @@ class BlockadeTests(unittest.TestCase):
 
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S03"}], act)
 
-    def test_rolling_blockade_waits_when_local_task_would_miss_guard_window(self) -> None:
+    def test_farm_after_freeze_ignores_opponent_proximity(self) -> None:
+        # the freeze is placed; a long task next to the escaping/attacking
+        # opponent is still farmed -- we no longer manage guard windows
         s = _line_strategy(gate="S04")
         s._first_guard_node = "S02"
         nodes = [
@@ -179,9 +184,11 @@ class BlockadeTests(unittest.TestCase):
 
         act = s.decide(_inq(70, _me("S03"), _opp("S02"), nodes=nodes, tasks=tasks))
 
-        self.assertEqual([{"action": "WAIT"}], act)
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S03"}], act)
 
-    def test_rolls_blockade_sets_next_choke_on_departure(self) -> None:
+    def test_never_reguards_after_freeze_active(self) -> None:
+        # opponent commits toward the next choke -- old rolling blockade would
+        # SET_GUARD S03; fire-and-forget keeps walking instead
         s = _line_strategy(gate="S04")
         s._first_guard_node = "S02"
         nodes = [
@@ -195,7 +202,8 @@ class BlockadeTests(unittest.TestCase):
 
         act = s.decide(_inq(80, _me("S03", goodFruit=20), opp, nodes=nodes))
 
-        self.assertIn({"action": "SET_GUARD", "targetNodeId": "S03", "extraGoodFruit": 2}, act)
+        self.assertNotIn("SET_GUARD", [a["action"] for a in act])
+        self.assertEqual({"action": "MOVE", "targetNodeId": "S04"}, act[0])
 
     def test_no_node_action_while_mid_edge(self) -> None:
         s = _line_strategy(gate="S04")
@@ -428,6 +436,140 @@ class BlockadeTests(unittest.TestCase):
         act = s._squad_action("S04", me, _opp("S01"), nodes, round_no=90)
 
         self.assertEqual([{"action": "SQUAD_SCOUT", "targetNodeId": "S05"}], act)
+
+
+def _spaced_line_strategy(gate="S04"):
+    # S01 -30- S02 -30- S03 -30- S04 -30- S05: long edges (42 frames each) so a
+    # camped racer has real slack over a parked opponent
+    s = Strategy(1001)
+    s.graph.load_edges([
+        {"fromNodeId": a, "toNodeId": b, "routeType": "ROAD", "distance": 30,
+         "bidirectional": True}
+        for a, b in [("S01", "S02"), ("S02", "S03"), ("S03", "S04"), ("S04", "S05")]
+    ])
+    s.start_node, s.gate_node, s.terminal_node = "S01", gate, "S05"
+    s.chokes = s.graph.choke_points("S01", gate)
+    s._my_team = "RED"
+    return s
+
+
+class PerOpRaceMarginTests(unittest.TestCase):
+    """Pre-choke ops are allowed iff the lead survives: opp_eta - our_eta >
+    op_frames + RACE_SAFETY."""
+
+    ICE_NODES = [
+        {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+        {"nodeId": "S02", "hasObstacle": False, "resourceStock": {"ICE_BOX": 1}},
+        {"nodeId": "S03", "hasObstacle": False, "resourceStock": {}},
+        {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+        {"nodeId": "S05", "hasObstacle": False, "resourceStock": {}},
+    ]
+
+    def test_camped_claims_ice_box_when_lead_survives_it(self) -> None:
+        s = _spaced_line_strategy(gate="S04")
+        # camped on the first choke S02; opponent parked at S01 (42 frames out)
+        act = s.decide(_inq(50, _me("S02"), _opp("S01"), nodes=self.ICE_NODES))
+        self.assertEqual(
+            [{"action": "CLAIM_RESOURCE", "targetNodeId": "S02",
+              "resourceType": "ICE_BOX"}], act)
+
+    def test_camped_skips_ice_box_when_race_is_tight(self) -> None:
+        s = _line_strategy(gate="S04")  # 10-distance edges: opp only 14 frames out
+        nodes = [dict(n) for n in self.ICE_NODES]
+        act = s.decide(_inq(50, _me("S02"), _opp("S01"), nodes=nodes))
+        self.assertEqual([{"action": "WAIT"}], act)
+
+    def test_camped_short_task_claims_long_task_waits(self) -> None:
+        def task(process_round):
+            return [{
+                "taskId": "T_S02", "nodeId": "S02", "taskTemplateId": "T02",
+                "processType": "STATION_PROCESS", "processRound": process_round,
+                "score": 30, "active": True, "completed": False, "failed": False,
+                "ownerPlayerId": 0, "expireRound": 500,
+            }]
+        nodes = [{"nodeId": n, "hasObstacle": False, "resourceStock": {}}
+                 for n in ("S01", "S02", "S03", "S04", "S05")]
+
+        # lead 42-5=37; short op 1+3=4 -> 37 > 4+8, claim
+        s = _spaced_line_strategy(gate="S04")
+        act = s.decide(_inq(50, _me("S02"), _opp("S01"), nodes=nodes, tasks=task(3)))
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S02"}], act)
+
+        # long op 1+30=31 -> 37 <= 31+8, wait for the freeze instead
+        s = _spaced_line_strategy(gate="S04")
+        act = s.decide(_inq(50, _me("S02"), _opp("S01"), nodes=nodes, tasks=task(30)))
+        self.assertEqual([{"action": "WAIT"}], act)
+
+
+class FarmModeTests(unittest.TestCase):
+    def test_farm_mode_claims_ice_box_ahead(self) -> None:
+        s = _line_strategy(gate="S04")
+        s._first_guard_node = "S02"
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {},
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": 3}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {"ICE_BOX": 1}},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+        ]
+
+        act = s.decide(_inq(70, _me("S03"), _opp("S01"), nodes=nodes))
+
+        self.assertEqual(
+            [{"action": "CLAIM_RESOURCE", "targetNodeId": "S03",
+              "resourceType": "ICE_BOX"}], act)
+
+    def test_farm_mode_never_backtracks_past_our_guard(self) -> None:
+        # a juicy task sits BEHIND our freeze guard -> unreachable by doctrine
+        # (we farm forward only); keep walking to the gate
+        s = _line_strategy(gate="S04")
+        s._first_guard_node = "S02"
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {},
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": 3}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+        ]
+        tasks = [{
+            "taskId": "T_S01", "nodeId": "S01", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 500,
+        }]
+
+        act = s.decide(_inq(70, _me("S03"), _opp("S01"), nodes=nodes, tasks=tasks))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S04"}], act)
+
+
+class OpeningChokeRaceTests(unittest.TestCase):
+    def test_opening_score_puts_choke_race_before_delivery(self) -> None:
+        # S01 -10- S02(process 5, choke) -10- S03(gate) -10- S04(terminal)
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S03", "S04"
+        s.graph.load_edges([
+            {"fromNodeId": a, "toNodeId": b, "routeType": "ROAD", "distance": 10,
+             "bidirectional": True}
+            for a, b in [("S01", "S02"), ("S02", "S03"), ("S03", "S04")]
+        ])
+        s.graph.process_rounds = {"S02": 5}
+        s.chokes = s.graph.choke_points("S01", "S03")
+        nodes_by_id = {
+            n: {"nodeId": n, "hasObstacle": False, "resourceStock": {}}
+            for n in ("S01", "S02", "S03", "S04")
+        }
+
+        score, path = s._opening_route_score(
+            ["S01", "S02", "S03"], _me("S01"), 1, [], nodes_by_id
+        )
+
+        race, total = score
+        # race = ARRIVAL at S02 (14 frames), excluding its own processing;
+        # total = full delivery: 14 + 5 + 14 (to gate) + 6 verify + 14 + 2 deliver
+        self.assertEqual(14, race)
+        self.assertEqual(55, total)
+        self.assertEqual(["S01", "S02", "S03"], path)
 
 
 class RoutePlanTests(unittest.TestCase):
