@@ -1,6 +1,6 @@
 import unittest
 
-from lychee_basic_client.strategy import Strategy, TOTAL_ROUNDS
+from lychee_basic_client.strategy import HYBRID_TASK, TASK_RACE, Strategy, TOTAL_ROUNDS
 
 
 def _line_strategy(gate="S05"):
@@ -44,6 +44,44 @@ class ChokeSetupTests(unittest.TestCase):
         # S02, S03 are cut-vertices between S01 and S04
         self.assertIn("S02", s.chokes)
         self.assertIn("S03", s.chokes)
+
+    def test_single_choke_classifies_as_hybrid_task(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node = "S01", "S14"
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "S10", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S10", "toNodeId": "S11", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S10", "toNodeId": "S13", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S11", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S13", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        s.chokes = s.graph.choke_points("S01", "S14")
+
+        self.assertEqual(["S10"], s.chokes)
+        self.assertEqual(HYBRID_TASK, s._classify_strategy_mode())
+
+    def test_no_choke_classifies_as_task_race(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node = "S01", "S14"
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "A", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "B", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "A", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "B", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        s.chokes = s.graph.choke_points("S01", "S14")
+
+        self.assertEqual([], s.chokes)
+        self.assertEqual(TASK_RACE, s._classify_strategy_mode())
 
 
 class BlockadeTests(unittest.TestCase):
@@ -209,6 +247,7 @@ class BlockadeTests(unittest.TestCase):
         s = Strategy(1001)
         s.start_node, s.gate_node, s.terminal_node = "S06", "S14", "S14"
         s.chokes = ["S10"]
+        s.strategy_mode = HYBRID_TASK
         s._my_team = "RED"
         s._left_start = True
         s.graph.load_edges([
@@ -240,6 +279,41 @@ class BlockadeTests(unittest.TestCase):
         act = s.decide(_inq(183, _me("S08"), opp, nodes=nodes, tasks=[task]))
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S10"}], act)
+
+    def test_hybrid_switches_to_task_race_after_s10_guard(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S14", "S14"
+        s.chokes = ["S10"]
+        s.strategy_mode = HYBRID_TASK
+        s._my_team = "RED"
+        s._left_start = True
+        s._first_guard_node = "S10"
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "S10", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S10", "toNodeId": "T1", "routeType": "ROAD",
+             "distance": 5, "bidirectional": True},
+            {"fromNodeId": "T1", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 5, "bidirectional": True},
+        ])
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S10", "hasObstacle": False, "resourceStock": {},
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": 3}},
+            {"nodeId": "T1", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S14", "hasObstacle": False, "resourceStock": {}},
+        ]
+        tasks = [{
+            "taskId": "T_SIDE", "nodeId": "T1", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 50,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 200,
+        }]
+
+        act = s.decide(_inq(60, _me("S10"), _opp("S01"), nodes=nodes, tasks=tasks))
+
+        self.assertTrue(s._task_priority_mode)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "T1"}], act)
 
     def test_must_deliver_overrides_blocking_near_deadline(self) -> None:
         s = _line_strategy(gate="S04")

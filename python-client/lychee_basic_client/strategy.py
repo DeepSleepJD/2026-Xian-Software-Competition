@@ -40,8 +40,12 @@ GUARD_SETUP_FRAMES = 5       # SET_GUARD read-bar (4) + activates next frame
 TASK_TIME = 8                # rough frames a task claim+complete costs (spare-time gate)
 RACE_SAFETY = 30             # only task pre-choke if we lead the race to it by > this
 FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before arrival
-TASK_BASE_TARGET = 130       # enough to fill delivery/task milestones; then deliver
+HYBRID_CHOKE_LEAD_SAFETY = 10 # S10 side-task margin after setup/activation safety
+TASK_BASE_TARGET = 130       # fills 110 milestone and caps task score at 180
 TASK_FRAME_SCORE_COST = 0.12 # rough score lost per extra task-detour frame
+BLOCKADE = "BLOCKADE"
+HYBRID_TASK = "HYBRID_TASK"
+TASK_RACE = "TASK_RACE"
 ICE_BOX = "ICE_BOX"
 HORSES = ("FAST_HORSE", "SHORT_HORSE")   # move-buff resources (fast first)
 HORSE_MOVE_PER_FRAME = {"FAST_HORSE": 1200, "SHORT_HORSE": 1150}
@@ -108,6 +112,7 @@ class Strategy:
         self._task_attempts: dict[str, int] = {}
         self._opening_route_path: list[str] = []
         self._latest_tasks: list[dict[str, Any]] = []
+        self.strategy_mode: Optional[str] = None
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -129,6 +134,7 @@ class Strategy:
                 )
         # chokes the opponent must cross, nearest the gate first (strongest to hold)
         self.chokes = self.graph.choke_points(self.start_node, self.gate_node)
+        self.strategy_mode = self._classify_strategy_mode()
 
     # ---- per-frame ----
     def decide(self, inquire_data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -162,6 +168,8 @@ class Strategy:
         self._update_start_flags(me, opp)
         self._account_tasks(tasks)
         self._latest_tasks = tasks
+        if self.strategy_mode is None:
+            self.strategy_mode = self._classify_strategy_mode()
         self._maybe_choose_opening_route(me, node, round_no, tasks, nodes_by_id, weather)
 
         if me.get("delivered") or me.get("retired"):
@@ -198,9 +206,18 @@ class Strategy:
             )
             return self._ordered_actions(main, squad, card)
 
-        main = self._blockade(
-            me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather
-        )
+        if self.strategy_mode == BLOCKADE:
+            main = self._blockade(
+                me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather
+            )
+        elif self.strategy_mode == HYBRID_TASK:
+            main = self._hybrid_task_action(
+                me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather
+            )
+        else:
+            main = self._task_priority_action(
+                me, node, state, phase, round_no, tasks, nodes_by_id, weather
+            )
         # remember opponent position for next-frame "just departed" detection
         if opp is not None:
             self._opp_prev_node = opp.get("currentNodeId")
@@ -215,6 +232,13 @@ class Strategy:
         if not main:
             return ([M.wait()] if squad or card else []) + squad + card
         return main + squad + card
+
+    def _classify_strategy_mode(self) -> str:
+        if len(self.chokes) >= 2:
+            return BLOCKADE
+        if len(self.chokes) == 1:
+            return HYBRID_TASK
+        return TASK_RACE
 
     # ---- blockade / phase logic ----
     def _blockade(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather=None):
@@ -293,6 +317,107 @@ class Strategy:
             self.gate_node, me, node, state, phase, nodes_by_id, tasks,
             round_no, weather
         )
+
+    def _hybrid_task_action(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather=None):
+        """Single-choke maps: contest S10 once, then race tasks/delivery.
+
+        S10 is useful as disruption, not as a full win condition. Before reaching it
+        we only take local work that keeps enough lead for guard setup; after the
+        first guard attempt succeeds or the opponent no longer has to cross it, we
+        switch to the task planner.
+        """
+        if state in BUSY_STATES:
+            return []
+        if me.get("routeEdgeId") and me.get("nextNodeId"):
+            target = self._hybrid_guard_node()
+            if target and not self._hybrid_s10_done(me, opp, node, nodes_by_id):
+                return self._advance_to(
+                    target, me, node, state, phase, nodes_by_id, tasks,
+                    round_no, weather
+                )
+            return self._advance_to(
+                self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+                round_no, weather
+            )
+
+        guard_node = self._hybrid_guard_node()
+        if guard_node is None or self._hybrid_s10_done(me, opp, node, nodes_by_id):
+            self._task_priority_mode = True
+            return self._task_priority_action(
+                me, node, state, phase, round_no, tasks, nodes_by_id, weather
+            )
+
+        if node == guard_node:
+            if self._we_hold(node, nodes_by_id) or not self._opp_must_cross(node, opp):
+                self._task_priority_mode = True
+                return self._task_priority_action(
+                    me, node, state, phase, round_no, tasks, nodes_by_id, weather
+                )
+            if self._freeze_window_open(opp, node, round_no, weather) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
+                self._first_guard_node = node
+                self._guarded_round[node] = round_no
+                return [M.set_guard(node, extra_good_fruit=self._guard_fruit(me))]
+            task = self._claimable_task_here(node, tasks, me, round_no)
+            if task and self._spare_for_hybrid_choke_task(
+                node, me, opp, task, round_no, nodes_by_id, weather
+            ):
+                return self._claim_task_action(task)
+            return [M.wait()]
+
+        task = self._claimable_task_here(node, tasks, me, round_no)
+        if task and self._spare_for_hybrid_choke_task(
+            node, me, opp, task, round_no, nodes_by_id, weather
+        ):
+            return self._claim_task_action(task)
+        if node == self.gate_node and not me.get("verified") and phase != "RUSH":
+            return [M.wait()]
+        if self._needs_process(node, nodes_by_id) and node not in self.processed:
+            return [M.process(node)]
+        return self._advance_to(
+            guard_node, me, node, state, phase, nodes_by_id, tasks,
+            round_no, weather
+        )
+
+    def _hybrid_guard_node(self) -> Optional[str]:
+        if len(self.chokes) == 1:
+            return self.chokes[0]
+        return None
+
+    def _hybrid_s10_done(self, me, opp, node, nodes_by_id) -> bool:
+        guard_node = self._hybrid_guard_node()
+        if guard_node is None:
+            return True
+        if self._first_guard_node is not None:
+            return True
+        if self._we_hold(guard_node, nodes_by_id):
+            return True
+        if opp is not None and not self._opp_must_cross(guard_node, opp):
+            return True
+        # Once our own route can reach the gate without crossing S10, we've already
+        # passed the useful disruption window.
+        return node != guard_node and self.graph.path_frames(node, self.gate_node, avoid={guard_node}) != float("inf")
+
+    def _spare_for_hybrid_choke_task(self, node, me, opp, task, round_no, nodes_by_id, weather=None) -> bool:
+        guard_node = self._hybrid_guard_node()
+        if guard_node is None:
+            return True
+        task_frames = self._task_process_frames(
+            task, nodes_by_id, me, round_no, round_no
+        )
+        if round_no + task_frames + self._frames_to_deliver(node, me, nodes_by_id, round_no, weather) + DELIVER_MARGIN >= TOTAL_ROUNDS:
+            return False
+        our_eta = self._eta_to_node(
+            me, guard_node, nodes_by_id, round_no=round_no, weather=weather
+        )
+        opp_eta = self._eta_to_node(
+            opp, guard_node, nodes_by_id, round_no=round_no, weather=weather
+        ) if opp is not None else float("inf")
+        if our_eta == float("inf"):
+            return False
+        if opp_eta == float("inf"):
+            return True
+        our_ready = task_frames + our_eta + GUARD_SETUP_FRAMES + FREEZE_SAFETY
+        return opp_eta - our_ready >= HYBRID_CHOKE_LEAD_SAFETY
 
     def _rolling_blockade_active(self) -> bool:
         return self._first_guard_node is not None and not self._task_priority_mode
