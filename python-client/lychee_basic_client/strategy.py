@@ -8,9 +8,10 @@ Plan (feature/blockade-strategy):
      station), SET_GUARD so they are forced to reroute and lose that leg.
   4. Keep the choke (and later chokes) blocked -- re-guard as it weathers and
      follow the opponent's detour -- so the opponent can never deliver in 600.
-  5. Never risk our own delivery: every frame we compute the latest round we may
-     leave and still verify + deliver in time; past that we abandon blocking and
-     go deliver. In slack time we pick up nearby tasks.
+  5. Normally protect our own delivery with a buffer, but while the opponent can
+     still finish and we still have a live choke to deny, use the hard delivery
+     deadline instead of leaving the blockade early. In slack time we pick up
+     nearby tasks.
 
 The window-card / contest layer is reused as-is; only navigation + guarding is new.
 """
@@ -27,6 +28,8 @@ TOTAL_ROUNDS = 600
 DELIVER_MARGIN = 60          # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
+DENY_DELIVER_MARGIN = 0      # no buffer while an unsecured blockade is the only thing
+                             # preventing the opponent from finishing
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
 DELIVER_FRAMES = 2           # move-into-terminal + DELIVER
 GUARD_KEEP_FRUIT = 6         # never spend guard fruit below this (keep some to deliver)
@@ -167,8 +170,9 @@ class Strategy:
             )
             return self._ordered_actions(main, squad, card)
 
-        # delivery safety: if we can't afford to block any longer, go to the gate.
-        if self._must_deliver(node, me, round_no, nodes_by_id, weather):
+        # Delivery safety. If the opponent can still finish through an unsecured
+        # choke, use the hard latest-departure time instead of the normal buffer.
+        if self._must_deliver(node, me, opp, round_no, nodes_by_id, weather):
             main = self._advance_to(
                 self.gate_node, me, node, state, phase, nodes_by_id, tasks,
                 round_no, weather
@@ -202,7 +206,9 @@ class Strategy:
         BREAK_GUARD (both need a current node) nor backtrack. Their only out is a
         squad-weaken, which we out-heal with SQUAD_REINFORCE (see _squad_action).
         Then we run to deliver. Never linger for tasks (only grab freebies where we
-        already stop). Our delivery deadline (_must_deliver upstream) always wins."""
+        already stop). The upstream delivery check uses a hard deadline while the
+        denial is still unsecured, so we do not abandon a useful choke just for the
+        normal delivery buffer."""
         if state in BUSY_STATES:
             return []
 
@@ -220,8 +226,9 @@ class Strategy:
         # instant they've COMMITTED onto the edge into it (MOVING, nextNode==choke) AND
         # enough edge is left for the guard to finish before they arrive. They then
         # arrive to a blocked node and freeze mid-edge -- no backtrack, no FORCED_PASS,
-        # no BREAK_GUARD. If they haven't committed yet we hold the choke and wait; our
-        # delivery deadline (_must_deliver upstream) drags us off before we're too late.
+        # no BREAK_GUARD. If they haven't committed yet we hold the choke and wait;
+        # once the opponent can no longer finish, the normal delivery buffer drags
+        # us off to score.
         if node in self.chokes and not self._we_hold(node, nodes_by_id) \
            and self._opp_must_cross(node, opp) and not self._opp_walled_off(opp, nodes_by_id):
             if self._freeze_window_open(opp, node, round_no, weather) and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
@@ -286,11 +293,7 @@ class Strategy:
         opp_node = opp.get("currentNodeId")
         if not opp_node:
             return False
-        my_guards = {
-            nid for nid, n in nodes_by_id.items()
-            if (g := n.get("guard")) and g.get("active")
-            and g.get("ownerTeamId") == self._my_team and g.get("defense", 0) > 0
-        }
+        my_guards = self._my_active_guards(nodes_by_id)
         if not my_guards:
             return False
         return self.graph.path_frames(opp_node, self.gate_node, avoid=my_guards) == float("inf")
@@ -459,9 +462,71 @@ class Strategy:
         return None
 
     # ---- delivery-time safety ----
-    def _must_deliver(self, node, me, round_no, nodes_by_id, weather=None) -> bool:
+    def _must_deliver(self, node, me, opp, round_no, nodes_by_id, weather=None) -> bool:
         need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
-        return round_no + need + DELIVER_MARGIN >= TOTAL_ROUNDS
+        margin = DELIVER_MARGIN
+        if self._deny_still_matters(node, opp, round_no, nodes_by_id, weather):
+            margin = DENY_DELIVER_MARGIN
+        return round_no + need + margin >= TOTAL_ROUNDS
+
+    def _deny_still_matters(self, node, opp, round_no, nodes_by_id, weather=None) -> bool:
+        """True while leaving now gives the opponent a fastest-route finish and we
+        still have a choke ahead/underfoot that can deny that finish."""
+        return (
+            self._opponent_can_still_deliver(opp, round_no, nodes_by_id, weather)
+            and self._live_deny_choke_exists(node, opp)
+        )
+
+    def _live_deny_choke_exists(self, node, opp) -> bool:
+        if opp is None:
+            return False
+        for c in reversed(self.chokes):  # start-side first, same race order as tasks
+            if not self._opp_must_cross(c, opp):
+                continue
+            # Only chokes we are at or still before are useful. If removing c still
+            # leaves us a route from here to the gate, then we have already passed it.
+            if node != c and self.graph.path_frames(node, self.gate_node, avoid={c}) != float("inf"):
+                continue
+            return True
+        return False
+
+    def _opponent_can_still_deliver(self, opp, round_no, nodes_by_id, weather=None) -> bool:
+        frames = self._opponent_frames_to_deliver(opp, nodes_by_id, round_no, weather)
+        return round_no + frames < TOTAL_ROUNDS
+
+    def _opponent_frames_to_deliver(self, opp, nodes_by_id, round_no=0, weather=None) -> float:
+        """Optimistic opponent delivery ETA. Optimistic is intentional: if even this
+        fastest estimate misses the deadline, we can safely leave the blockade."""
+        if opp is None or opp.get("retired"):
+            return float("inf")
+        if opp.get("delivered"):
+            return 0
+
+        avoid = self._my_active_guards(nodes_by_id)
+        if opp.get("routeEdgeId") and opp.get("nextNodeId") in avoid:
+            return float("inf")
+
+        if opp.get("verified"):
+            to_term = self._eta_to_node(
+                opp, self.terminal_node, nodes_by_id, round_no=round_no,
+                weather=weather, avoid=avoid
+            )
+            return to_term + DELIVER_FRAMES
+
+        to_gate = self._eta_to_node(
+            opp, self.gate_node, nodes_by_id, round_no=round_no,
+            weather=weather, avoid=avoid
+        )
+        if to_gate == float("inf"):
+            return float("inf")
+        to_term = self._route_frames(
+            self.gate_node, self.terminal_node, opp, nodes_by_id,
+            avoid=avoid, round_no=round_no + to_gate + VERIFY_FRAMES,
+            weather=weather, weather_base_round=round_no
+        )
+        if to_term == float("inf"):
+            return float("inf")
+        return to_gate + VERIFY_FRAMES + to_term + DELIVER_FRAMES
 
     def _frames_to_deliver(self, node, me, nodes_by_id, round_no=0, weather=None) -> float:
         to_gate = 0 if me.get("verified") else self._route_frames(
@@ -594,7 +659,7 @@ class Strategy:
 
         return RoutePlan(dist[best], path, first_claim)
 
-    def _eta_to_node(self, actor, dst, nodes_by_id, round_no=0, weather=None) -> float:
+    def _eta_to_node(self, actor, dst, nodes_by_id, round_no=0, weather=None, avoid=None) -> float:
         """Arrival ETA to a node, respecting current edge progress.
 
         Route plans normally include mandatory processing on the destination because
@@ -602,6 +667,7 @@ class Strategy:
         moment instead: a guard can be set as soon as we stand on the choke, and the
         opponent reaches it before any local processing completes.
         """
+        avoid = avoid or set()
         src = actor.get("currentNodeId")
         if not src:
             return float("inf")
@@ -611,15 +677,17 @@ class Strategy:
         if not actor.get("routeEdgeId") or not next_node:
             return self._route_frames(
                 src, dst, actor, nodes_by_id, round_no=round_no, weather=weather,
-                process_destination=False
+                process_destination=False, avoid=avoid
             )
 
         edge = self._edge_info(src, next_node)
         if edge is None:
             return self._route_frames(
                 src, dst, actor, nodes_by_id, round_no=round_no, weather=weather,
-                process_destination=False
+                process_destination=False, avoid=avoid
             )
+        if next_node in avoid:
+            return float("inf")
         route_type, distance = edge
         remaining = self._remaining_edge_required(actor, route_type, distance)
         horse, horse_left, held = self._initial_horse_state(actor)
@@ -640,7 +708,7 @@ class Strategy:
             actor, next_node, horse, horse_left, held
         )
         rest = self._route_frames(
-            next_node, dst, actor_at_next, nodes_by_id,
+            next_node, dst, actor_at_next, nodes_by_id, avoid=avoid,
             round_no=round_no + edge_frames + process_frames,
             weather=weather, weather_base_round=round_no,
             process_destination=False
@@ -936,6 +1004,13 @@ class Strategy:
             nid for nid, n in nodes_by_id.items()
             if (g := n.get("guard")) and g.get("active") and g.get("defense", 0) > 0
             and g.get("ownerTeamId") not in (None, self._my_team)
+        }
+
+    def _my_active_guards(self, nodes_by_id) -> set:
+        return {
+            nid for nid, n in nodes_by_id.items()
+            if (g := n.get("guard")) and g.get("active") and g.get("defense", 0) > 0
+            and g.get("ownerTeamId") == self._my_team
         }
 
     @staticmethod

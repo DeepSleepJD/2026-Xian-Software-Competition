@@ -125,6 +125,20 @@ class BlockadeTests(unittest.TestCase):
         act = s.decide(_inq(TOTAL_ROUNDS - 5, _me("S01"), _opp("S01")))
         self.assertEqual("MOVE", act[0]["action"])
 
+    def test_unsecured_deny_uses_hard_departure_not_delivery_buffer(self) -> None:
+        s = _line_strategy(gate="S04")
+        # At round 500 we can still finish from S02, but only if the old 60-frame
+        # buffer is ignored. Since the opponent can still finish too, keep camping.
+        act = s.decide(_inq(500, _me("S02"), _opp("S01")))
+        self.assertEqual([{"action": "WAIT"}], act)
+
+    def test_returns_to_buffer_once_opponent_fastest_finish_is_too_late(self) -> None:
+        s = _line_strategy(gate="S04")
+        # By round 540 the opponent's optimistic fastest delivery is already past
+        # the deadline, so the normal delivery buffer should take over again.
+        act = s.decide(_inq(540, _me("S02"), _opp("S01")))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
+
     def test_delivers_when_verified_at_terminal(self) -> None:
         s = _line_strategy(gate="S04")
         me = _me("S05", verified=True, currentNodeId="S05")
