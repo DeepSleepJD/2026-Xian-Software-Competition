@@ -257,9 +257,10 @@ class BlockadeTests(unittest.TestCase):
 
     def test_unsecured_deny_uses_hard_departure_not_delivery_buffer(self) -> None:
         s = _line_strategy(gate="S04")
-        # At round 500 we can still finish from S02, but only if the old 60-frame
-        # buffer is ignored. Since the opponent can still finish too, keep camping.
+        # At round 500 we can still finish comfortably from S02, so do not
+        # abandon delivery just because a safety buffer would be shrinking.
         act = s.decide(_inq(500, _me("S02"), _opp("S01")))
+        self.assertFalse(s._delivery_abandoned)
         self.assertEqual([{"action": "WAIT"}], act)
 
     def test_returns_to_buffer_once_opponent_fastest_finish_is_too_late(self) -> None:
@@ -882,7 +883,7 @@ class OpeningContestTests(unittest.TestCase):
 
     def test_plays_xian_gong_on_first_two_taps(self) -> None:
         s = _line_strategy()
-        me = _me("S02", freshness=10, goodFruit=0)
+        me = _me("S02", freshness=10, goodFruit=20)
 
         for ri in (1, 2):
             act = s._card(me, [self._contest(ri)], 50)
@@ -892,6 +893,14 @@ class OpeningContestTests(unittest.TestCase):
         c2 = self._contest(1); c2["contestId"] = "C2"
         act = s._card(me, [c2], 80)
         self.assertEqual("XIAN_GONG", act[0]["card"])
+
+    def test_uses_fallback_card_when_good_fruit_is_gone(self) -> None:
+        s = _line_strategy()
+        me = _me("S02", freshness=79, goodFruit=0, guardActionPoint=4)
+
+        act = s._card(me, [self._contest(1)], 50)
+
+        self.assertEqual("BING_ZHENG", act[0]["card"])
 
     def test_third_tap_abstains_when_already_up_two_zero(self) -> None:
         s = _line_strategy()
@@ -916,6 +925,70 @@ class OpeningContestTests(unittest.TestCase):
         act = s._card(me, [self._contest(3, red_point=0, blue_point=2)], 50)
 
         self.assertEqual("ABSTAIN", act[0]["card"])
+
+
+class DeliveryAbandonTests(unittest.TestCase):
+    def test_eta_200_abandons_at_round_450_not_449(self) -> None:
+        s = Strategy(1001)
+        s._frames_to_deliver = lambda *args, **kwargs: 200
+
+        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 449, {}))
+        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 450, {}))
+
+    def test_switches_to_task_priority_when_delivery_is_fifty_frames_late(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S03", "S04"
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD",
+             "distance": 30, "bidirectional": True},
+            {"fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD",
+             "distance": 30, "bidirectional": True},
+            {"fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD",
+             "distance": 30, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "T1", "routeType": "ROAD",
+             "distance": 5, "bidirectional": True},
+        ])
+        nodes = [
+            {"nodeId": n, "hasObstacle": False, "resourceStock": {}}
+            for n in ("S01", "S02", "S03", "S04", "T1")
+        ]
+        tasks = [{
+            "taskId": "T_SIDE", "nodeId": "T1", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 590,
+        }]
+
+        act = s.decide(_inq(540, _me("S01"), _opp("S01"), nodes=nodes, tasks=tasks))
+
+        self.assertTrue(s._task_priority_mode)
+        self.assertTrue(s._delivery_abandoned)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "T1"}], act)
+
+
+class RushTacticTests(unittest.TestCase):
+    def test_uses_rush_speed_as_soon_as_rush_phase_allows_it(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me(
+            "S02", state="MOVING", nextNodeId="S03", routeEdgeId="E02",
+            goodFruit=20, rushTacticUsedCount=0, buffs=[],
+        )
+
+        act = s.decide(_inq(451, me, _opp("S01"), phase="RUSH"))
+
+        self.assertEqual([{"action": "RUSH_SPEED"}], act)
+
+    def test_does_not_use_rush_speed_over_active_horse(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me(
+            "S02", state="MOVING", nextNodeId="S03", routeEdgeId="E02",
+            goodFruit=20, rushTacticUsedCount=0,
+            buffs=[{"type": "FAST_HORSE", "remainingRound": 5}],
+        )
+
+        act = s.decide(_inq(451, me, _opp("S01"), phase="RUSH"))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
 
 if __name__ == "__main__":

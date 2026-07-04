@@ -25,13 +25,15 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from . import messages as M
-from .contest import active_contest
+from .contest import active_contest, pick_card
 from .graph import BASE_MOVE_PER_FRAME, Graph, ROUTE_COST_COEF
 
 TOTAL_ROUNDS = 600
 DELIVER_MARGIN = 10          # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
+DELIVERY_ABANDON_MARGIN = 50 # only stop forcing delivery once the ETA is this far
+                             # beyond the deadline; e.g. ETA=200 abandons at 450
 DENY_DELIVER_MARGIN = 0      # no buffer while an unsecured blockade is the only thing
                              # preventing the opponent from finishing
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
@@ -49,9 +51,10 @@ FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before
 TASK_BASE_TARGET = 130       # enough to fill delivery/task milestones; then deliver
 TASK_FRAME_SCORE_COST = 0.12 # rough score lost per extra task-detour frame
 ICE_BOX = "ICE_BOX"
+RUSH_SPEED = "RUSH_SPEED"
 HORSES = ("FAST_HORSE", "SHORT_HORSE")   # move-buff resources (fast first)
-HORSE_MOVE_PER_FRAME = {"FAST_HORSE": 1200, "SHORT_HORSE": 1150}
-HORSE_DURATION = {"FAST_HORSE": 20, "SHORT_HORSE": 14}
+HORSE_MOVE_PER_FRAME = {"FAST_HORSE": 1200, "SHORT_HORSE": 1150, RUSH_SPEED: 1300}
+HORSE_DURATION = {"FAST_HORSE": 20, "SHORT_HORSE": 14, RUSH_SPEED: 15}
 RESOURCE_CLAIM_FRAMES = 2
 START_OBSTACLE_CLEAR_FRAMES = 6
 OPENING_SCORE_BUDGET_S = 0.25  # platform action window is 500ms/frame; round-1 full
@@ -113,6 +116,7 @@ class Strategy:
         self._left_start = False
         self._opp_left_start = False
         self._task_priority_mode = False
+        self._delivery_abandoned = False
         self.task_base = 0
         self._counted_tasks: set[str] = set()
         self._task_attempts: dict[str, int] = {}
@@ -193,6 +197,9 @@ class Strategy:
         # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
         squad = self._squad_action(node, me, opp, tasks, nodes_by_id, round_no, weather)
 
+        if self._rush_speed_action(me, state, phase):
+            return self._ordered_actions([M.rush_speed()], squad, card)
+
         # once verified we've committed to the delivery run -> always finish it
         # (we only ever VERIFY during our own delivery push).
         if me.get("verified"):
@@ -201,6 +208,9 @@ class Strategy:
                 round_no, weather
             )
             return self._ordered_actions(main, squad, card)
+
+        if self._should_abandon_delivery(node, me, round_no, nodes_by_id, weather):
+            self._enter_task_priority(abandon_delivery=True)
 
         # Delivery safety. If the opponent can still finish through an unsecured
         # choke, use the hard latest-departure time instead of the normal buffer.
@@ -318,12 +328,14 @@ class Strategy:
         # (once it activates, decide() flips to task-priority and we never return)
         return self._first_guard_node is not None and not self._task_priority_mode
 
-    def _enter_task_priority(self) -> None:
+    def _enter_task_priority(self, abandon_delivery: bool = False) -> None:
         """The blockade phase is over (freeze active, or first choke unwinnable):
         farm forward tasks/resources under the normal delivery buffer. The opening
         corridor lock has served its purpose -- drop it so the farm planner may
         use every forward node."""
         self._task_priority_mode = True
+        if abandon_delivery:
+            self._delivery_abandoned = True
         self.route_avoid = set()
 
     def _first_choke_failed(self, node, me, opp, round_no, weather=None) -> bool:
@@ -919,7 +931,7 @@ class Strategy:
         return [M.claim_task(task_id)]
 
     def _claimable_task_here(self, node, tasks, me, round_no) -> Optional[dict[str, Any]]:
-        if self._task_base_score(me) >= TASK_BASE_TARGET:
+        if not self._delivery_abandoned and self._task_base_score(me) >= TASK_BASE_TARGET:
             return None
         best = None
         for t in tasks:
@@ -967,7 +979,7 @@ class Strategy:
         self, node, me, tasks, nodes_by_id, round_no, weather=None,
         route_avoid: Optional[set[str]] = None
     ) -> Optional[str]:
-        if self._task_base_score(me) >= TASK_BASE_TARGET:
+        if not self._delivery_abandoned and self._task_base_score(me) >= TASK_BASE_TARGET:
             return None
         direct = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
         # farm FORWARD only: never route back across our own freeze guard (the
@@ -997,15 +1009,19 @@ class Strategy:
             expire = int(task.get("expireRound", 0) or 0)
             if expire and finish_task_round >= expire:
                 continue
-            deliver_after = self._frames_to_deliver(
-                target, me, nodes_by_id, finish_task_round, weather
-            )
-            if deliver_after == float("inf"):
-                continue
-            total = to_task + task_frames + deliver_after
-            if round_no + total + DELIVER_MARGIN >= TOTAL_ROUNDS:
-                continue
-            detour = max(0.0, total - direct) if direct != float("inf") else total
+            if self._delivery_abandoned:
+                total = to_task + task_frames
+                detour = total
+            else:
+                deliver_after = self._frames_to_deliver(
+                    target, me, nodes_by_id, finish_task_round, weather
+                )
+                if deliver_after == float("inf"):
+                    continue
+                total = to_task + task_frames + deliver_after
+                if round_no + total + DELIVER_MARGIN >= TOTAL_ROUNDS:
+                    continue
+                detour = max(0.0, total - direct) if direct != float("inf") else total
             net = self._task_value(task, me) - detour * TASK_FRAME_SCORE_COST
             if net > best_net:
                 best_node = target
@@ -1014,6 +1030,8 @@ class Strategy:
 
     def _task_value(self, task, me) -> float:
         score = float(task.get("score", 0) or 0)
+        if self._delivery_abandoned:
+            return score * 2.5
         base = self._task_base_score(me)
         if base < 90:
             return score * 2.5
@@ -1039,7 +1057,32 @@ class Strategy:
                 self.task_base += int(task.get("score", 0) or 0)
 
     # ---- delivery-time safety ----
+    def _rush_speed_action(self, me, state, phase) -> bool:
+        if phase != "RUSH" or state in BUSY_STATES:
+            return False
+        if me.get("delivered") or me.get("retired"):
+            return False
+        if int(me.get("rushTacticUsedCount", 0) or 0) > 0:
+            return False
+        if me.get("goodFruit", 0) < 2:
+            return False
+        if self._active_horse(me):
+            return False
+        # Do not spend a main action on speed when the next useful action is
+        # already a zero-distance terminal delivery.
+        if me.get("verified") and me.get("currentNodeId") == self.terminal_node:
+            return False
+        return True
+
+    def _should_abandon_delivery(self, node, me, round_no, nodes_by_id, weather=None) -> bool:
+        if self._delivery_abandoned or me.get("verified"):
+            return False
+        need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
+        return round_no + need >= TOTAL_ROUNDS + DELIVERY_ABANDON_MARGIN
+
     def _must_deliver(self, node, me, opp, round_no, nodes_by_id, weather=None) -> bool:
+        if self._delivery_abandoned:
+            return False
         need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
         margin = DELIVER_MARGIN
         if self._deny_still_matters(node, opp, round_no, nodes_by_id, weather):
@@ -1624,13 +1667,13 @@ class Strategy:
         if tap in self._contest_played:
             return []
         self._contest_played.add(tap)
-        card = self._window_card_choice(c)
+        card = self._window_card_choice(me, c)
         return [M.window_card(c["contestId"], card)]
 
-    def _window_card_choice(self, contest) -> str:
+    def _window_card_choice(self, me, contest) -> str:
         if contest.get("roundIndex") == 3 and self._contest_points(contest) == (2, 0):
             return "ABSTAIN"
-        return "XIAN_GONG"
+        return pick_card(me, contest)
 
     def _contest_points(self, contest) -> tuple[int, int]:
         red = int(contest.get("redPoint", 0) or 0)

@@ -44,21 +44,28 @@ class ContestTests(unittest.TestCase):
         self.assertIsNotNone(active_contest(1001, [c], round_no=118))
         self.assertIsNone(active_contest(1001, [c], round_no=121))
 
-    def test_pick_card_spends_guard_point_first(self) -> None:
-        me = {"guardActionPoint": 2, "resources": {"PASS_TOKEN": 1}}
+    def test_pick_card_spends_xian_gong_when_affordable(self) -> None:
+        me = {"guardActionPoint": 2, "resources": {"PASS_TOKEN": 1},
+              "freshness": 40, "goodFruit": 20}
+        self.assertEqual("XIAN_GONG", pick_card(me, _contest("TASK")))
+
+    def test_pick_card_falls_back_to_guard_point_when_good_fruit_is_gone(self) -> None:
+        me = {"guardActionPoint": 2, "resources": {"PASS_TOKEN": 1},
+              "freshness": 95, "goodFruit": 0}
         self.assertEqual("BING_ZHENG", pick_card(me, _contest("TASK")))
 
     def test_pick_card_uses_document_then_horse(self) -> None:
-        me = {"guardActionPoint": 0, "resources": {"OFFICIAL_PERMIT": 1}}
+        me = {"guardActionPoint": 0, "resources": {"OFFICIAL_PERMIT": 1},
+              "freshness": 40, "goodFruit": 0}
         self.assertEqual("YAN_DIE", pick_card(me, _contest("TASK")))
-        me2 = {"guardActionPoint": 0, "resources": {"SHORT_HORSE": 1}}
+        me2 = {"guardActionPoint": 0, "resources": {"SHORT_HORSE": 1},
+               "freshness": 40, "goodFruit": 0}
         self.assertEqual("QIANG_XING", pick_card(me2, _contest("TASK")))
 
-    def test_pick_card_saves_good_fruit_for_high_value_only(self) -> None:
-        # only a good fruit available: spend it on GATE, not on a mere RESOURCE
+    def test_pick_card_spends_good_fruit_on_low_value_windows_too(self) -> None:
         me = {"guardActionPoint": 0, "resources": {}, "freshness": 95, "goodFruit": 50}
         self.assertEqual("XIAN_GONG", pick_card(me, _contest("GATE")))
-        self.assertEqual("ABSTAIN", pick_card(me, _contest("RESOURCE")))
+        self.assertEqual("XIAN_GONG", pick_card(me, _contest("RESOURCE")))
 
     def test_pick_card_abstains_when_nothing_affordable(self) -> None:
         me = {"guardActionPoint": 0, "resources": {}, "freshness": 40, "goodFruit": 0}

@@ -108,6 +108,11 @@ def rush_protect() -> dict[str, Any]:
     return {"action": "RUSH_PROTECT"}
 
 
+def rush_speed() -> dict[str, Any]:
+    """疾行令: 15 frames of x1.3 movement speed (rush tactic, once per match)."""
+    return {"action": "RUSH_SPEED"}
+
+
 def squad_clear(target_node_id: str) -> dict[str, Any]:
     """小分队清障: delayed remote obstacle clear (2 squad members, no window)."""
     return {"action": "SQUAD_CLEAR", "targetNodeId": target_node_id}

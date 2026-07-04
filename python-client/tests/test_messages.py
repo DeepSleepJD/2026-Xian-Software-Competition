@@ -1,6 +1,6 @@
 import unittest
 
-from lychee_basic_client.messages import action_message, heartbeat_action, move
+from lychee_basic_client.messages import action_message, heartbeat_action, move, rush_speed
 
 
 class MessageTests(unittest.TestCase):
@@ -36,6 +36,9 @@ class MessageTests(unittest.TestCase):
             },
             action_message("match-1", 7, 1006, [move("S10")]),
         )
+
+    def test_rush_speed_builder(self) -> None:
+        self.assertEqual({"action": "RUSH_SPEED"}, rush_speed())
 
 
 if __name__ == "__main__":
