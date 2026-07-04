@@ -39,6 +39,13 @@ WEATHER_ROUTE_MULT = {       # weather -> per-route move-cost multiplier (only t
 }
 ICE_BOX = "ICE_BOX"
 HORSES = ("FAST_HORSE", "SHORT_HORSE")   # move-buff resources (fast first)
+# horse -> (frame multiplier <1 = faster, buff duration in rounds)
+HORSE_BUFF = {"FAST_HORSE": (0.80, 20), "SHORT_HORSE": (0.85, 14)}
+RESOURCE_CLAIM_FRAMES = 4    # ~read-bar to CLAIM_RESOURCE a horse en route
+RESOURCE_USE_FRAMES = 1      # ~to USE a held horse
+TASK_ROUTE_CAP = 130         # routeTaskScore beyond which task score is already maxed
+                             # (130 + milestones 15/20/15 = 180 cap): stop grabbing tasks,
+                             # spend the time on freshness / faster delivery instead
 OBSTACLE_PENALTY = 0         # obstacles are squad-cleared in parallel -> don't route around them
 XIAN_GONG_FLOOR = 1          # play XIAN_GONG whenever legally affordable (keep 1 fruit token)
 SQUAD_CLEAR_LEAD_HOPS = 2    # only pre-clear obstacles within this many hops ahead
@@ -78,6 +85,7 @@ class Strategy:
         self._obs_wait_node: Optional[str] = None
         self._obs_wait_tries = 0
         self._last_forced_pass = -10
+        self._route_task_score = 0   # our cumulative routeTaskScore (from TASK_COMPLETE)
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -123,7 +131,8 @@ class Strategy:
         self._round = round_no
         self._opp = opp
         self._tasks = tasks
-        self._ingest_weather(inquire_data.get("weather") or {}, round_no)
+        # weather is intentionally NOT used in routing (unpredictable at route time -- if we
+        # hit bad weather that's just bad luck; modelling it added churn without a clear win).
 
         if me.get("delivered") or me.get("retired"):
             return []
@@ -213,7 +222,8 @@ class Strategy:
             if self._stuck_tries > PROCESS_STUCK_LIMIT:
                 self.processed.add(node)
             else:
-                if self._spare_for_task(node, me, self._opp, self._round, nodes_by_id):
+                if self._route_task_score < TASK_ROUTE_CAP \
+                        and self._spare_for_task(node, me, self._opp, self._round, nodes_by_id):
                     t = self._free_task_here(node, self._tasks, me)
                     if t:
                         return t
@@ -225,11 +235,9 @@ class Strategy:
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         avoid = self._guard_blocked | self.route_avoid
         nxt = self.graph.fastest_hop(node, dest, avoid=avoid, obstacles=obstacles,
-                                     obstacle_penalty=OBSTACLE_PENALTY,
-                                     weather_fn=self._wmult, base_round=self._round) \
+                                     obstacle_penalty=OBSTACLE_PENALTY) \
             or self.graph.fastest_hop(node, dest, obstacles=obstacles,
-                                      obstacle_penalty=OBSTACLE_PENALTY,
-                                      weather_fn=self._wmult, base_round=self._round)
+                                      obstacle_penalty=OBSTACLE_PENALTY)
         if not nxt:
             return []
         # ENEMY GUARD on an unavoidable next hop -> break through (single FORCED_PASS; two
@@ -299,6 +307,10 @@ class Strategy:
     def _scavenge_target(self, node, me, round_no, nodes_by_id):
         """Nearest node with a claimable task we can detour to, grab, and still deliver in
         time. None -> nothing affordable -> go deliver (fast delivery scores freshness+time)."""
+        # cap-aware: once our routeTaskScore maxes the task cap, more tasks score 0 -> stop
+        # scavenging and spend the time on freshness / faster delivery instead.
+        if self._route_task_score >= TASK_ROUTE_CAP:
+            return None
         best, best_f = None, float("inf")
         for t in self._tasks:
             if not t.get("active") or t.get("completed") or t.get("failed") or t.get("ownerPlayerId"):
@@ -346,9 +358,8 @@ class Strategy:
                 continue
             if node != c and self.graph.path_frames(node, self.gate_node, avoid={c}) != float("inf"):
                 continue
-            our_eta = self.graph.path_frames(node, c, speed=self._me_speed(me)) + GUARD_SETUP_FRAMES
-            opp_eta = self.graph.path_frames(opp_node, c, speed=self._opp_speed(opp, nodes_by_id)) \
-                if opp_node else float("inf")
+            our_eta = self._eta(me, c, nodes_by_id, "slow") + GUARD_SETUP_FRAMES
+            opp_eta = self._eta(opp, c, nodes_by_id, "fast")
             return opp_eta - our_eta > TASK_TIME + RACE_LEAD
         return True
 
@@ -370,32 +381,80 @@ class Strategy:
         return any((b.get("type") or "").endswith("HORSE") or b.get("type") == "MOVE_BUFF"
                    for b in (player.get("buffs") or []))
 
-    def _me_speed(self, me) -> float:
-        if self._has_horse_buff(me):
-            return OPP_SPEED
-        res = me.get("resources") or {}
-        return OPP_SPEED if any(res.get(h, 0) > 0 for h in HORSES) else 1.0
+    def _active_buff(self, actor):
+        """Active move-buff as (frame_mult<1, rounds_left); (1.0, 0) if none."""
+        for b in actor.get("buffs") or []:
+            t = (b.get("type") or "")
+            if t.endswith("HORSE") or t == "MOVE_BUFF":
+                hb = HORSE_BUFF.get(t) or HORSE_BUFF.get(t.replace("_BUFF", ""))
+                mult = hb[0] if hb else 0.85
+                rem = b.get("remainRound", b.get("remainRounds"))
+                return (mult, int(rem) if rem is not None else 8)
+        return (1.0, 0)
 
-    def _opp_speed(self, opp, nodes_by_id) -> float:
-        if self._has_horse_buff(opp):
-            return OPP_SPEED
-        res = opp.get("resources") or {}
-        if any(res.get(h, 0) > 0 for h in HORSES):
-            return OPP_SPEED
-        opp_node = opp.get("currentNodeId")
-        path = self.graph.fastest_path(opp_node, self.gate_node) if opp_node else None
-        for nid in (path or []):
-            stock = nodes_by_id.get(nid, {}).get("resourceStock") or {}
-            if any(stock.get(h, 0) > 0 for h in HORSES):
-                return OPP_SPEED
-        return 1.0
+    @staticmethod
+    def _held_horse(actor):
+        res = actor.get("resources") or {}
+        for h in HORSES:
+            if res.get(h, 0) > 0:
+                return h
+        return None
+
+    @staticmethod
+    def _stock_horse(node, nodes_by_id):
+        stock = nodes_by_id.get(node, {}).get("resourceStock") or {}
+        for h in HORSES:
+            if stock.get(h, 0) > 0:
+                return h
+        return None
+
+    # ================= ETA (horse-pickup aware; mode = slow|fast) =================
+    def _eta(self, actor, dst, nodes_by_id, mode) -> float:
+        """Frames for `actor` to travel to `dst`, modelling the move-buff (held horse, and
+        in FAST mode horses grabbed en route, with their limited buff window).
+          mode="slow": only the actor's CERTAIN speed (held/active horse) -- for OUR
+                       safety judgments (deadline / do-I-win-the-race), never overpromise.
+          mode="fast": also grab horses sitting on the route -- for OUR route choice and
+                       for the OPPONENT (never underestimate them)."""
+        if actor is None:
+            return float("inf")
+        node = actor.get("currentNodeId")
+        if not node:
+            return float("inf")
+        if node == dst:
+            return 0.0
+        path = self.graph.fastest_path(node, dst)
+        if not path or len(path) < 2:
+            return float("inf")
+        mult, left = self._active_buff(actor)
+        held = None if left > 0 else self._held_horse(actor)
+        total = 0.0
+        for i in range(len(path) - 1):
+            a, b = path[i], path[i + 1]
+            if left <= 0 and i == 0 and held:                 # use our held horse now
+                mult, left = HORSE_BUFF[held]; total += RESOURCE_USE_FRAMES; held = None
+            if left <= 0 and mode == "fast":                  # grab a horse on the route
+                h = self._stock_horse(a, nodes_by_id)
+                if h:
+                    mult, left = HORSE_BUFF[h]; total += RESOURCE_CLAIM_FRAMES + RESOURCE_USE_FRAMES
+            ef = self.graph.edge_frames(a, b) or 0
+            if left > 0:
+                buffed = ef * mult
+                if left >= buffed:
+                    total += buffed; left -= buffed
+                else:                                         # buff runs out mid-edge
+                    base_covered = left / mult
+                    total += left + max(0.0, ef - base_covered); left = 0.0
+            else:
+                total += ef
+            total += self.graph.process_rounds.get(b, 0)
+        return total
 
     # ================= choke / ETA helpers =================
     def _lead_at(self, c, me, opp, nodes_by_id) -> float:
-        opp_node = opp.get("currentNodeId") if opp else None
-        our_eta = self.graph.path_frames(me.get("currentNodeId"), c, speed=self._me_speed(me))
-        opp_eta = self.graph.path_frames(opp_node, c, speed=self._opp_speed(opp, nodes_by_id)) \
-            if opp_node else float("inf")
+        # our safety: slow/conservative; opponent: fast (don't underestimate them).
+        our_eta = self._eta(me, c, nodes_by_id, "slow")
+        opp_eta = self._eta(opp, c, nodes_by_id, "fast") if opp else float("inf")
         return opp_eta - our_eta
 
     def _opp_must_cross(self, node, opp) -> bool:
@@ -481,10 +540,15 @@ class Strategy:
 
     def _account_process(self, events) -> None:
         for e in events:
-            if e.get("type") == "PROCESS_COMPLETE":
-                pl = e.get("payload") or {}
-                if pl.get("playerId") == self.player_id and pl.get("targetNodeId"):
-                    self.processed.add(pl["targetNodeId"])
+            et = e.get("type")
+            pl = e.get("payload") or {}
+            if pl.get("playerId") != self.player_id:
+                continue
+            if et == "PROCESS_COMPLETE" and pl.get("targetNodeId"):
+                self.processed.add(pl["targetNodeId"])
+            elif et == "TASK_COMPLETE":
+                # taskScore is cumulative in the payload; track the running total.
+                self._route_task_score = max(self._route_task_score, int(pl.get("taskScore", 0)))
 
     def _enemy_guards(self, nodes_by_id) -> set:
         return {
