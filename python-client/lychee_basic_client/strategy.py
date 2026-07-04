@@ -382,8 +382,10 @@ class Strategy:
         return None
 
     def _task_op_frames(self, task, me, round_no, nodes_by_id) -> int:
-        """Frames a task holds us at its node: the claim action + processing."""
-        return 1 + self._task_process_frames(task, nodes_by_id, me, round_no, round_no)
+        """Frames a task holds us at its node. Measured on platform replays
+        (r183 CLAIM -> r187 free, config 4): the claim submit frame is INCLUDED
+        in processRound, so the true cost is exactly the (scout-reduced) config."""
+        return self._task_process_frames(task, nodes_by_id, me, round_no, round_no)
 
     def _ice_claim_frames_here(self, node, me, nodes_by_id, round_no) -> Optional[int]:
         """Claim frames for an ICE_BOX in stock at this node, else None. Ice is the
