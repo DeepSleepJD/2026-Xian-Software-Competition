@@ -123,6 +123,12 @@ def squad_weaken(target_node_id: str) -> dict[str, Any]:
     return {"action": "SQUAD_WEAKEN", "targetNodeId": target_node_id}
 
 
+def squad_scout(target_node_id: str) -> dict[str, Any]:
+    """小分队探路: scout marker (1 manpower) -> that node's process/claim rounds are cut
+    by 3 (min 2) for 45 rounds. Speeds our BOARD/TRANSFER/CLAIM/CLEAR there."""
+    return {"action": "SQUAD_SCOUT", "targetNodeId": target_node_id}
+
+
 def set_guard(target_node_id: str, extra_good_fruit: int = 0) -> dict[str, Any]:
     """设卡: build a guard on the current node (extra fruit 0-2 raises defense)."""
     return {
