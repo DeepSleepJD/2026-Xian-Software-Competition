@@ -204,9 +204,10 @@ class Strategy:
             # only chokes we're at or still before (haven't passed)
             if node != c and self.graph.path_frames(node, self.gate_node, avoid={c}) != float("inf"):
                 continue
-            our_eta = self.graph.path_frames(node, c) + GUARD_SETUP_FRAMES
-            # conservative: assume the opponent can move at fast-horse speed
-            opp_eta = self.graph.path_frames(opp_node, c, speed=OPP_SPEED) if opp_node else float("inf")
+            our_eta = self.graph.path_frames(node, c, speed=self._me_speed(me)) + GUARD_SETUP_FRAMES
+            # opponent speed is informed by their horse status, not blindly conservative
+            opp_eta = self.graph.path_frames(opp_node, c, speed=self._opp_speed(opp, nodes_by_id)) \
+                if opp_node else float("inf")
             # only spare if we're COMFORTABLY ahead to the choke -- a mere tie is not
             # spare (a neck-and-neck opponent leaves no time for tasks before we camp)
             return opp_eta - our_eta > TASK_TIME + RACE_SAFETY
@@ -264,6 +265,34 @@ class Strategy:
         if node == self.gate_node and not me.get("verified") and phase != "RUSH":
             return True
         return self._needs_process(node, nodes_by_id) and node not in self.processed
+
+    def _has_horse_buff(self, player) -> bool:
+        return any((b.get("type") or "").endswith("HORSE") or b.get("type") == "MOVE_BUFF"
+                   for b in (player.get("buffs") or []))
+
+    def _me_speed(self, me) -> float:
+        """Our move multiplier: fast if we're horse-buffed or holding a horse to use."""
+        if self._has_horse_buff(me):
+            return OPP_SPEED
+        res = me.get("resources") or {}
+        return OPP_SPEED if any(res.get(h, 0) > 0 for h in HORSES) else 1.0
+
+    def _opp_speed(self, opp, nodes_by_id) -> float:
+        """Opponent move multiplier -- informed, not blindly conservative: fast only if
+        they're horse-buffed, hold a horse, or can still grab one on their way; if we
+        can see they have none and none is reachable, treat them as base speed."""
+        if self._has_horse_buff(opp):
+            return OPP_SPEED
+        res = opp.get("resources") or {}
+        if any(res.get(h, 0) > 0 for h in HORSES):
+            return OPP_SPEED
+        opp_node = opp.get("currentNodeId")
+        path = self.graph.fastest_path(opp_node, self.gate_node) if opp_node else None
+        for nid in (path or []):
+            stock = nodes_by_id.get(nid, {}).get("resourceStock") or {}
+            if any(stock.get(h, 0) > 0 for h in HORSES):
+                return OPP_SPEED   # a horse still sits on their route -> could grab it
+        return 1.0                 # provably no horse -> no need to be conservative
 
     def _guard_fruit(self, me) -> int:
         spare = me.get("goodFruit", 0) - GUARD_KEEP_FRUIT
