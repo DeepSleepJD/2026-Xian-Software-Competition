@@ -20,6 +20,7 @@ The window-card / contest layer is reused as-is; only navigation + guarding is n
 """
 import math
 import heapq
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -53,6 +54,10 @@ HORSE_MOVE_PER_FRAME = {"FAST_HORSE": 1200, "SHORT_HORSE": 1150}
 HORSE_DURATION = {"FAST_HORSE": 20, "SHORT_HORSE": 14}
 RESOURCE_CLAIM_FRAMES = 2
 START_OBSTACLE_CLEAR_FRAMES = 6
+OPENING_SCORE_BUDGET_S = 0.25  # platform action window is 500ms/frame; round-1 full
+                               # scoring of all opening candidates took ~1.08s and got
+                               # every round-1 action voided (ACTION_TOO_LATE). Score
+                               # cheap-heuristic-first under this budget instead.
 WEATHER_MOVE_MULTIPLIER = {
     ("HEAVY_RAIN", "WATER"): 1350,
     ("MOUNTAIN_FOG", "MOUNTAIN"): 1100,
@@ -536,13 +541,19 @@ class Strategy:
         if not self.graph.adj or not nodes_by_id:
             return
 
+        candidates = self._opening_candidate_paths(nodes_by_id)
+        # cheap presort so the promising corridors are fully scored before the
+        # deadline; full scoring is ~10ms/path and must fit the 500ms frame window
+        candidates.sort(key=self._opening_rough_frames)
+        deadline = time.monotonic() + OPENING_SCORE_BUDGET_S
+
         best = None
-        for path in self._opening_candidate_paths(nodes_by_id):
+        for path in candidates:
             score = self._opening_route_score(path, me, round_no, tasks, nodes_by_id, weather)
-            if score is None:
-                continue
-            if best is None or score[0] < best[0]:
+            if score is not None and (best is None or score[0] < best[0]):
                 best = score
+            if time.monotonic() >= deadline and best is not None:
+                break
         if best is None:
             return
 
@@ -553,6 +564,21 @@ class Strategy:
             nid for nid in nodes_by_id
             if nid not in route_nodes and nid != self.terminal_node
         }
+
+    def _opening_rough_frames(self, path) -> float:
+        """Cheap ordering key for opening candidates: plain move frames plus
+        mandatory process waits, no horses/weather/scouts. Only used to decide
+        WHICH candidates get the expensive scoring first."""
+        total = 0.0
+        for a, b in zip(path, path[1:]):
+            edge = self._edge_info(a, b)
+            if edge is None:
+                return float("inf")
+            route_type, distance = edge
+            coef = ROUTE_COST_COEF.get(route_type, 1500)
+            total += math.ceil(math.ceil(distance * coef) / BASE_MOVE_PER_FRAME)
+            total += self.graph.process_rounds.get(b, 0)
+        return total
 
     def _opening_candidate_paths(self, nodes_by_id) -> list[list[str]]:
         limit = max(4, len(nodes_by_id) + 1)
