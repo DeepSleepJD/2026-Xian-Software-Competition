@@ -139,6 +139,48 @@ class BlockadeTests(unittest.TestCase):
 
         self.assertEqual([{"action": "WAIT"}], act)
 
+    def test_rolling_blockade_takes_local_task_when_opponent_is_far_enough(self) -> None:
+        s = _line_strategy(gate="S04")
+        s._first_guard_node = "S02"
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {},
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": 3}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+        ]
+        tasks = [{
+            "taskId": "T_S03", "nodeId": "S03", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 30,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 200,
+        }]
+
+        act = s.decide(_inq(70, _me("S03"), _opp("S01"), nodes=nodes, tasks=tasks))
+
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S03"}], act)
+
+    def test_rolling_blockade_waits_when_local_task_would_miss_guard_window(self) -> None:
+        s = _line_strategy(gate="S04")
+        s._first_guard_node = "S02"
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {},
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": 3}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+        ]
+        tasks = [{
+            "taskId": "T_S03", "nodeId": "S03", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 10, "score": 30,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 200,
+        }]
+
+        act = s.decide(_inq(70, _me("S03"), _opp("S02"), nodes=nodes, tasks=tasks))
+
+        self.assertEqual([{"action": "WAIT"}], act)
+
     def test_rolls_blockade_sets_next_choke_on_departure(self) -> None:
         s = _line_strategy(gate="S04")
         s._first_guard_node = "S02"
@@ -418,28 +460,47 @@ class RoutePlanTests(unittest.TestCase):
 
 
 class OpeningContestTests(unittest.TestCase):
-    def _contest(self, ri=1):
+    def _contest(self, ri=1, red_point=0, blue_point=0, red=1001, blue=2002):
         return {"contestId": "C1", "contestType": "DOCK", "roundIndex": ri,
-                "redPlayerId": 1001, "bluePlayerId": 2002, "resolved": False,
-                "deadlineRound": 200}
+                "redPlayerId": red, "bluePlayerId": blue, "resolved": False,
+                "deadlineRound": 200, "redPoint": red_point, "bluePoint": blue_point}
 
-    def test_plays_xian_gong_on_every_tap_of_every_contest(self) -> None:
+    def test_plays_xian_gong_on_first_two_taps(self) -> None:
         s = _line_strategy()
-        me = _me("S02", freshness=95, goodFruit=20)
-        # first contest, all three taps
-        for ri in (1, 2, 3):
+        me = _me("S02", freshness=10, goodFruit=0)
+
+        for ri in (1, 2):
             act = s._card(me, [self._contest(ri)], 50)
             self.assertEqual("XIAN_GONG", act[0]["card"])
+
         # a SECOND (different) contest also gets XIAN_GONG (the bug was it didn't)
         c2 = self._contest(1); c2["contestId"] = "C2"
         act = s._card(me, [c2], 80)
         self.assertEqual("XIAN_GONG", act[0]["card"])
 
-    def test_good_fruit_floor_stops_xian_gong(self) -> None:
+    def test_third_tap_abstains_when_already_up_two_zero(self) -> None:
         s = _line_strategy()
-        me = _me("S02", freshness=95, goodFruit=3)  # below the floor
-        act = s._card(me, [self._contest()], 50)
-        self.assertNotEqual("XIAN_GONG", act[0]["card"])  # protect delivery/guard fruit
+        me = _me("S02", freshness=95, goodFruit=20)
+
+        act = s._card(me, [self._contest(3, red_point=2, blue_point=0)], 50)
+
+        self.assertEqual("ABSTAIN", act[0]["card"])
+
+    def test_third_tap_uses_xian_gong_unless_already_up_two_zero(self) -> None:
+        s = _line_strategy()
+        me = _me("S02", freshness=95, goodFruit=20)
+
+        act = s._card(me, [self._contest(3, red_point=1, blue_point=1)], 50)
+
+        self.assertEqual("XIAN_GONG", act[0]["card"])
+
+    def test_third_tap_abstain_uses_blue_side_points_too(self) -> None:
+        s = Strategy(2002)
+        me = {"playerId": 2002}
+
+        act = s._card(me, [self._contest(3, red_point=0, blue_point=2)], 50)
+
+        self.assertEqual("ABSTAIN", act[0]["card"])
 
 
 if __name__ == "__main__":

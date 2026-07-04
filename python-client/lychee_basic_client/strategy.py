@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from . import messages as M
-from .contest import active_contest, pick_card
+from .contest import active_contest
 from .graph import BASE_MOVE_PER_FRAME, Graph, ROUTE_COST_COEF
 
 TOTAL_ROUNDS = 600
@@ -56,8 +56,6 @@ WEATHER_PROCESS_EXTRA = {
 OBSTACLE_PENALTY = 0         # routing cost of crossing an obstacle node: obstacles are
                              # squad-cleared in parallel now (near-free), so don't avoid
                              # them -- take the true shortest route (may use shortcuts)
-XIAN_GONG_FLOOR = 6          # keep at least this many good fruit (guards + delivery)
-
 # main-car states where the engine is running our action; don't interrupt
 BUSY_STATES = {"PROCESSING", "VERIFYING", "FORCED_PASSING", "RESTING", "CONTESTING"}
 
@@ -263,6 +261,11 @@ class Strategy:
                 self._guarded_round[node] = round_no
                 return [M.set_guard(node, extra_good_fruit=self._guard_fruit(me))]
             if self._rolling_blockade_active():
+                t = self._claimable_task_here(node, tasks, me, round_no)
+                if t and self._spare_for_rolling_task(
+                    node, me, opp, t, round_no, nodes_by_id, weather
+                ):
+                    return self._claim_task_action(t)
                 return [M.wait()]
             # opponent not committed yet -> camp; use the wait for a task ONLY if we
             # have spare time (won't miss the freeze / delivery -- see _spare_for_task)
@@ -309,6 +312,27 @@ class Strategy:
         if not self.chokes:
             return None
         return self.chokes[-1]
+
+    def _spare_for_rolling_task(self, node, me, opp, task, round_no, nodes_by_id, weather=None) -> bool:
+        """While parked on a rolling-blockade choke, use the opponent ETA to decide
+        whether a local task can finish before we still need to set the guard."""
+        task_frames = self._task_process_frames(task)
+        if round_no + task_frames + self._frames_to_deliver(node, me, nodes_by_id, round_no, weather) + DELIVER_MARGIN >= TOTAL_ROUNDS:
+            return False
+        if opp is None:
+            return True
+        if not self._opp_must_cross(node, opp):
+            return False
+        if opp.get("currentNodeId") == node and not opp.get("routeEdgeId"):
+            return False
+        if opp.get("state") == "MOVING" and opp.get("nextNodeId") == node:
+            return False
+        opp_eta = self._eta_to_node(
+            opp, node, nodes_by_id, round_no=round_no, weather=weather
+        )
+        if opp_eta == float("inf"):
+            return True
+        return opp_eta >= task_frames + GUARD_SETUP_FRAMES + FREEZE_SAFETY
 
     def _spare_for_task(self, node, me, opp, round_no, nodes_by_id, weather=None) -> bool:
         """Do a task only with genuine spare time: it must not push us past our
@@ -575,6 +599,10 @@ class Strategy:
             return False
         return True
 
+    @staticmethod
+    def _task_process_frames(task) -> int:
+        return int(task.get("processRound", TASK_TIME) or TASK_TIME)
+
     def _best_task_waypoint(self, node, me, tasks, nodes_by_id, round_no, weather=None) -> Optional[str]:
         if self._task_base_score(me) >= TASK_BASE_TARGET:
             return None
@@ -593,7 +621,7 @@ class Strategy:
             )
             if to_task == float("inf"):
                 continue
-            task_frames = int(task.get("processRound", TASK_TIME) or TASK_TIME)
+            task_frames = self._task_process_frames(task)
             finish_task_round = round_no + to_task + task_frames
             expire = int(task.get("expireRound", 0) or 0)
             if expire and finish_task_round >= expire:
@@ -1157,15 +1185,20 @@ class Strategy:
         if tap in self._contest_played:
             return []
         self._contest_played.add(tap)
-        card = pick_card(me, c)
-        # HEDGE / deny-everything: play XIAN_GONG on EVERY tap of EVERY contest while
-        # we can afford it -- the strongest single card (beats YAN_DIE + BING_ZHENG,
-        # ties XIAN_GONG, only loses to QIANG_XING which needs a horse). This never
-        # loses an early contest, so the opponent never wins the processing-priority
-        # (speed) lead. Keep a good-fruit floor so we don't starve guards / delivery.
-        if me.get("freshness", 0) >= 80 and me.get("goodFruit", 0) > XIAN_GONG_FLOOR:
-            card = "XIAN_GONG"
+        card = self._window_card_choice(c)
         return [M.window_card(c["contestId"], card)]
+
+    def _window_card_choice(self, contest) -> str:
+        if contest.get("roundIndex") == 3 and self._contest_points(contest) == (2, 0):
+            return "ABSTAIN"
+        return "XIAN_GONG"
+
+    def _contest_points(self, contest) -> tuple[int, int]:
+        red = int(contest.get("redPoint", 0) or 0)
+        blue = int(contest.get("bluePoint", 0) or 0)
+        if contest.get("redPlayerId") == self.player_id:
+            return red, blue
+        return blue, red
 
     def _needs_process(self, node, nodes_by_id) -> bool:
         if node in (self.gate_node, self.terminal_node):
