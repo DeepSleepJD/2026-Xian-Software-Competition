@@ -31,6 +31,8 @@ GUARD_KEEP_FRUIT = 6         # never spend guard fruit below this (keep some to 
 GUARD_SETUP_FRAMES = 5       # SET_GUARD read-bar (4) + activates next frame
 TASK_TIME = 8                # rough frames a task claim+complete costs (spare-time gate)
 RACE_SAFETY = 30             # only task pre-choke if we lead the race to it by > this
+OPP_SPEED = 1.25             # assume the opponent can use a fast horse (conservative:
+                             # never overestimate our lead in the race to a choke)
 FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before arrival
 ICE_BOX = "ICE_BOX"
 HORSES = ("FAST_HORSE", "SHORT_HORSE")   # move-buff resources (fast first)
@@ -203,7 +205,8 @@ class Strategy:
             if node != c and self.graph.path_frames(node, self.gate_node, avoid={c}) != float("inf"):
                 continue
             our_eta = self.graph.path_frames(node, c) + GUARD_SETUP_FRAMES
-            opp_eta = self.graph.path_frames(opp_node, c) if opp_node else float("inf")
+            # conservative: assume the opponent can move at fast-horse speed
+            opp_eta = self.graph.path_frames(opp_node, c, speed=OPP_SPEED) if opp_node else float("inf")
             # only spare if we're COMFORTABLY ahead to the choke -- a mere tie is not
             # spare (a neck-and-neck opponent leaves no time for tasks before we camp)
             return opp_eta - our_eta > TASK_TIME + RACE_SAFETY
