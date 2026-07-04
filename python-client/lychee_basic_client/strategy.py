@@ -146,7 +146,9 @@ class Strategy:
         if opp is not None:  # remember opponent for next-frame "just committed" detection
             self._opp_prev_node = opp.get("currentNodeId")
             self._opp_prev_edge = opp.get("routeEdgeId")
-        return card + squad + main
+        # main-car action FIRST in the request body (server-side ordering bug: a main
+        # CLAIM_TASK must precede the window/squad entries), then the separate quotas.
+        return main + card + squad
 
     # ---- main-car decision: one strict priority ladder ----
     def _main_action(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id):
@@ -470,9 +472,12 @@ class Strategy:
         if not nxt:
             return []
         if nodes_by_id.get(nxt, {}).get("hasObstacle") or nxt in self._guard_blocked:
-            # NO FORCED_PASS anymore (it chained into FORCED_PASS_REPEAT and stalled us).
-            # A squad clears the obstacle in parallel (_squad_action); we just wait a
-            # frame for it, then MOVE straight through.
+            # NO FORCED_PASS (it chained into FORCED_PASS_REPEAT and stalled us). A squad
+            # clears the obstacle in parallel (_squad_action); wait a frame, then MOVE.
+            # NOTE: having the MAIN claim a T04 (CLEAR_OBSTACLE) task here to score 30 was
+            # tested and REVERTED -- the squad pre-clears obstacles so the main never
+            # actually idles, so claiming just ADDS a stop, delaying our race to the choke
+            # (S10 r257->r263) and losing the shutout (blockade > task points).
             return [M.wait()]
         return [M.move(nxt)]
 
