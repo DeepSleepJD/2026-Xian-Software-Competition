@@ -32,8 +32,8 @@ TOTAL_ROUNDS = 600
 DELIVER_MARGIN = 10          # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
-DELIVERY_ABANDON_MARGIN = 50 # only stop forcing delivery once the ETA is this far
-                             # beyond the deadline; e.g. ETA=200 abandons at 450
+DELIVERY_ABANDON_MARGIN = 0  # once ETA says delivery misses the deadline, switch
+                             # to task-priority instead of waiting on opponent choices
 DENY_DELIVER_MARGIN = 0      # no buffer while an unsecured blockade is the only thing
                              # preventing the opponent from finishing
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
@@ -204,6 +204,9 @@ class Strategy:
         # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
         squad = self._squad_action(node, me, opp, tasks, nodes_by_id, round_no, weather)
 
+        if self._should_abandon_delivery(node, me, round_no, nodes_by_id, weather):
+            self._enter_task_priority(abandon_delivery=True)
+
         # Highest-priority local ambush: whenever we are already standing on a
         # node the opponent is about to enter, arm it; if they are parked one hop
         # away, hold our action until they commit or choose another direction.
@@ -236,9 +239,6 @@ class Strategy:
                 round_no, weather
             )
             return self._ordered_actions(main, squad, card)
-
-        if self._should_abandon_delivery(node, me, round_no, nodes_by_id, weather):
-            self._enter_task_priority(abandon_delivery=True)
 
         # Delivery safety. If the opponent can still finish through an unsecured
         # choke, use the hard latest-departure time instead of the normal buffer.
@@ -504,6 +504,8 @@ class Strategy:
         if state in BUSY_STATES or not node:
             return []
         if me.get("routeEdgeId") or me.get("nextNodeId"):
+            return []
+        if self._delivery_abandoned:
             return []
         if node == self.terminal_node:
             return []
@@ -1837,16 +1839,7 @@ class Strategy:
         return [M.window_card(c["contestId"], card)]
 
     def _window_card_choice(self, me, contest) -> str:
-        if contest.get("roundIndex") == 3 and self._contest_points(contest) == (2, 0):
-            return "ABSTAIN"
         return pick_card(me, contest)
-
-    def _contest_points(self, contest) -> tuple[int, int]:
-        red = int(contest.get("redPoint", 0) or 0)
-        blue = int(contest.get("bluePoint", 0) or 0)
-        if contest.get("redPlayerId") == self.player_id:
-            return red, blue
-        return blue, red
 
     def _needs_process(self, node, nodes_by_id) -> bool:
         if node in (self.gate_node, self.terminal_node):
