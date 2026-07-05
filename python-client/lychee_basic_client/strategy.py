@@ -744,23 +744,12 @@ class Strategy:
     def _post_freeze_projected_node(
         self, node, me, opp, nodes_by_id, round_no=0, weather=None
     ) -> Optional[str]:
-        if self._task_priority_mode or self._first_guard_node is not None:
-            return me.get("nextNodeId") or node
-
-        projected = me.get("nextNodeId") if me.get("routeEdgeId") else node
-        if projected not in self.chokes:
+        # Do not spend squad on future farming while the first freeze is only a
+        # projection. Keep remote clears for after the blockade actually flips
+        # into task-priority mode; main-route obstacle clears still happen above.
+        if not self._task_priority_mode:
             return None
-        if not self._opp_must_cross(projected, opp):
-            return None
-        if opp is None:
-            return None
-        our_eta = self._eta_to_node(me, projected, nodes_by_id, round_no, weather)
-        opp_eta = self._eta_to_node(opp, projected, nodes_by_id, round_no, weather)
-        if our_eta == float("inf") or opp_eta == float("inf"):
-            return None
-        if our_eta + RACE_SAFETY >= opp_eta:
-            return None
-        return projected
+        return me.get("nextNodeId") or node
 
     def _maybe_choose_opening_route(self, me, node, round_no, tasks, nodes_by_id, weather=None) -> None:
         if self.route_avoid or self._opening_route_path:
