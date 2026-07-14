@@ -49,8 +49,10 @@ RACE_SAFETY = 8              # lead margin that must REMAIN after paying an op's
                              # are simulated -- so this only covers guard-setup jitter)
 FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before arrival
 TASK_BASE_TARGET = 130       # enough to fill delivery/task milestones; then deliver
+ABANDONED_TASK_CAP = 80      # without delivery, task score is capped at 80
 TASK_FRAME_SCORE_COST = 0.12 # rough score lost per extra task-detour frame
 ICE_BOX = "ICE_BOX"
+RUSH_PROTECT = "RUSH_PROTECT"
 RUSH_SPEED = "RUSH_SPEED"
 HORSES = ("FAST_HORSE", "SHORT_HORSE")   # move-buff resources (fast first)
 HORSE_MOVE_PER_FRAME = {"FAST_HORSE": 1200, "SHORT_HORSE": 1150, RUSH_SPEED: 1300}
@@ -214,14 +216,14 @@ class Strategy:
 
         # RUSH_SPEED IS a main-car action and is only valid mid-move -> issue it (as THE
         # main action) while we're MOVING; never when idle/parked (invalid + wasted).
-        if self._rush_speed_action(me, state, phase):
+        if not self._delivery_abandoned and self._rush_speed_action(me, state, phase):
             return self._ordered_actions([M.rush_speed()], squad, card)
 
         # Highest-priority local ambush: whenever we are already standing on a
         # node the opponent is about to enter, arm it. If they are still behind a
         # neighboring route node, the route-neighbor watch below decides whether
         # to wait, take a safe local op, or keep moving.
-        if not me.get("verified"):
+        if not me.get("verified") and not self._delivery_abandoned:
             local_ambush = self._local_ambush_action(
                 me, opp, node, state, round_no, nodes_by_id, weather
             )
@@ -238,7 +240,7 @@ class Strategy:
         # -- pre-RUSH wait or post-verify -- freeze the opponent mid-edge the
         # moment they commit into the gate. Checked before rush-speed so the
         # sprint buff isn't burned while camping.
-        if node == self.gate_node and (me.get("verified") or phase != "RUSH"):
+        if not self._delivery_abandoned and node == self.gate_node and (me.get("verified") or phase != "RUSH"):
             ambush = self._gate_ambush_action(
                 me, opp, node, state, round_no, nodes_by_id, weather
             )
@@ -260,7 +262,7 @@ class Strategy:
 
         if self._task_priority_mode:
             main = self._task_priority_action(
-                me, node, state, phase, round_no, tasks, nodes_by_id, weather
+                me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather
             )
             return self._ordered_actions(main, squad, card)
 
@@ -323,7 +325,7 @@ class Strategy:
         if self._first_choke_failed(node, me, opp, round_no, weather):
             self._enter_task_priority()
             return self._task_priority_action(
-                me, node, state, phase, round_no, tasks, nodes_by_id, weather
+                me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather
             )
 
         if node in self.chokes and not self._we_hold(node, nodes_by_id) \
@@ -1151,7 +1153,7 @@ class Strategy:
             return [M.wait()]  # can't verify before RUSH
         return []
 
-    def _task_priority_action(self, me, node, state, phase, round_no, tasks, nodes_by_id, weather=None):
+    def _task_priority_action(self, me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather=None):
         """Farm phase (after the freeze landed, or the first choke became
         unwinnable): claim worthwhile tasks and ice-boxes under the normal
         delivery buffer, then complete delivery."""
@@ -1161,6 +1163,10 @@ class Strategy:
             return self._advance_to(
                 self.gate_node, me, node, state, phase, nodes_by_id, tasks,
                 round_no, weather
+            )
+        if self._delivery_abandoned and self._task_base_score(me) >= ABANDONED_TASK_CAP:
+            return self._abandoned_score_cap_action(
+                me, opp, node, phase, round_no, nodes_by_id, weather
             )
         task = self._claimable_task_here(node, tasks, me, round_no)
         if task is not None:
@@ -1174,9 +1180,26 @@ class Strategy:
             return [M.wait()]
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
             return [M.process(node)]
-        dest = self._best_task_waypoint(node, me, tasks, nodes_by_id, round_no, weather)
+        dest = self._best_task_waypoint(
+            node, me, tasks, nodes_by_id, round_no, weather, opp=opp
+        )
         return self._advance_to(
             dest or self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+            round_no, weather
+        )
+
+    def _abandoned_score_cap_action(
+        self, me, opp, node, phase, round_no, nodes_by_id, weather=None
+    ):
+        if self._can_rush_protect(me, phase):
+            return [M.rush_protect()]
+        if self._held_resource(me, ICE_BOX) and self._freshness(me) < 100:
+            return [M.use_resource(ICE_BOX)]
+        if self._ice_claim_frames_here(node, me, nodes_by_id, round_no) is not None:
+            return [M.claim_resource(node, ICE_BOX)]
+        dest = self._best_ice_waypoint(node, me, opp, nodes_by_id, round_no, weather)
+        return self._advance_to(
+            dest or self.gate_node, me, node, "IDLE", phase, nodes_by_id, [],
             round_no, weather
         )
 
@@ -1186,6 +1209,8 @@ class Strategy:
         return [M.claim_task(task_id)]
 
     def _claimable_task_here(self, node, tasks, me, round_no) -> Optional[dict[str, Any]]:
+        if self._delivery_abandoned and self._task_base_score(me) >= ABANDONED_TASK_CAP:
+            return None
         if not self._delivery_abandoned and self._task_base_score(me) >= TASK_BASE_TARGET:
             return None
         best = None
@@ -1232,9 +1257,11 @@ class Strategy:
 
     def _best_task_waypoint(
         self, node, me, tasks, nodes_by_id, round_no, weather=None,
-        route_avoid: Optional[set[str]] = None
+        route_avoid: Optional[set[str]] = None, opp=None
     ) -> Optional[str]:
         if not self._delivery_abandoned and self._task_base_score(me) >= TASK_BASE_TARGET:
+            return None
+        if self._delivery_abandoned and self._task_base_score(me) >= ABANDONED_TASK_CAP:
             return None
         direct = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
         # farm FORWARD only: never route back across our own freeze guard (the
@@ -1260,6 +1287,10 @@ class Strategy:
             task_frames = self._task_process_frames(
                 task, nodes_by_id, me, round_no + to_task, round_no
             )
+            if self._opponent_can_beat_us_to_task(
+                task, opp, to_task, nodes_by_id, round_no, weather
+            ):
+                continue
             finish_task_round = round_no + to_task + task_frames
             expire = int(task.get("expireRound", 0) or 0)
             if expire and finish_task_round >= expire:
@@ -1286,13 +1317,78 @@ class Strategy:
     def _task_value(self, task, me) -> float:
         score = float(task.get("score", 0) or 0)
         if self._delivery_abandoned:
-            return score * 2.5
+            remaining = max(0.0, ABANDONED_TASK_CAP - self._task_base_score(me))
+            return min(score, remaining) * 2.5
         base = self._task_base_score(me)
         if base < 90:
             return score * 2.5
         if base < TASK_BASE_TARGET:
             return score
         return 0.0
+
+    def _opponent_can_beat_us_to_task(
+        self, task, opp, our_eta, nodes_by_id, round_no, weather=None
+    ) -> bool:
+        if not self._opponent_can_claim_task(task, opp):
+            return False
+        target = task.get("nodeId")
+        if not target:
+            return False
+        opp_eta = self._eta_to_node(
+            opp, target, nodes_by_id, round_no=round_no,
+            weather=weather, avoid=self._my_active_guards(nodes_by_id)
+        )
+        return opp_eta != float("inf") and opp_eta < our_eta
+
+    def _opponent_can_claim_task(self, task, opp) -> bool:
+        if opp is None or opp.get("retired") or opp.get("delivered"):
+            return False
+        opp_id = opp.get("playerId")
+        owner = task.get("ownerPlayerId", 0)
+        if owner not in (0, None, opp_id):
+            return False
+        protected = task.get("protectionPlayerId", 0)
+        return protected in (0, None, opp_id)
+
+    def _best_ice_waypoint(self, node, me, opp, nodes_by_id, round_no, weather=None) -> Optional[str]:
+        avoid = self._guard_blocked | self.route_avoid
+        if self._first_guard_node:
+            avoid = avoid | {self._first_guard_node}
+        best = None
+        for target, info in nodes_by_id.items():
+            stock = (info or {}).get("resourceStock") or {}
+            if int(stock.get(ICE_BOX, 0) or 0) <= 0:
+                continue
+            eta = self._eta_to_node(
+                me, target, nodes_by_id, round_no=round_no,
+                weather=weather, avoid=avoid
+            )
+            if eta == float("inf"):
+                continue
+            opp_eta = float("inf")
+            if opp is not None and not opp.get("retired") and not opp.get("delivered"):
+                opp_eta = self._eta_to_node(
+                    opp, target, nodes_by_id, round_no=round_no,
+                    weather=weather, avoid=self._my_active_guards(nodes_by_id)
+                )
+            if opp_eta != float("inf") and opp_eta < eta:
+                continue
+            if best is None or eta < best[0]:
+                best = (eta, target)
+        return None if best is None else best[1]
+
+    @staticmethod
+    def _held_resource(me, resource_type: str) -> bool:
+        return int((me.get("resources", {}) or {}).get(resource_type, 0) or 0) > 0
+
+    def _can_rush_protect(self, me, phase) -> bool:
+        if phase != "RUSH":
+            return False
+        if int(me.get("rushTacticUsedCount", 0) or 0) > 0:
+            return False
+        if self._active_buff(me, RUSH_PROTECT):
+            return False
+        return True
 
     def _task_base_score(self, me) -> int:
         score = me.get("taskScore")
@@ -1623,6 +1719,15 @@ class Strategy:
         if best is None:
             return None
         return best[1], best[2]
+
+    @staticmethod
+    def _active_buff(actor, buff_type: str) -> bool:
+        for b in actor.get("buffs") or []:
+            if b.get("type") != buff_type:
+                continue
+            if int(b.get("remainingRound", 0) or 0) > 0:
+                return True
+        return False
 
     def _claimable_horse(self, node, nodes_by_id, claimed, active, held) -> Optional[str]:
         if active or held:

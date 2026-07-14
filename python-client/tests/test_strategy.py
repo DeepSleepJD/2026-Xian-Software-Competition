@@ -1095,6 +1095,29 @@ class OpeningContestTests(unittest.TestCase):
 
 
 class DeliveryAbandonTests(unittest.TestCase):
+    def _abandoned_branch_strategy(self) -> Strategy:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "G", "G"
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "A", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "B", "routeType": "ROAD",
+             "distance": 20, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "G", "routeType": "ROAD",
+             "distance": 100, "bidirectional": True},
+        ])
+        s._delivery_abandoned = True
+        s._task_priority_mode = True
+        return s
+
+    def _branch_nodes(self, a_stock=None, b_stock=None):
+        return [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "A", "hasObstacle": False, "resourceStock": a_stock or {}},
+            {"nodeId": "B", "hasObstacle": False, "resourceStock": b_stock or {}},
+            {"nodeId": "G", "hasObstacle": False, "resourceStock": {}},
+        ]
+
     def test_eta_200_abandons_at_round_410_not_409(self) -> None:
         # DELIVERY_ABANDON_MARGIN=10: ETA 200 abandons at 600+10-200 = round 410
         s = Strategy(1001)
@@ -1132,6 +1155,73 @@ class DeliveryAbandonTests(unittest.TestCase):
         self.assertTrue(s._task_priority_mode)
         self.assertTrue(s._delivery_abandoned)
         self.assertEqual([{"action": "MOVE", "targetNodeId": "T1"}], act)
+
+    def test_abandoned_task_mode_skips_task_opponent_reaches_first(self) -> None:
+        s = self._abandoned_branch_strategy()
+        tasks = [
+            {"taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
+             "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+             "active": True, "completed": False, "failed": False,
+             "ownerPlayerId": 0, "expireRound": 590},
+            {"taskId": "T_B", "nodeId": "B", "taskTemplateId": "T02",
+             "processType": "STATION_PROCESS", "processRound": 3, "score": 10,
+             "active": True, "completed": False, "failed": False,
+             "ownerPlayerId": 0, "expireRound": 590},
+        ]
+
+        act = s.decide(_inq(300, _me("S01"), _opp("A"), nodes=self._branch_nodes(), tasks=tasks))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], act)
+
+    def test_abandoned_task_score_cap_uses_rush_protect_instead_of_more_tasks(self) -> None:
+        s = self._abandoned_branch_strategy()
+        tasks = [{
+            "taskId": "T_HERE", "nodeId": "S01", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 590,
+        }]
+
+        act = s.decide(_inq(
+            500, _me("S01", taskScore=80, rushTacticUsedCount=0),
+            _opp("G"), nodes=self._branch_nodes(), tasks=tasks, phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "RUSH_PROTECT"}], act)
+
+    def test_abandoned_score_cap_uses_held_ice_box_after_protect(self) -> None:
+        s = self._abandoned_branch_strategy()
+
+        act = s.decide(_inq(
+            501, _me("S01", taskScore=80, rushTacticUsedCount=1,
+                     resources={"ICE_BOX": 1}, freshness=70),
+            _opp("G"), nodes=self._branch_nodes(), phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}], act)
+
+    def test_abandoned_score_cap_prefers_rush_protect_before_held_ice_box(self) -> None:
+        s = self._abandoned_branch_strategy()
+
+        act = s.decide(_inq(
+            500, _me("S01", taskScore=80, rushTacticUsedCount=0,
+                     resources={"ICE_BOX": 1}, freshness=70),
+            _opp("G"), nodes=self._branch_nodes(), phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "RUSH_PROTECT"}], act)
+
+    def test_abandoned_score_cap_moves_to_safe_ice_box(self) -> None:
+        s = self._abandoned_branch_strategy()
+
+        act = s.decide(_inq(
+            501, _me("S01", taskScore=80, rushTacticUsedCount=1),
+            _opp("A"), nodes=self._branch_nodes(
+                a_stock={"ICE_BOX": 1}, b_stock={"ICE_BOX": 1}
+            ), phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], act)
 
 
 class RushTacticTests(unittest.TestCase):
