@@ -1477,6 +1477,50 @@ class DeliveryAbandonTests(unittest.TestCase):
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "A"}], act)
 
+    def test_abandoned_mode_picks_best_adjacent_value_not_shortest_eta_target(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "G", "G"
+        s.graph.load_edges([
+            {"fromNodeId": "S02", "toNodeId": "S03", "routeType": "ROAD",
+             "distance": 25, "bidirectional": True},
+            {"fromNodeId": "S02", "toNodeId": "S04", "routeType": "ROAD",
+             "distance": 20, "bidirectional": True},
+            {"fromNodeId": "S04", "toNodeId": "G", "routeType": "ROAD",
+             "distance": 100, "bidirectional": True},
+            {"fromNodeId": "S03", "toNodeId": "G", "routeType": "ROAD",
+             "distance": 100, "bidirectional": True},
+        ])
+        s._delivery_abandoned = True
+        s._task_priority_mode = True
+        nodes = [
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S03", "hasObstacle": False,
+             "resourceStock": {"ICE_BOX": 1}},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "G", "hasObstacle": False, "resourceStock": {}},
+        ]
+        tasks = [
+            {"taskId": "T_S03_A", "nodeId": "S03", "taskTemplateId": "T01",
+             "processType": "PASS_NODE", "processRound": 3, "score": 30,
+             "active": True, "completed": False, "failed": False,
+             "ownerPlayerId": 0, "expireRound": 540},
+            {"taskId": "T_S03_B", "nodeId": "S03", "taskTemplateId": "T01",
+             "processType": "PASS_NODE", "processRound": 3, "score": 30,
+             "active": True, "completed": False, "failed": False,
+             "ownerPlayerId": 0, "expireRound": 540},
+            {"taskId": "T_S04", "nodeId": "S04", "taskTemplateId": "T08",
+             "processType": "CLAIM_TASK", "processRound": 4, "score": 30,
+             "active": True, "completed": False, "failed": False,
+             "ownerPlayerId": 0, "expireRound": 540},
+        ]
+
+        act = s.decide(_inq(
+            459, _me("S02", taskScore=0), _opp("G"),
+            nodes=nodes, tasks=tasks, phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
+
 
 class RushTacticTests(unittest.TestCase):
     def test_uses_rush_speed_as_soon_as_rush_phase_allows_it(self) -> None:

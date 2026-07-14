@@ -1402,73 +1402,68 @@ class Strategy:
         if self._first_guard_node:
             avoid = avoid | {self._first_guard_node}
 
-        best: Optional[tuple[float, int, str]] = None
-
-        if self._task_base_score(me) < ABANDONED_TASK_CAP:
-            for task in tasks:
-                if not self._task_claimable(task, me, round_no):
-                    continue
-                target = task.get("nodeId")
-                if not target or target == node:
-                    continue
-                eta = self._eta_to_node(
-                    me, target, nodes_by_id, round_no=round_no,
-                    weather=weather, avoid=avoid
-                )
-                if eta == float("inf"):
-                    continue
-                if self._opponent_can_beat_us_to_task(
-                    task, opp, eta, nodes_by_id, round_no, weather
-                ):
-                    continue
-                task_frames = self._task_process_frames(
-                    task, nodes_by_id, me, round_no + eta, round_no
-                )
-                finish_round = round_no + eta + task_frames
-                expire = int(task.get("expireRound", 0) or 0)
-                if finish_round >= TOTAL_ROUNDS or (expire and finish_round >= expire):
-                    continue
-                best = self._prefer_abandoned_candidate(
-                    best, eta + task_frames, 1, target
-                )
-
-        for target, info in nodes_by_id.items():
-            if target == node:
+        best: Optional[tuple[float, float, str]] = None
+        seen: set[str] = set()
+        for target, _route_type, _distance in self.graph.adj.get(node, []):
+            if target in seen or target in avoid:
                 continue
-            stock = (info or {}).get("resourceStock") or {}
-            if int(stock.get(ICE_BOX, 0) or 0) <= 0:
-                continue
+            seen.add(target)
             eta = self._eta_to_node(
                 me, target, nodes_by_id, round_no=round_no,
                 weather=weather, avoid=avoid
             )
             if eta == float("inf"):
                 continue
-            if self._opponent_can_beat_us_to_ice(
+            if self._opponent_can_beat_us_to_node(
                 target, opp, eta, nodes_by_id, round_no, weather
             ):
                 continue
-            claim_frames = self._resource_claim_frames(
-                target, ICE_BOX, nodes_by_id, round_no + eta, me, round_no
+            value = self._abandoned_neighbor_value(
+                target, eta, me, opp, tasks, nodes_by_id, round_no, weather
             )
-            finish_round = round_no + eta + claim_frames
-            if finish_round >= TOTAL_ROUNDS:
+            if value <= 0:
                 continue
-            best = self._prefer_abandoned_candidate(
-                best, eta + claim_frames, 1, target
-            )
+            candidate = (-value, eta, target)
+            if best is None or candidate < best:
+                best = candidate
 
         return None if best is None else best[2]
 
-    @staticmethod
-    def _prefer_abandoned_candidate(
-        best: Optional[tuple[float, int, str]], total_frames: float,
-        priority: int, target: str
-    ) -> tuple[float, int, str]:
-        candidate = (total_frames, priority, target)
-        if best is None or candidate < best:
-            return candidate
-        return best
+    def _abandoned_neighbor_value(
+        self, target, eta, me, opp, tasks, nodes_by_id, round_no, weather=None
+    ) -> float:
+        value = 0.0
+        arrival_round = round_no + eta
+        if self._task_base_score(me) < ABANDONED_TASK_CAP:
+            for task in tasks:
+                if task.get("nodeId") != target:
+                    continue
+                if not self._task_claimable(task, me, round_no):
+                    continue
+                if self._opponent_can_beat_us_to_task(
+                    task, opp, eta, nodes_by_id, round_no, weather
+                ):
+                    continue
+                task_frames = self._task_process_frames(
+                    task, nodes_by_id, me, arrival_round, round_no
+                )
+                finish_round = arrival_round + task_frames
+                expire = int(task.get("expireRound", 0) or 0)
+                if finish_round >= TOTAL_ROUNDS or (expire and finish_round >= expire):
+                    continue
+                value += 1.0
+
+        stock = (nodes_by_id.get(target, {}) or {}).get("resourceStock") or {}
+        if int(stock.get(ICE_BOX, 0) or 0) > 0:
+            if not self._opponent_can_beat_us_to_ice(
+                target, opp, eta, nodes_by_id, round_no, weather
+            ):
+                claim_frames = self._resource_claim_frames(
+                    target, ICE_BOX, nodes_by_id, arrival_round, me, round_no
+                )
+                if arrival_round + claim_frames < TOTAL_ROUNDS:
+                    value += 1.0
+        return value
 
     def _task_value(self, task, me) -> float:
         score = float(task.get("score", 0) or 0)
@@ -1507,6 +1502,17 @@ class Strategy:
         return protected in (0, None, opp_id)
 
     def _opponent_can_beat_us_to_ice(
+        self, target, opp, our_eta, nodes_by_id, round_no, weather=None
+    ) -> bool:
+        if opp is None or opp.get("retired") or opp.get("delivered"):
+            return False
+        opp_eta = self._eta_to_node(
+            opp, target, nodes_by_id, round_no=round_no,
+            weather=weather, avoid=self._my_active_guards(nodes_by_id)
+        )
+        return opp_eta != float("inf") and opp_eta < our_eta
+
+    def _opponent_can_beat_us_to_node(
         self, target, opp, our_eta, nodes_by_id, round_no, weather=None
     ) -> bool:
         if opp is None or opp.get("retired") or opp.get("delivered"):
