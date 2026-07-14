@@ -1444,9 +1444,16 @@ class Strategy:
             task_frames = self._task_process_frames(
                 task, nodes_by_id, actor, task_start, round_no
             )
-            finish_round = task_start + task_frames
+            # A process issued on round N with K frames completes during round
+            # N + K - 1; N + K is merely the first round where the actor is idle
+            # again.  Task expiry and the match deadline compare against the
+            # completion event round, not that following idle round.
+            completion_round = task_start + max(1, task_frames) - 1
             expire = int(task.get("expireRound", 0) or 0)
-            if finish_round < TOTAL_ROUNDS and (not expire or finish_round < expire):
+            if (
+                completion_round < TOTAL_ROUNDS
+                and (not expire or completion_round < expire)
+            ):
                 return True
         return False
 
