@@ -381,6 +381,27 @@ class BlockadeTests(unittest.TestCase):
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S04"}], later)
 
+    def test_committed_delivery_abandons_if_eta_slips_past_decision_round(self) -> None:
+        s = _line_strategy(gate="S04")
+        s._task_priority_mode = True
+        s._frames_to_deliver = lambda *args, **kwargs: 25
+        first = s.decide(_inq(545, _me("S02"), _opp("S01")))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], first)
+        self.assertTrue(s._delivery_committed)
+
+        s._frames_to_deliver = lambda *args, **kwargs: 25
+        tasks = [{
+            "taskId": "T_LOCAL", "nodeId": "S03", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 600,
+        }]
+        later = s.decide(_inq(546, _me("S03"), _opp("S01"), tasks=tasks))
+
+        self.assertFalse(s._delivery_committed)
+        self.assertTrue(s._delivery_abandoned)
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_LOCAL"}], later)
+
     def test_delivers_when_verified_at_terminal(self) -> None:
         s = _line_strategy(gate="S04")
         me = _me("S05", verified=True, currentNodeId="S05")

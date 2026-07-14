@@ -212,16 +212,16 @@ class Strategy:
         if self._must_deliver(node, me, opp, round_no, nodes_by_id, weather):
             self._delivery_committed = True
 
-        if self._delivery_committed and not self._delivery_abandoned:
-            main = self._delivery_push_action(
-                me, node, state, phase, nodes_by_id, tasks, round_no, weather
-            )
-            return self._ordered_actions(main, squad, card)
-
         if self._should_abandon_delivery(node, me, round_no, nodes_by_id, weather):
             self._enter_task_priority(abandon_delivery=True)
             main = self._task_priority_action(
                 me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather
+            )
+            return self._ordered_actions(main, squad, card)
+
+        if self._delivery_committed and not self._delivery_abandoned:
+            main = self._delivery_push_action(
+                me, node, state, phase, nodes_by_id, tasks, round_no, weather
             )
             return self._ordered_actions(main, squad, card)
 
@@ -383,6 +383,7 @@ class Strategy:
         self._task_priority_mode = True
         if abandon_delivery:
             self._delivery_abandoned = True
+            self._delivery_committed = False
         self.route_avoid = set()
 
     def _first_choke_failed(self, node, me, opp, round_no, weather=None) -> bool:
