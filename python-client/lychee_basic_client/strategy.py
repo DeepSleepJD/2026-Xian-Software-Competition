@@ -32,10 +32,8 @@ TOTAL_ROUNDS = 600
 DELIVER_MARGIN = 5           # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
-DELIVERY_ABANDON_MARGIN = 50 # only stop forcing delivery once the ETA is this far
-                             # beyond the deadline; e.g. ETA=200 abandons at 450
-DENY_DELIVER_MARGIN = 0      # no buffer while an unsecured blockade is the only thing
-                             # preventing the opponent from finishing
+DELIVERY_ABANDON_MARGIN = 10 # only stop forcing delivery once the ETA is this far
+                             # beyond the deadline; e.g. ETA=200 abandons at 410
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
 DELIVER_FRAMES = 2           # move-into-terminal + DELIVER
 SCOUT_PROCESS_MIN_FRAMES = 2
@@ -1346,33 +1344,7 @@ class Strategy:
             return False
         if round_no + need >= TOTAL_ROUNDS + DELIVERY_ABANDON_MARGIN:
             return False
-        margin = DELIVER_MARGIN
-        if self._deny_still_matters(node, opp, round_no, nodes_by_id, weather):
-            margin = DENY_DELIVER_MARGIN
-        return round_no + need + margin >= TOTAL_ROUNDS
-
-    def _deny_still_matters(self, node, opp, round_no, nodes_by_id, weather=None) -> bool:
-        """True while leaving now gives the opponent a fastest-route finish and we
-        still have a choke ahead/underfoot that can deny that finish."""
-        if self._task_priority_mode:
-            return False
-        return (
-            self._opponent_can_still_deliver(opp, round_no, nodes_by_id, weather)
-            and self._live_deny_choke_exists(node, opp)
-        )
-
-    def _live_deny_choke_exists(self, node, opp) -> bool:
-        if opp is None:
-            return False
-        for c in reversed(self.chokes):  # start-side first, same race order as tasks
-            if not self._opp_must_cross(c, opp):
-                continue
-            # Only chokes we are at or still before are useful. If removing c still
-            # leaves us a route from here to the gate, then we have already passed it.
-            if node != c and self.graph.path_frames(node, self.gate_node, avoid={c}) != float("inf"):
-                continue
-            return True
-        return False
+        return round_no + need + DELIVER_MARGIN >= TOTAL_ROUNDS
 
     def _opponent_can_still_deliver(self, opp, round_no, nodes_by_id, weather=None) -> bool:
         frames = self._opponent_frames_to_deliver(opp, nodes_by_id, round_no, weather)

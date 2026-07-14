@@ -330,13 +330,13 @@ class BlockadeTests(unittest.TestCase):
         act = s.decide(_inq(TOTAL_ROUNDS - 5, _me("S01"), _opp("S01")))
         self.assertEqual("MOVE", act[0]["action"])
 
-    def test_unsecured_deny_uses_hard_departure_not_delivery_buffer(self) -> None:
+    def test_unsecured_deny_keeps_delivery_buffer(self) -> None:
         s = _line_strategy(gate="S04")
-        # At round 500 we can still finish comfortably from S02, so do not
-        # abandon delivery just because a safety buffer would be shrinking.
-        act = s.decide(_inq(500, _me("S02"), _opp("S01")))
+        # Even while an unsecured blockade could still matter, keep the normal
+        # delivery safety margin and leave at the buffered deadline.
+        act = s.decide(_inq(545, _me("S02"), _opp("S01")))
         self.assertFalse(s._delivery_abandoned)
-        self.assertEqual([{"action": "WAIT"}], act)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
     def test_must_deliver_overrides_local_wait_near_deadline(self) -> None:
         s = _line_strategy(gate="S04")
@@ -1095,13 +1095,13 @@ class OpeningContestTests(unittest.TestCase):
 
 
 class DeliveryAbandonTests(unittest.TestCase):
-    def test_eta_200_abandons_at_round_450_not_449(self) -> None:
-        # DELIVERY_ABANDON_MARGIN=50: ETA 200 abandons at 600+50-200 = round 450
+    def test_eta_200_abandons_at_round_410_not_409(self) -> None:
+        # DELIVERY_ABANDON_MARGIN=10: ETA 200 abandons at 600+10-200 = round 410
         s = Strategy(1001)
         s._frames_to_deliver = lambda *args, **kwargs: 200
 
-        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 449, {}))
-        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 450, {}))
+        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 409, {}))
+        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 410, {}))
 
     def test_switches_to_task_priority_when_delivery_eta_misses_deadline(self) -> None:
         s = Strategy(1001)
