@@ -29,10 +29,10 @@ from .contest import active_contest, pick_card
 from .graph import BASE_MOVE_PER_FRAME, Graph, ROUTE_COST_COEF
 
 TOTAL_ROUNDS = 600
-DELIVER_MARGIN = 5           # safety frames before the delivery deadline (covers the
+DELIVER_MARGIN = 15          # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
-DELIVERY_ABANDON_MARGIN = 10 # only stop forcing delivery once the ETA is this far
+DELIVERY_ABANDON_MARGIN = 25 # only stop forcing delivery once the ETA is this far
                              # beyond the deadline; e.g. ETA=200 abandons at 425
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
 DELIVER_FRAMES = 2           # move-into-terminal + DELIVER
