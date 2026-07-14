@@ -324,28 +324,30 @@ class BlockadeTests(unittest.TestCase):
             act,
         )
 
-    def test_must_deliver_overrides_blocking_near_deadline(self) -> None:
+    def test_late_delivery_miss_abandons_blocking(self) -> None:
         s = _line_strategy(gate="S04")
-        # very late: no time left to keep blocking -> must move toward the gate
+        # very late: no time left to keep blocking -> abandon delivery and move on.
         act = s.decide(_inq(TOTAL_ROUNDS - 5, _me("S01"), _opp("S01")))
+        self.assertTrue(s._delivery_abandoned)
         self.assertEqual("MOVE", act[0]["action"])
 
-    def test_unsecured_deny_keeps_delivery_buffer(self) -> None:
+    def test_unsecured_deny_abandons_after_delivery_decision_round(self) -> None:
         s = _line_strategy(gate="S04")
-        # Even while an unsecured blockade could still matter, keep the normal
-        # delivery safety margin and leave at the buffered deadline.
+        # Once projected delivery is past 570, abandon delivery even if an
+        # unsecured blockade could still matter.
         act = s.decide(_inq(545, _me("S02"), _opp("S01")))
-        self.assertFalse(s._delivery_abandoned)
+        self.assertTrue(s._delivery_abandoned)
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
-    def test_must_deliver_overrides_local_wait_near_deadline(self) -> None:
+    def test_late_delivery_miss_overrides_local_wait(self) -> None:
         s = _line_strategy(gate="S04")
-        # Once the latest safe departure arrives, we leave even if an adjacent
-        # opponent could be baited into a local ambush.
+        # Once delivery is projected past the decision round, we leave the local
+        # wait and switch to the abandoned-delivery plan.
         act = s.decide(_inq(545, _me("S02"), _opp("S01")))
+        self.assertTrue(s._delivery_abandoned)
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
-    def test_task_mode_must_deliver_before_claiming_local_task(self) -> None:
+    def test_task_mode_abandons_delivery_and_claims_local_task(self) -> None:
         s = _line_strategy(gate="S04")
         s._task_priority_mode = True
         tasks = [{
@@ -357,15 +359,18 @@ class BlockadeTests(unittest.TestCase):
 
         act = s.decide(_inq(TOTAL_ROUNDS - 55, _me("S02"), _opp("S01"), tasks=tasks))
 
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
+        self.assertTrue(s._delivery_abandoned)
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_LATE"}], act)
 
-    def test_deadline_delivery_commit_stays_latched_after_eta_improves(self) -> None:
+    def test_exact_delivery_decision_round_commit_stays_latched_after_eta_improves(self) -> None:
         s = _line_strategy(gate="S04")
         s._task_priority_mode = True
-        first = s.decide(_inq(TOTAL_ROUNDS - 55, _me("S02"), _opp("S01")))
+        s._frames_to_deliver = lambda *args, **kwargs: 25
+        first = s.decide(_inq(545, _me("S02"), _opp("S01")))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], first)
         self.assertTrue(s._delivery_committed)
 
+        s._frames_to_deliver = lambda *args, **kwargs: 10
         tasks = [{
             "taskId": "T_LOCAL", "nodeId": "S03", "taskTemplateId": "T02",
             "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
@@ -1135,13 +1140,13 @@ class DeliveryAbandonTests(unittest.TestCase):
             {"nodeId": "G", "hasObstacle": False, "resourceStock": {}},
         ]
 
-    def test_eta_200_abandons_at_round_425_not_424(self) -> None:
-        # DELIVERY_ABANDON_MARGIN=25: ETA 200 abandons at 600+25-200 = round 425
+    def test_eta_200_abandons_after_round_570_projection(self) -> None:
+        # DELIVERY_DECISION_ROUND=570: ETA 200 abandons once round + ETA > 570.
         s = Strategy(1001)
         s._frames_to_deliver = lambda *args, **kwargs: 200
 
-        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 424, {}))
-        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 425, {}))
+        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 370, {}))
+        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 371, {}))
 
     def test_switches_to_task_priority_when_delivery_eta_misses_deadline(self) -> None:
         s = Strategy(1001)
@@ -1173,6 +1178,21 @@ class DeliveryAbandonTests(unittest.TestCase):
         self.assertTrue(s._delivery_abandoned)
         self.assertEqual([{"action": "MOVE", "targetNodeId": "T1"}], act)
 
+    def test_delivery_miss_abandons_before_rush_speed(self) -> None:
+        s = self._abandoned_branch_strategy()
+        s._delivery_abandoned = False
+        s._task_priority_mode = False
+        s._frames_to_deliver = lambda *args, **kwargs: 120
+        me = _me(
+            "S01", state="MOVING", nextNodeId="A", routeEdgeId="E01",
+            rushTacticUsedCount=0, buffs=[]
+        )
+
+        act = s.decide(_inq(451, me, _opp("G"), nodes=self._branch_nodes(), phase="RUSH"))
+
+        self.assertTrue(s._delivery_abandoned)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "A"}], act)
+
     def test_abandoned_task_mode_skips_task_opponent_reaches_first(self) -> None:
         s = self._abandoned_branch_strategy()
         tasks = [
@@ -1203,6 +1223,18 @@ class DeliveryAbandonTests(unittest.TestCase):
             590, _me("S01", rushTacticUsedCount=0), _opp("G"),
             nodes=self._branch_nodes(b_stock={"ICE_BOX": 1}), tasks=tasks,
             phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "RUSH_PROTECT"}], act)
+
+    def test_abandoned_unprocessed_node_uses_rush_protect_before_process(self) -> None:
+        s = self._abandoned_branch_strategy()
+        nodes = self._branch_nodes()
+        nodes[0]["processRound"] = 4
+
+        act = s.decide(_inq(
+            500, _me("S01", rushTacticUsedCount=0), _opp("G"),
+            nodes=nodes, phase="RUSH"
         ))
 
         self.assertEqual([{"action": "RUSH_PROTECT"}], act)

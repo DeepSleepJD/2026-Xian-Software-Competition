@@ -29,11 +29,11 @@ from .contest import active_contest, pick_card
 from .graph import BASE_MOVE_PER_FRAME, Graph, ROUTE_COST_COEF
 
 TOTAL_ROUNDS = 600
-DELIVER_MARGIN = 15          # safety frames before the delivery deadline (covers the
+DELIVER_MARGIN = 30          # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
-DELIVERY_ABANDON_MARGIN = 25 # only stop forcing delivery once the ETA is this far
-                             # beyond the deadline; e.g. ETA=200 abandons at 425
+DELIVERY_DECISION_ROUND = 570 # projected delivery round: <570 keep playing,
+                              # ==570 hard-commit, >570 abandon delivery for tasks
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
 DELIVER_FRAMES = 2           # move-into-terminal + DELIVER
 SCOUT_PROCESS_MIN_FRAMES = 2
@@ -218,6 +218,13 @@ class Strategy:
             )
             return self._ordered_actions(main, squad, card)
 
+        if self._should_abandon_delivery(node, me, round_no, nodes_by_id, weather):
+            self._enter_task_priority(abandon_delivery=True)
+            main = self._task_priority_action(
+                me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather
+            )
+            return self._ordered_actions(main, squad, card)
+
         # RUSH_SPEED IS a main-car action and is only valid mid-move -> issue it (as THE
         # main action) while we're MOVING; never when idle/parked (invalid + wasted).
         if not self._delivery_abandoned and self._rush_speed_action(me, state, phase):
@@ -260,9 +267,6 @@ class Strategy:
                 round_no, weather
             )
             return self._ordered_actions(main, squad, card)
-
-        if self._should_abandon_delivery(node, me, round_no, nodes_by_id, weather):
-            self._enter_task_priority(abandon_delivery=True)
 
         if self._task_priority_mode:
             main = self._task_priority_action(
@@ -1182,6 +1186,13 @@ class Strategy:
             return [M.claim_resource(node, ICE_BOX)]
         if node == self.gate_node and not me.get("verified") and phase != "RUSH":
             return [M.wait()]
+        if (
+            self._delivery_abandoned
+            and self._can_rush_protect(me, phase)
+            and self._needs_process(node, nodes_by_id)
+            and node not in self.processed
+        ):
+            return [M.rush_protect()]
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
             return [M.process(node)]
         if (
@@ -1487,7 +1498,7 @@ class Strategy:
         if self._delivery_abandoned or me.get("verified"):
             return False
         need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
-        return round_no + need >= TOTAL_ROUNDS + DELIVERY_ABANDON_MARGIN
+        return round_no + need > DELIVERY_DECISION_ROUND
 
     def _must_deliver(self, node, me, opp, round_no, nodes_by_id, weather=None) -> bool:
         if self._delivery_abandoned:
@@ -1495,9 +1506,9 @@ class Strategy:
         need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
         if need == float("inf"):
             return False
-        if round_no + need >= TOTAL_ROUNDS + DELIVERY_ABANDON_MARGIN:
+        if round_no + need > DELIVERY_DECISION_ROUND:
             return False
-        return round_no + need + DELIVER_MARGIN >= TOTAL_ROUNDS
+        return round_no + need >= DELIVERY_DECISION_ROUND
 
     def _opponent_can_still_deliver(self, opp, round_no, nodes_by_id, weather=None) -> bool:
         frames = self._opponent_frames_to_deliver(opp, nodes_by_id, round_no, weather)
