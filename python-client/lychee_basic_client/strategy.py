@@ -32,8 +32,8 @@ TOTAL_ROUNDS = 600
 DELIVER_MARGIN = 30          # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
-DELIVERY_DECISION_ROUND = 570 # projected delivery round: <570 keep playing,
-                              # ==570 hard-commit, >570 abandon delivery for tasks
+DELIVERY_SPRINT_START_ROUND = 580 # projected delivery round: <580 keep playing
+DELIVERY_ABANDON_ROUND = 590      # 580..590 hard-commit, >590 abandon for tasks
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
 DELIVER_FRAMES = 2           # move-into-terminal + DELIVER
 SCOUT_PROCESS_MIN_FRAMES = 2
@@ -1499,7 +1499,7 @@ class Strategy:
         if self._delivery_abandoned or me.get("verified"):
             return False
         need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
-        return round_no + need > DELIVERY_DECISION_ROUND
+        return round_no + need > DELIVERY_ABANDON_ROUND
 
     def _must_deliver(self, node, me, opp, round_no, nodes_by_id, weather=None) -> bool:
         if self._delivery_abandoned:
@@ -1507,9 +1507,9 @@ class Strategy:
         need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
         if need == float("inf"):
             return False
-        if round_no + need > DELIVERY_DECISION_ROUND:
+        if round_no + need > DELIVERY_ABANDON_ROUND:
             return False
-        return round_no + need >= DELIVERY_DECISION_ROUND
+        return round_no + need >= DELIVERY_SPRINT_START_ROUND
 
     def _opponent_can_still_deliver(self, opp, round_no, nodes_by_id, weather=None) -> bool:
         frames = self._opponent_frames_to_deliver(opp, nodes_by_id, round_no, weather)

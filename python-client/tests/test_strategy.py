@@ -333,17 +333,17 @@ class BlockadeTests(unittest.TestCase):
 
     def test_unsecured_deny_abandons_after_delivery_decision_round(self) -> None:
         s = _line_strategy(gate="S04")
-        # Once projected delivery is past 570, abandon delivery even if an
+        # Once projected delivery is past 590, abandon delivery even if an
         # unsecured blockade could still matter.
-        act = s.decide(_inq(545, _me("S02"), _opp("S01")))
+        act = s.decide(_inq(560, _me("S02"), _opp("S01")))
         self.assertTrue(s._delivery_abandoned)
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
     def test_late_delivery_miss_overrides_local_wait(self) -> None:
         s = _line_strategy(gate="S04")
-        # Once delivery is projected past the decision round, we leave the local
+        # Once delivery is projected past the sprint window, we leave the local
         # wait and switch to the abandoned-delivery plan.
-        act = s.decide(_inq(545, _me("S02"), _opp("S01")))
+        act = s.decide(_inq(560, _me("S02"), _opp("S01")))
         self.assertTrue(s._delivery_abandoned)
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
@@ -357,16 +357,16 @@ class BlockadeTests(unittest.TestCase):
             "ownerPlayerId": 0, "expireRound": 600,
         }]
 
-        act = s.decide(_inq(TOTAL_ROUNDS - 55, _me("S02"), _opp("S01"), tasks=tasks))
+        act = s.decide(_inq(560, _me("S02"), _opp("S01"), tasks=tasks))
 
         self.assertTrue(s._delivery_abandoned)
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_LATE"}], act)
 
-    def test_exact_delivery_decision_round_commit_stays_latched_after_eta_improves(self) -> None:
+    def test_sprint_window_commit_stays_latched_after_eta_improves(self) -> None:
         s = _line_strategy(gate="S04")
         s._task_priority_mode = True
         s._frames_to_deliver = lambda *args, **kwargs: 25
-        first = s.decide(_inq(545, _me("S02"), _opp("S01")))
+        first = s.decide(_inq(555, _me("S02"), _opp("S01")))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], first)
         self.assertTrue(s._delivery_committed)
 
@@ -381,11 +381,11 @@ class BlockadeTests(unittest.TestCase):
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S04"}], later)
 
-    def test_committed_delivery_abandons_if_eta_slips_past_decision_round(self) -> None:
+    def test_committed_delivery_abandons_if_eta_slips_past_sprint_window(self) -> None:
         s = _line_strategy(gate="S04")
         s._task_priority_mode = True
         s._frames_to_deliver = lambda *args, **kwargs: 25
-        first = s.decide(_inq(545, _me("S02"), _opp("S01")))
+        first = s.decide(_inq(555, _me("S02"), _opp("S01")))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], first)
         self.assertTrue(s._delivery_committed)
 
@@ -396,7 +396,7 @@ class BlockadeTests(unittest.TestCase):
             "active": True, "completed": False, "failed": False,
             "ownerPlayerId": 0, "expireRound": 600,
         }]
-        later = s.decide(_inq(546, _me("S03"), _opp("S01"), tasks=tasks))
+        later = s.decide(_inq(566, _me("S03"), _opp("S01"), tasks=tasks))
 
         self.assertFalse(s._delivery_committed)
         self.assertTrue(s._delivery_abandoned)
@@ -1161,13 +1161,13 @@ class DeliveryAbandonTests(unittest.TestCase):
             {"nodeId": "G", "hasObstacle": False, "resourceStock": {}},
         ]
 
-    def test_eta_200_abandons_after_round_570_projection(self) -> None:
-        # DELIVERY_DECISION_ROUND=570: ETA 200 abandons once round + ETA > 570.
+    def test_eta_200_abandons_after_sprint_window(self) -> None:
+        # DELIVERY_ABANDON_ROUND=590: ETA 200 abandons once round + ETA > 590.
         s = Strategy(1001)
         s._frames_to_deliver = lambda *args, **kwargs: 200
 
-        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 370, {}))
-        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 371, {}))
+        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 390, {}))
+        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 391, {}))
 
     def test_switches_to_task_priority_when_delivery_eta_misses_deadline(self) -> None:
         s = Strategy(1001)
@@ -1209,7 +1209,7 @@ class DeliveryAbandonTests(unittest.TestCase):
             rushTacticUsedCount=0, buffs=[]
         )
 
-        act = s.decide(_inq(451, me, _opp("G"), nodes=self._branch_nodes(), phase="RUSH"))
+        act = s.decide(_inq(471, me, _opp("G"), nodes=self._branch_nodes(), phase="RUSH"))
 
         self.assertTrue(s._delivery_abandoned)
         self.assertEqual([{"action": "MOVE", "targetNodeId": "A"}], act)
