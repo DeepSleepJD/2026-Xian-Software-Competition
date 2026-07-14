@@ -124,6 +124,7 @@ class Strategy:
         self._task_priority_mode = False
         self._delivery_abandoned = False
         self._delivery_committed = False
+        self._rush_protect_final_wait = False
         self.task_base = 0
         self._counted_tasks: set[str] = set()
         self._task_attempts: dict[str, int] = {}
@@ -1176,10 +1177,20 @@ class Strategy:
                 self.gate_node, me, node, state, phase, nodes_by_id, tasks,
                 round_no, weather
             )
+        if self._delivery_abandoned and (
+            self._rush_protect_final_wait or self._active_buff(me, RUSH_PROTECT)
+        ):
+            return [M.wait()]
         if self._delivery_abandoned and self._task_base_score(me) >= ABANDONED_TASK_CAP:
             return self._abandoned_score_cap_action(
                 me, opp, node, phase, round_no, nodes_by_id, weather
             )
+        if self._delivery_abandoned and not self._task_score_still_possible(
+            node, me, opp, tasks, nodes_by_id, round_no, weather
+        ):
+            if self._can_rush_protect(me, phase):
+                return self._rush_protect_and_wait()
+            return [M.wait()]
         task = self._claimable_task_here(node, tasks, me, round_no)
         if task is not None:
             return self._claim_task_action(task)
@@ -1190,23 +1201,8 @@ class Strategy:
             return [M.claim_resource(node, ICE_BOX)]
         if node == self.gate_node and not me.get("verified") and phase != "RUSH":
             return [M.wait()]
-        if (
-            self._delivery_abandoned
-            and self._can_rush_protect(me, phase)
-            and self._needs_process(node, nodes_by_id)
-            and node not in self.processed
-        ):
-            return [M.rush_protect()]
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
             return [M.process(node)]
-        if (
-            self._delivery_abandoned
-            and self._can_rush_protect(me, phase)
-            and not self._neighbor_op_fits_remaining(
-                node, me, tasks, nodes_by_id, round_no, weather
-            )
-        ):
-            return [M.rush_protect()]
         dest = self._best_task_waypoint(
             node, me, tasks, nodes_by_id, round_no, weather, opp=opp
         )
@@ -1219,16 +1215,12 @@ class Strategy:
         self, me, opp, node, phase, round_no, nodes_by_id, weather=None
     ):
         if self._can_rush_protect(me, phase):
-            return [M.rush_protect()]
-        if self._held_resource(me, ICE_BOX) and self._freshness(me) < 100:
-            return [M.use_resource(ICE_BOX)]
-        if self._ice_claim_frames_here(node, me, nodes_by_id, round_no) is not None:
-            return [M.claim_resource(node, ICE_BOX)]
-        dest = self._best_ice_waypoint(node, me, opp, nodes_by_id, round_no, weather)
-        return self._advance_to(
-            dest or self.gate_node, me, node, "IDLE", phase, nodes_by_id, [],
-            round_no, weather
-        )
+            return self._rush_protect_and_wait()
+        return [M.wait()]
+
+    def _rush_protect_and_wait(self) -> list:
+        self._rush_protect_final_wait = True
+        return [M.rush_protect()]
 
     def _claim_task_action(self, task):
         task_id = task["taskId"]
@@ -1412,6 +1404,39 @@ class Strategy:
                 )
                 if arrival_round + claim_frames < TOTAL_ROUNDS:
                     return True
+        return False
+
+    def _task_score_still_possible(
+        self, node, me, opp, tasks, nodes_by_id, round_no, weather=None
+    ) -> bool:
+        avoid = self._guard_blocked | self.route_avoid
+        if self._first_guard_node:
+            avoid = avoid | {self._first_guard_node}
+        for task in tasks:
+            if not self._task_claimable(task, me, round_no):
+                continue
+            if self._task_value(task, me) <= 0:
+                continue
+            target = task.get("nodeId")
+            if not target:
+                continue
+            eta = self._eta_to_node(
+                me, target, nodes_by_id, round_no=round_no,
+                weather=weather, avoid=avoid
+            )
+            if eta == float("inf"):
+                continue
+            if self._opponent_can_beat_us_to_task(
+                task, opp, eta, nodes_by_id, round_no, weather
+            ):
+                continue
+            task_frames = self._task_process_frames(
+                task, nodes_by_id, me, round_no + eta, round_no
+            )
+            finish_round = round_no + eta + task_frames
+            expire = int(task.get("expireRound", 0) or 0)
+            if finish_round < TOTAL_ROUNDS and (not expire or finish_round < expire):
+                return True
         return False
 
     def _best_ice_waypoint(self, node, me, opp, nodes_by_id, round_no, weather=None) -> Optional[str]:
@@ -2237,3 +2262,5 @@ class Strategy:
             if p.get("playerId") != self.player_id:
                 return p
         return None
+
+

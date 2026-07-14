@@ -326,26 +326,26 @@ class BlockadeTests(unittest.TestCase):
 
     def test_late_delivery_miss_abandons_blocking(self) -> None:
         s = _line_strategy(gate="S04")
-        # very late: no time left to keep blocking -> abandon delivery and move on.
+        # very late: no time left to deliver or collect task score -> stop.
         act = s.decide(_inq(TOTAL_ROUNDS - 5, _me("S01"), _opp("S01")))
         self.assertTrue(s._delivery_abandoned)
-        self.assertEqual("MOVE", act[0]["action"])
+        self.assertEqual([{"action": "WAIT"}], act)
 
     def test_unsecured_deny_abandons_after_delivery_decision_round(self) -> None:
         s = _line_strategy(gate="S04")
-        # Once projected delivery is past 590, abandon delivery even if an
-        # unsecured blockade could still matter.
+        # Once projected delivery is past 590 and no task score can still be
+        # collected, abandon delivery and stop.
         act = s.decide(_inq(560, _me("S02"), _opp("S01")))
         self.assertTrue(s._delivery_abandoned)
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
+        self.assertEqual([{"action": "WAIT"}], act)
 
     def test_late_delivery_miss_overrides_local_wait(self) -> None:
         s = _line_strategy(gate="S04")
-        # Once delivery is projected past the sprint window, we leave the local
-        # wait and switch to the abandoned-delivery plan.
+        # Once delivery is projected past the sprint window and no task score can
+        # still be collected, the abandoned-delivery plan waits.
         act = s.decide(_inq(560, _me("S02"), _opp("S01")))
         self.assertTrue(s._delivery_abandoned)
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
+        self.assertEqual([{"action": "WAIT"}], act)
 
     def test_task_mode_abandons_delivery_and_claims_local_task(self) -> None:
         s = _line_strategy(gate="S04")
@@ -1282,7 +1282,25 @@ class DeliveryAbandonTests(unittest.TestCase):
 
         self.assertEqual([{"action": "RUSH_PROTECT"}], act)
 
-    def test_abandoned_unprocessed_node_uses_rush_protect_before_process(self) -> None:
+    def test_abandoned_unprocessed_node_processes_when_task_score_still_fits(self) -> None:
+        s = self._abandoned_branch_strategy()
+        nodes = self._branch_nodes()
+        nodes[0]["processRound"] = 4
+        tasks = [{
+            "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 600,
+        }]
+
+        act = s.decide(_inq(
+            500, _me("S01", rushTacticUsedCount=0), _opp("G"),
+            nodes=nodes, tasks=tasks, phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "PROCESS", "targetNodeId": "S01"}], act)
+
+    def test_abandoned_unprocessed_node_uses_rush_protect_when_no_task_score_fits(self) -> None:
         s = self._abandoned_branch_strategy()
         nodes = self._branch_nodes()
         nodes[0]["processRound"] = 4
@@ -1325,9 +1343,19 @@ class DeliveryAbandonTests(unittest.TestCase):
         ))
 
         self.assertEqual([{"action": "RUSH_PROTECT"}], act)
+        self.assertTrue(s._rush_protect_final_wait)
 
-    def test_abandoned_score_cap_uses_held_ice_box_after_protect(self) -> None:
+        later = s.decide(_inq(
+            501, _me("S01", taskScore=80, rushTacticUsedCount=1,
+                     resources={"ICE_BOX": 1}, freshness=70),
+            _opp("G"), nodes=self._branch_nodes(), tasks=tasks, phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "WAIT"}], later)
+
+    def test_abandoned_score_cap_waits_after_protect_instead_of_ice_box(self) -> None:
         s = self._abandoned_branch_strategy()
+        s._rush_protect_final_wait = True
 
         act = s.decide(_inq(
             501, _me("S01", taskScore=80, rushTacticUsedCount=1,
@@ -1335,7 +1363,7 @@ class DeliveryAbandonTests(unittest.TestCase):
             _opp("G"), nodes=self._branch_nodes(), phase="RUSH"
         ))
 
-        self.assertEqual([{"action": "USE_RESOURCE", "resourceType": "ICE_BOX"}], act)
+        self.assertEqual([{"action": "WAIT"}], act)
 
     def test_abandoned_score_cap_prefers_rush_protect_before_held_ice_box(self) -> None:
         s = self._abandoned_branch_strategy()
@@ -1348,7 +1376,7 @@ class DeliveryAbandonTests(unittest.TestCase):
 
         self.assertEqual([{"action": "RUSH_PROTECT"}], act)
 
-    def test_abandoned_score_cap_moves_to_safe_ice_box(self) -> None:
+    def test_abandoned_score_cap_waits_when_protect_is_unavailable(self) -> None:
         s = self._abandoned_branch_strategy()
 
         act = s.decide(_inq(
@@ -1358,7 +1386,7 @@ class DeliveryAbandonTests(unittest.TestCase):
             ), phase="RUSH"
         ))
 
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], act)
+        self.assertEqual([{"action": "WAIT"}], act)
 
 
 class RushTacticTests(unittest.TestCase):
