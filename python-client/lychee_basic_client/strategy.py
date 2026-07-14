@@ -557,7 +557,7 @@ class Strategy:
         order: from that neighbor, finishing delivery is at least one guard
         setup window slower than from our current node.
         """
-        if state in BUSY_STATES or not node or node == self.terminal_node:
+        if state in BUSY_STATES or not node or node in (self.gate_node, self.terminal_node):
             return []
         if me.get("routeEdgeId") or me.get("nextNodeId") or me.get("verified"):
             return []
@@ -720,31 +720,37 @@ class Strategy:
 
     # ---- endgame gate ambush ----
     def _gate_ambush_action(self, me, opp, node, state, round_no, nodes_by_id, weather=None) -> list:
-        """Camp the gate while we have delivery slack and SET_GUARD the instant
-        the opponent commits onto an edge into it -- they freeze mid-edge and
-        cannot verify. Fire-and-forget: once the trap is armed, the opponent is
-        already past/at the gate, they can no longer finish anyway, or our own
-        deadline nears, fall through to the normal delivery run."""
+        """Camp the gate while we have delivery slack and the opponent is behind it.
+
+        S14 is the hard gate, so do not leave merely because the opponent ETA
+        model says they miss. Stay, reinforce any active guard via the squad path,
+        and SET_GUARD the instant they commit onto an edge into the gate. Only the
+        top-level delivery deadline should pull us off this node.
+        """
         if state in BUSY_STATES or node != self.gate_node:
             return []
         if me.get("routeEdgeId") or me.get("nextNodeId"):
             return []
-        if opp is None or opp.get("delivered") or opp.get("retired"):
-            return []
-        if opp.get("currentNodeId") in (self.gate_node, self.terminal_node) \
-           and not opp.get("routeEdgeId"):
-            return []
-        if self._we_hold(node, nodes_by_id):
-            return []
-        if not self._opponent_can_still_deliver(opp, round_no, nodes_by_id, weather):
+        if not self._opponent_behind_gate(opp):
             return []
         if self._must_deliver(node, me, opp, round_no, nodes_by_id, weather):
             return []
-        if self._freeze_window_open(opp, node, round_no, weather) \
+        if not self._we_hold(node, nodes_by_id) \
+           and self._freeze_window_open(opp, node, round_no, weather) \
            and me.get("goodFruit", 0) > GUARD_KEEP_FRUIT:
             self._guarded_round[node] = round_no
             return [M.set_guard(node, extra_good_fruit=GATE_GUARD_EXTRA_FRUIT)]
         return [M.wait()]
+
+    def _opponent_behind_gate(self, opp) -> bool:
+        if opp is None or opp.get("delivered") or opp.get("retired"):
+            return False
+        opp_node = opp.get("currentNodeId")
+        if opp_node in (self.gate_node, self.terminal_node):
+            return False
+        if opp.get("routeEdgeId") and opp.get("nextNodeId") == self.terminal_node:
+            return False
+        return bool(opp_node)
 
     def _freeze_window_open(self, opp, N, round_no=0, weather=None) -> bool:
         """The opponent has committed onto the edge into N and there is still enough

@@ -1271,20 +1271,43 @@ class GateAmbushTests(unittest.TestCase):
         act = s.decide(_inq(TOTAL_ROUNDS - 12, me, _opp("S02"), phase="RUSH"))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S05"}], act)
 
-    def test_no_ambush_when_opponent_cannot_finish(self) -> None:
+    def test_still_camps_when_opponent_eta_misses_but_is_behind_gate(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=1)
+        act = s.decide(_inq(570, me, _opp("S01"), phase="RUSH"))
+        self.assertEqual([{"action": "WAIT"}], act)
+
+    def test_opponent_retired_means_go_deliver(self) -> None:
         s = _line_strategy(gate="S04")
         me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=1)
         act = s.decide(_inq(500, me, _opp("S02", retired=True), phase="RUSH"))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S05"}], act)
 
-    def test_trap_armed_means_go_deliver(self) -> None:
+    def test_trap_armed_means_hold_gate_until_deadline(self) -> None:
         s = _line_strategy(gate="S04")
         me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=1)
         opp = _opp("S03", state="MOVING", nextNodeId="S04",
                    routeEdgeId="E03", edgeProgressPermille=500)
         nodes = _guard_nodes("S04", defense=4)
         act = s.decide(_inq(510, me, opp, nodes=nodes, phase="RUSH"))
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "S05"}], act)
+        self.assertEqual([{"action": "WAIT"}], act)
+
+    def test_reinforces_gate_guard_while_holding(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=1,
+                 squadAvailable=4)
+        nodes = _guard_nodes("S04", defense=2)
+        inq = _inq(510, me, _opp("S02"), nodes=nodes, phase="RUSH")
+        inq["events"] = [_weaken_dispatch("W_GATE", "S04", 509)]
+        act = s.decide(inq)
+        self.assertIn({"action": "SQUAD_REINFORCE", "targetNodeId": "S04"}, act)
+        self.assertIn({"action": "WAIT"}, act)
+
+    def test_gate_watch_does_not_block_rush_verify(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S04", verified=False, goodFruit=20, rushTacticUsedCount=1)
+        act = s.decide(_inq(500, me, _opp("S02"), phase="RUSH"))
+        self.assertEqual([{"action": "VERIFY_GATE"}], act)
 
     def test_arms_the_trap_pre_rush_while_waiting_at_the_gate(self) -> None:
         s = _line_strategy(gate="S04")
