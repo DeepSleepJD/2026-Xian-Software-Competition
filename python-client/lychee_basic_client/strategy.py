@@ -123,6 +123,7 @@ class Strategy:
         self._opp_left_start = False
         self._task_priority_mode = False
         self._delivery_abandoned = False
+        self._delivery_committed = False
         self.task_base = 0
         self._counted_tasks: set[str] = set()
         self._task_attempts: dict[str, int] = {}
@@ -139,6 +140,7 @@ class Strategy:
         self.start_node = roles.get("startNodeId", "S01")
         self.terminal_node = (roles.get("terminalNodeIds") or ["S15"])[0]
         self.graph.load_process_nodes(m.get("gameplay", {}).get("processNodes", []), self.gate_node)
+        self._delivery_committed = False
         self._resource_claim_rounds = {}
         for r in start_data.get("resources") or m.get("resources") or []:
             node_id = r.get("nodeId")
@@ -204,13 +206,15 @@ class Strategy:
         # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
         squad = self._squad_action(node, me, opp, tasks, nodes_by_id, round_no, weather)
 
-        # A hard delivery deadline beats speed buffs, ambushes, and any remaining
-        # task farm: block only while our own finish is still safe.
+        # A hard delivery deadline beats ambushes and any remaining task farm.
+        # Once it fires, latch the delivery run so a later ETA improvement cannot
+        # send us back into task/resource opportunism.
         if self._must_deliver(node, me, opp, round_no, nodes_by_id, weather):
-            main = self._advance_to(
-                self.terminal_node if me.get("verified") else self.gate_node,
-                me, node, state, phase, nodes_by_id, tasks,
-                round_no, weather
+            self._delivery_committed = True
+
+        if self._delivery_committed and not self._delivery_abandoned:
+            main = self._delivery_push_action(
+                me, node, state, phase, nodes_by_id, tasks, round_no, weather
             )
             return self._ordered_actions(main, squad, card)
 
@@ -1470,6 +1474,14 @@ class Strategy:
         if me.get("verified") and me.get("currentNodeId") == self.terminal_node:
             return False
         return True
+
+    def _delivery_push_action(self, me, node, state, phase, nodes_by_id, tasks, round_no, weather=None):
+        if self._rush_speed_action(me, state, phase):
+            return [M.rush_speed()]
+        return self._advance_to(
+            self.terminal_node if me.get("verified") else self.gate_node,
+            me, node, state, phase, nodes_by_id, tasks, round_no, weather
+        )
 
     def _should_abandon_delivery(self, node, me, round_no, nodes_by_id, weather=None) -> bool:
         if self._delivery_abandoned or me.get("verified"):

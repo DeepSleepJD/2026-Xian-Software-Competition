@@ -355,9 +355,26 @@ class BlockadeTests(unittest.TestCase):
             "ownerPlayerId": 0, "expireRound": 600,
         }]
 
-        act = s.decide(_inq(TOTAL_ROUNDS - 5, _me("S02"), _opp("S01"), tasks=tasks))
+        act = s.decide(_inq(TOTAL_ROUNDS - 55, _me("S02"), _opp("S01"), tasks=tasks))
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
+
+    def test_deadline_delivery_commit_stays_latched_after_eta_improves(self) -> None:
+        s = _line_strategy(gate="S04")
+        s._task_priority_mode = True
+        first = s.decide(_inq(TOTAL_ROUNDS - 55, _me("S02"), _opp("S01")))
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], first)
+        self.assertTrue(s._delivery_committed)
+
+        tasks = [{
+            "taskId": "T_LOCAL", "nodeId": "S03", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 600,
+        }]
+        later = s.decide(_inq(TOTAL_ROUNDS - 54, _me("S03"), _opp("S01"), tasks=tasks))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S04"}], later)
 
     def test_delivers_when_verified_at_terminal(self) -> None:
         s = _line_strategy(gate="S04")
