@@ -326,26 +326,27 @@ class BlockadeTests(unittest.TestCase):
 
     def test_late_delivery_miss_abandons_blocking(self) -> None:
         s = _line_strategy(gate="S04")
-        # very late: no time left to deliver or collect task score -> stop.
+        # very late: no time left to deliver or collect task score, but do not
+        # enter final waiting until RUSH_PROTECT is actually available/used.
         act = s.decide(_inq(TOTAL_ROUNDS - 5, _me("S01"), _opp("S01")))
         self.assertTrue(s._delivery_abandoned)
-        self.assertEqual([{"action": "WAIT"}], act)
+        self.assertEqual("MOVE", act[0]["action"])
 
     def test_unsecured_deny_abandons_after_delivery_decision_round(self) -> None:
         s = _line_strategy(gate="S04")
         # Once projected delivery is past 590 and no task score can still be
-        # collected, abandon delivery and stop.
+        # collected, do not enter final waiting until RUSH_PROTECT is used.
         act = s.decide(_inq(560, _me("S02"), _opp("S01")))
         self.assertTrue(s._delivery_abandoned)
-        self.assertEqual([{"action": "WAIT"}], act)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
     def test_late_delivery_miss_overrides_local_wait(self) -> None:
         s = _line_strategy(gate="S04")
-        # Once delivery is projected past the sprint window and no task score can
-        # still be collected, the abandoned-delivery plan waits.
+        # Once delivery is projected past the sprint window, the abandoned plan
+        # keeps moving until RUSH_PROTECT is actually used.
         act = s.decide(_inq(560, _me("S02"), _opp("S01")))
         self.assertTrue(s._delivery_abandoned)
-        self.assertEqual([{"action": "WAIT"}], act)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
     def test_task_mode_abandons_delivery_and_claims_local_task(self) -> None:
         s = _line_strategy(gate="S04")
@@ -1376,7 +1377,7 @@ class DeliveryAbandonTests(unittest.TestCase):
 
         self.assertEqual([{"action": "RUSH_PROTECT"}], act)
 
-    def test_abandoned_score_cap_waits_when_protect_is_unavailable(self) -> None:
+    def test_abandoned_score_cap_does_not_wait_until_protect_is_used(self) -> None:
         s = self._abandoned_branch_strategy()
 
         act = s.decide(_inq(
@@ -1386,7 +1387,7 @@ class DeliveryAbandonTests(unittest.TestCase):
             ), phase="RUSH"
         ))
 
-        self.assertEqual([{"action": "WAIT"}], act)
+        self.assertNotEqual([{"action": "WAIT"}], act)
 
 
 class RushTacticTests(unittest.TestCase):

@@ -1182,15 +1182,19 @@ class Strategy:
         ):
             return [M.wait()]
         if self._delivery_abandoned and self._task_base_score(me) >= ABANDONED_TASK_CAP:
-            return self._abandoned_score_cap_action(
+            protected = self._abandoned_score_cap_action(
                 me, opp, node, phase, round_no, nodes_by_id, weather
             )
-        if self._delivery_abandoned and not self._task_score_still_possible(
-            node, me, opp, tasks, nodes_by_id, round_no, weather
+            if protected:
+                return protected
+        if (
+            self._delivery_abandoned
+            and self._can_rush_protect(me, phase)
+            and not self._task_score_still_possible(
+                node, me, opp, tasks, nodes_by_id, round_no, weather
+            )
         ):
-            if self._can_rush_protect(me, phase):
-                return self._rush_protect_and_wait()
-            return [M.wait()]
+            return self._rush_protect_and_wait()
         task = self._claimable_task_here(node, tasks, me, round_no)
         if task is not None:
             return self._claim_task_action(task)
@@ -1216,7 +1220,7 @@ class Strategy:
     ):
         if self._can_rush_protect(me, phase):
             return self._rush_protect_and_wait()
-        return [M.wait()]
+        return []
 
     def _rush_protect_and_wait(self) -> list:
         self._rush_protect_final_wait = True
