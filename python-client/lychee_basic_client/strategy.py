@@ -32,8 +32,8 @@ TOTAL_ROUNDS = 600
 DELIVER_MARGIN = 5           # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
-DELIVERY_ABANDON_MARGIN = 10 # only stop forcing delivery once the ETA is this far
-                             # beyond the deadline; e.g. ETA=200 abandons at 410
+DELIVERY_ABANDON_MARGIN = 25 # only stop forcing delivery once the ETA is this far
+                             # beyond the deadline; e.g. ETA=200 abandons at 425
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
 DELIVER_FRAMES = 2           # move-into-terminal + DELIVER
 SCOUT_PROCESS_MIN_FRAMES = 2
@@ -1180,6 +1180,14 @@ class Strategy:
             return [M.wait()]
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
             return [M.process(node)]
+        if (
+            self._delivery_abandoned
+            and self._can_rush_protect(me, phase)
+            and not self._neighbor_op_fits_remaining(
+                node, me, tasks, nodes_by_id, round_no, weather
+            )
+        ):
+            return [M.rush_protect()]
         dest = self._best_task_waypoint(
             node, me, tasks, nodes_by_id, round_no, weather, opp=opp
         )
@@ -1349,6 +1357,43 @@ class Strategy:
             return False
         protected = task.get("protectionPlayerId", 0)
         return protected in (0, None, opp_id)
+
+    def _neighbor_op_fits_remaining(
+        self, node, me, tasks, nodes_by_id, round_no, weather=None
+    ) -> bool:
+        avoid = self._guard_blocked | self.route_avoid
+        if self._first_guard_node:
+            avoid = avoid | {self._first_guard_node}
+        for nxt, _rt, _dd in self.graph.adj.get(node, []):
+            if nxt in avoid:
+                continue
+            eta = self._eta_to_node(
+                me, nxt, nodes_by_id, round_no=round_no,
+                weather=weather, avoid=avoid
+            )
+            if eta == float("inf"):
+                continue
+            arrival_round = round_no + eta
+            for task in tasks:
+                if task.get("nodeId") != nxt or not self._task_claimable(task, me, round_no):
+                    continue
+                task_frames = self._task_process_frames(
+                    task, nodes_by_id, me, arrival_round, round_no
+                )
+                expire = int(task.get("expireRound", 0) or 0)
+                finish_round = arrival_round + task_frames
+                if finish_round < TOTAL_ROUNDS and (not expire or finish_round < expire):
+                    return True
+            stock = (nodes_by_id.get(nxt, {}) or {}).get("resourceStock") or {}
+            for resource_type, count in stock.items():
+                if int(count or 0) <= 0:
+                    continue
+                claim_frames = self._resource_claim_frames(
+                    nxt, resource_type, nodes_by_id, arrival_round, me, round_no
+                )
+                if arrival_round + claim_frames < TOTAL_ROUNDS:
+                    return True
+        return False
 
     def _best_ice_waypoint(self, node, me, opp, nodes_by_id, round_no, weather=None) -> Optional[str]:
         avoid = self._guard_blocked | self.route_avoid
