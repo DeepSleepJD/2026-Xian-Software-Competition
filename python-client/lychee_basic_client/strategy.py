@@ -624,6 +624,11 @@ class Strategy:
             bypassing = opp_is_moving and opp_next != node
         if not relevant:
             return []
+        if opp_node in behind and opp.get("state") == "FORCED_PASSING":
+            return self._advance_to(
+                self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+                round_no, weather
+            )
 
         lead = self._delivery_progress_lead(me, opp, node, my_delivery, round_no, nodes_by_id, weather)
         act = self._safe_op_here_with_lead(
