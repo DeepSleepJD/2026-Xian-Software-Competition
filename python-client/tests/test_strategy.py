@@ -75,6 +75,68 @@ class BlockadeTests(unittest.TestCase):
         act = s.decide(_inq(50, me, opp))
         self.assertNotIn("SET_GUARD", [a["action"] for a in act])
 
+    def test_process_node_beats_local_task_during_blockade_route(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S05", "S05"
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "S04", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S04", "toNodeId": "S05", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "S06", "routeType": "ROAD",
+             "distance": 12, "bidirectional": True},
+            {"fromNodeId": "S06", "toNodeId": "S05", "routeType": "ROAD",
+             "distance": 12, "bidirectional": True},
+        ])
+        s.chokes = s.graph.choke_points("S01", "S05")
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {},
+             "processRound": 7, "processType": "BOARD"},
+            {"nodeId": "S05", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S06", "hasObstacle": False, "resourceStock": {}},
+        ]
+        tasks = [{
+            "taskId": "T_DOCK", "nodeId": "S04", "taskTemplateId": "T08",
+            "processType": "CLAIM_TASK", "processRound": 4, "score": 30,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 220,
+        }]
+
+        act = s.decide(_inq(81, _me("S04"), _opp("S04"), nodes=nodes, tasks=tasks))
+
+        self.assertEqual([{"action": "PROCESS", "targetNodeId": "S04"}], act)
+
+    def test_local_task_needs_delivery_eta_lead_even_without_chokes(self) -> None:
+        s = Strategy(1001)
+        s.start_node, s.gate_node, s.terminal_node = "S01", "S04", "S04"
+        s.graph.load_edges([
+            {"fromNodeId": "S01", "toNodeId": "S02", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S02", "toNodeId": "S04", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "S03", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S03", "toNodeId": "S04", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        s.chokes = s.graph.choke_points("S01", "S04")
+        nodes = [
+            {"nodeId": n, "hasObstacle": False, "resourceStock": {}}
+            for n in ("S01", "S02", "S03", "S04")
+        ]
+        tasks = [{
+            "taskId": "T_LOCAL", "nodeId": "S02", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 30,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 220,
+        }]
+
+        act = s.decide(_inq(81, _me("S02"), _opp("S02"), nodes=nodes, tasks=tasks))
+
+        self.assertEqual([], s.chokes)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S04"}], act)
+
     def test_first_choke_failure_switches_to_task_priority(self) -> None:
         s = Strategy(1001)
         s.start_node, s.gate_node, s.terminal_node = "S01", "S04", "S04"
@@ -162,6 +224,28 @@ class BlockadeTests(unittest.TestCase):
         act = s.decide(_inq(70, _me("S03"), _opp("S01"), nodes=nodes, tasks=tasks))
 
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S03"}], act)
+
+    def test_farm_after_freeze_process_beats_local_task(self) -> None:
+        s = _line_strategy(gate="S04")
+        s._first_guard_node = "S02"
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {},
+             "guard": {"active": True, "ownerTeamId": "RED", "defense": 3}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {},
+             "processRound": 4, "processType": "TRANSFER"},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+        ]
+        tasks = [{
+            "taskId": "T_S03", "nodeId": "S03", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 30,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 200,
+        }]
+
+        act = s.decide(_inq(70, _me("S03"), _opp("S01"), nodes=nodes, tasks=tasks))
+
+        self.assertEqual([{"action": "PROCESS", "targetNodeId": "S03"}], act)
 
     def test_local_wait_overrides_farm_when_opponent_parks_next_door(self) -> None:
         # The freeze is placed, but an unsafe local task must not consume the

@@ -361,6 +361,13 @@ class Strategy:
                 return act
             return [M.wait()]
 
+        # Mandatory shared processing beats opportunistic local scoring. If we
+        # grab a task first at nodes like S04/S05, a rival can lock the process
+        # window and leave before us.
+        process = self._process_here_if_needed(node, nodes_by_id)
+        if process:
+            return process
+
         # a task / ice-box on the way -- but only with spare time: the op must NOT
         # let the opponent beat us to an unsecured choke, nor risk our own delivery.
         act = self._spare_op_here(node, me, opp, round_no, tasks, nodes_by_id, weather)
@@ -467,13 +474,30 @@ class Strategy:
 
     def _spare_for_op(self, node, me, opp, op_frames, round_no, nodes_by_id, weather=None) -> bool:
         """Spend op_frames at this node only with genuine spare time: the op must
-        not push us past our delivery deadline, and (before the blockade is
-        secured) must leave RACE_SAFETY frames of lead to the nearest choke we
-        still need AFTER paying for the op."""
+        not push us past our delivery deadline, must preserve a real delivery
+        ETA lead over any opponent who can still finish, and (before the
+        blockade is secured) must also leave RACE_SAFETY frames of lead to the
+        nearest choke we still need AFTER paying for the op."""
+        my_delivery = self._frames_to_deliver(
+            node, me, nodes_by_id, round_no, weather
+        )
         # (a) delivery must survive the op's time cost
-        if round_no + op_frames + self._frames_to_deliver(node, me, nodes_by_id, round_no, weather) + DELIVER_MARGIN >= TOTAL_ROUNDS:
+        if round_no + op_frames + my_delivery + DELIVER_MARGIN >= TOTAL_ROUNDS:
             return False
-        # (b) the choke race: the nearest choke ahead that the opponent must still
+
+        # (b) the delivery race: even without a graph cut-vertex, do not spend
+        # local frames unless we still lead the opponent's best finish ETA by
+        # enough to cover the op plus the standard setup/safety cushion.
+        if opp is not None:
+            lead = self._delivery_progress_lead(
+                me, opp, node, my_delivery, round_no, nodes_by_id, weather
+            )
+            if not self._op_fits_delivery_and_lead(
+                round_no, op_frames, my_delivery, lead
+            ):
+                return False
+
+        # (c) the choke race: the nearest choke ahead that the opponent must still
         # cross and we don't yet hold -- the op must not lose us that race
         if opp is None:
             return True
@@ -1180,6 +1204,10 @@ class Strategy:
             return self._abandoned_score_cap_action(
                 me, opp, node, phase, round_no, nodes_by_id, weather
             )
+        if not self._delivery_abandoned:
+            process = self._process_here_if_needed(node, nodes_by_id)
+            if process:
+                return process
         if self._delivery_abandoned:
             local = self._abandoned_local_op(node, me, tasks, nodes_by_id, round_no)
             if local is not None:
@@ -1195,8 +1223,9 @@ class Strategy:
                 return [M.claim_resource(node, ICE_BOX)]
         if node == self.gate_node and not me.get("verified") and phase != "RUSH":
             return [M.wait()]
-        if self._needs_process(node, nodes_by_id) and node not in self.processed:
-            return [M.process(node)]
+        process = self._process_here_if_needed(node, nodes_by_id)
+        if process:
+            return process
         if self._delivery_abandoned:
             dest = self._best_abandoned_waypoint(
                 node, me, opp, tasks, nodes_by_id, round_no, weather
@@ -1229,6 +1258,11 @@ class Strategy:
         task_id = task["taskId"]
         self._task_attempts[task_id] = self._task_attempts.get(task_id, 0) + 1
         return [M.claim_task(task_id)]
+
+    def _process_here_if_needed(self, node, nodes_by_id) -> Optional[list]:
+        if self._needs_process(node, nodes_by_id) and node not in self.processed:
+            return [M.process(node)]
+        return None
 
     def _abandoned_local_op(self, node, me, tasks, nodes_by_id, round_no) -> Optional[list]:
         """In abandoned-delivery mode, treat local task points and ice-box
