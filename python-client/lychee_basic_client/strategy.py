@@ -32,8 +32,6 @@ TOTAL_ROUNDS = 600
 DELIVER_MARGIN = 5           # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
-DELIVERY_ABANDON_MARGIN = 50 # only stop forcing delivery once the ETA is this far
-                             # beyond the deadline; e.g. ETA=200 abandons at 450
 DENY_DELIVER_MARGIN = 0      # no buffer while an unsecured blockade is the only thing
                              # preventing the opponent from finishing
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
@@ -213,6 +211,12 @@ class Strategy:
                 round_no, weather
             )
             return self._ordered_actions(main, squad, card)
+        if self._should_abandon_delivery(node, me, round_no, nodes_by_id, weather):
+            self._enter_task_priority(abandon_delivery=True)
+            main = self._task_priority_action(
+                me, node, state, phase, round_no, tasks, nodes_by_id, weather
+            )
+            return self._ordered_actions(main, squad, card)
 
         # RUSH_SPEED IS a main-car action and is only valid mid-move -> issue it (as THE
         # main action) while we're MOVING; never when idle/parked (invalid + wasted).
@@ -256,9 +260,6 @@ class Strategy:
                 round_no, weather
             )
             return self._ordered_actions(main, squad, card)
-
-        if self._should_abandon_delivery(node, me, round_no, nodes_by_id, weather):
-            self._enter_task_priority(abandon_delivery=True)
 
         if self._task_priority_mode:
             main = self._task_priority_action(
@@ -1183,6 +1184,8 @@ class Strategy:
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
             return [M.process(node)]
         dest = self._best_task_waypoint(node, me, tasks, nodes_by_id, round_no, weather)
+        if self._delivery_abandoned and dest is None:
+            return [M.wait()]
         return self._advance_to(
             dest or self.gate_node, me, node, state, phase, nodes_by_id, tasks,
             round_no, weather
@@ -1339,10 +1342,10 @@ class Strategy:
         return True
 
     def _should_abandon_delivery(self, node, me, round_no, nodes_by_id, weather=None) -> bool:
-        if self._delivery_abandoned or me.get("verified"):
+        if self._delivery_abandoned:
             return False
         need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
-        return round_no + need >= TOTAL_ROUNDS + DELIVERY_ABANDON_MARGIN
+        return round_no + need >= TOTAL_ROUNDS
 
     def _must_deliver(self, node, me, opp, round_no, nodes_by_id, weather=None) -> bool:
         if self._delivery_abandoned:
@@ -1350,7 +1353,7 @@ class Strategy:
         need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
         if need == float("inf"):
             return False
-        if round_no + need >= TOTAL_ROUNDS + DELIVERY_ABANDON_MARGIN:
+        if round_no + need >= TOTAL_ROUNDS:
             return False
         margin = DELIVER_MARGIN
         if self._deny_still_matters(node, opp, round_no, nodes_by_id, weather):

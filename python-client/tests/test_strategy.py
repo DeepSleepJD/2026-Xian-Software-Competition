@@ -324,11 +324,12 @@ class BlockadeTests(unittest.TestCase):
             act,
         )
 
-    def test_must_deliver_overrides_blocking_near_deadline(self) -> None:
+    def test_missed_delivery_abandons_blocking_near_deadline(self) -> None:
         s = _line_strategy(gate="S04")
-        # very late: no time left to keep blocking -> must move toward the gate
+        # very late: delivery can no longer finish, so stop forcing a doomed run.
         act = s.decide(_inq(TOTAL_ROUNDS - 5, _me("S01"), _opp("S01")))
-        self.assertEqual("MOVE", act[0]["action"])
+        self.assertTrue(s._delivery_abandoned)
+        self.assertEqual([{"action": "WAIT"}], act)
 
     def test_unsecured_deny_uses_hard_departure_not_delivery_buffer(self) -> None:
         s = _line_strategy(gate="S04")
@@ -345,7 +346,7 @@ class BlockadeTests(unittest.TestCase):
         act = s.decide(_inq(545, _me("S02"), _opp("S01")))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
-    def test_task_mode_must_deliver_before_claiming_local_task(self) -> None:
+    def test_task_mode_claims_local_task_after_delivery_missed(self) -> None:
         s = _line_strategy(gate="S04")
         s._task_priority_mode = True
         tasks = [{
@@ -357,7 +358,8 @@ class BlockadeTests(unittest.TestCase):
 
         act = s.decide(_inq(TOTAL_ROUNDS - 5, _me("S02"), _opp("S01"), tasks=tasks))
 
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
+        self.assertTrue(s._delivery_abandoned)
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_LATE"}], act)
 
     def test_delivers_when_verified_at_terminal(self) -> None:
         s = _line_strategy(gate="S04")
@@ -1095,13 +1097,14 @@ class OpeningContestTests(unittest.TestCase):
 
 
 class DeliveryAbandonTests(unittest.TestCase):
-    def test_eta_200_abandons_at_round_450_not_449(self) -> None:
-        # DELIVERY_ABANDON_MARGIN=50: ETA 200 abandons at 600+50-200 = round 450
+    def test_eta_200_abandons_at_round_400_not_399(self) -> None:
+        # Once the best delivery ETA reaches the 600-frame deadline, stop trying
+        # to force delivery and switch to score farming.
         s = Strategy(1001)
         s._frames_to_deliver = lambda *args, **kwargs: 200
 
-        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 449, {}))
-        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 450, {}))
+        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 399, {}))
+        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 400, {}))
 
     def test_switches_to_task_priority_when_delivery_eta_misses_deadline(self) -> None:
         s = Strategy(1001)
@@ -1268,8 +1271,15 @@ class GateAmbushTests(unittest.TestCase):
     def test_own_deadline_outranks_the_ambush(self) -> None:
         s = _line_strategy(gate="S04")
         me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=1)
-        act = s.decide(_inq(TOTAL_ROUNDS - 12, me, _opp("S02"), phase="RUSH"))
+        act = s.decide(_inq(TOTAL_ROUNDS - 21, me, _opp("S02"), phase="RUSH"))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S05"}], act)
+
+    def test_missed_deadline_abandons_gate_delivery(self) -> None:
+        s = _line_strategy(gate="S04")
+        me = _me("S04", verified=True, goodFruit=20, rushTacticUsedCount=1)
+        act = s.decide(_inq(TOTAL_ROUNDS - 12, me, _opp("S02"), phase="RUSH"))
+        self.assertTrue(s._delivery_abandoned)
+        self.assertEqual([{"action": "WAIT"}], act)
 
     def test_still_camps_when_opponent_eta_misses_but_is_behind_gate(self) -> None:
         s = _line_strategy(gate="S04")
