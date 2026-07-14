@@ -209,6 +209,9 @@ class Strategy:
         # A hard delivery deadline beats ambushes and any remaining task farm.
         # Once it fires, latch the delivery run so a later ETA improvement cannot
         # send us back into task/resource opportunism.
+        if self._resume_delivery_if_reachable(node, me, round_no, nodes_by_id, weather):
+            self._delivery_committed = True
+
         if self._must_deliver(node, me, opp, round_no, nodes_by_id, weather):
             self._delivery_committed = True
 
@@ -1501,6 +1504,20 @@ class Strategy:
         need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
         return round_no + need > DELIVERY_ABANDON_ROUND
 
+    def _resume_delivery_if_reachable(self, node, me, round_no, nodes_by_id, weather=None) -> bool:
+        if not self._delivery_abandoned or me.get("verified"):
+            return False
+        need = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
+        projected = round_no + need
+        if (
+            need == float("inf")
+            or projected > DELIVERY_ABANDON_ROUND
+            or projected < DELIVERY_SPRINT_START_ROUND - DELIVER_MARGIN
+        ):
+            return False
+        self._delivery_abandoned = False
+        return True
+
     def _must_deliver(self, node, me, opp, round_no, nodes_by_id, weather=None) -> bool:
         if self._delivery_abandoned:
             return False
@@ -1551,22 +1568,100 @@ class Strategy:
         return to_gate + verify + to_term + DELIVER_FRAMES
 
     def _frames_to_deliver(self, node, me, nodes_by_id, round_no=0, weather=None) -> float:
-        to_gate = 0 if me.get("verified") else self._route_frames(
-            node, self.gate_node, me, nodes_by_id, round_no=round_no,
-            weather=weather, weather_base_round=round_no
+        actor = self._actor_for_eta_node(node, me)
+        to_gate = 0 if actor.get("verified") else self._route_frames_from_actor(
+            actor, self.gate_node, nodes_by_id, round_no=round_no, weather=weather
         )
         if to_gate == float("inf"):
             return float("inf")
-        verify = 0 if me.get("verified") else self._verify_frames(
-            me, nodes_by_id, round_no + to_gate, round_no
+        verify = 0 if actor.get("verified") else self._verify_frames(
+            actor, nodes_by_id, round_no + to_gate, round_no
         )
-        start = self.gate_node if not me.get("verified") else node
-        to_term = self._route_frames(
-            start, self.terminal_node, me, nodes_by_id,
-            round_no=round_no + to_gate + verify, weather=weather,
-            weather_base_round=round_no
-        )
+        if actor.get("verified"):
+            to_term = self._route_frames_from_actor(
+                actor, self.terminal_node, nodes_by_id, round_no=round_no,
+                weather=weather
+            )
+        else:
+            to_term = self._route_frames(
+                self.gate_node, self.terminal_node, actor, nodes_by_id,
+                round_no=round_no + to_gate + verify, weather=weather,
+                weather_base_round=round_no
+            )
         return to_gate + verify + to_term + DELIVER_FRAMES
+
+    @staticmethod
+    def _actor_for_eta_node(node, actor):
+        if not node or node == actor.get("currentNodeId"):
+            return actor
+        hypothetical = dict(actor)
+        hypothetical["currentNodeId"] = node
+        hypothetical["state"] = "IDLE"
+        hypothetical["routeEdgeId"] = None
+        hypothetical["nextNodeId"] = None
+        for key in ("edgeProgressMs", "edgeTotalMs", "edgeProgressPermille", "moveProgress"):
+            hypothetical.pop(key, None)
+        return hypothetical
+
+    def _route_frames_from_actor(
+        self, actor, dst, nodes_by_id, avoid=None, obstacles=None,
+        round_no=0, weather=None, weather_base_round=None,
+        process_destination=True
+    ) -> float:
+        src = actor.get("currentNodeId")
+        if not src:
+            return float("inf")
+        next_node = actor.get("nextNodeId")
+        if not actor.get("routeEdgeId") or not next_node:
+            return self._route_frames(
+                src, dst, actor, nodes_by_id, avoid=avoid, obstacles=obstacles,
+                round_no=round_no, weather=weather,
+                weather_base_round=weather_base_round,
+                process_destination=process_destination
+            )
+
+        if weather_base_round is None:
+            weather_base_round = round_no
+        avoid = avoid or set()
+        if next_node in avoid:
+            return float("inf")
+        edge = self._edge_info(src, next_node)
+        if edge is None:
+            return self._route_frames(
+                src, dst, actor, nodes_by_id, avoid=avoid, obstacles=obstacles,
+                round_no=round_no, weather=weather,
+                weather_base_round=weather_base_round,
+                process_destination=process_destination
+            )
+        route_type, distance = edge
+        remaining = self._remaining_edge_required(actor, route_type, distance)
+        horse, horse_left, held = self._initial_horse_state(actor)
+        edge_frames, horse, horse_left, held = self._travel_required_frames(
+            remaining, route_type, horse, horse_left, held, round_no, weather,
+            weather_base_round
+        )
+        process_frames = 0
+        if process_destination or next_node != dst:
+            process_frames = self._process_frames(
+                next_node, nodes_by_id, round_no + edge_frames, weather,
+                weather_base_round, actor
+            )
+            horse, horse_left = self._spend_horse_wait(
+                horse, horse_left, process_frames
+            )
+        if next_node == dst:
+            return edge_frames + process_frames
+
+        actor_at_next = self._actor_after_travel(
+            actor, next_node, horse, horse_left, held
+        )
+        rest = self._route_frames(
+            next_node, dst, actor_at_next, nodes_by_id, avoid=avoid,
+            obstacles=obstacles, round_no=round_no + edge_frames + process_frames,
+            weather=weather, weather_base_round=weather_base_round,
+            process_destination=process_destination
+        )
+        return edge_frames + process_frames + rest
 
     # ---- context-aware routing ----
     def _route_frames(

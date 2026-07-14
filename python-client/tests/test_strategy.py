@@ -402,6 +402,18 @@ class BlockadeTests(unittest.TestCase):
         self.assertTrue(s._delivery_abandoned)
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_LOCAL"}], later)
 
+    def test_abandoned_delivery_recovers_when_eta_becomes_reachable(self) -> None:
+        s = _line_strategy(gate="S04")
+        s._task_priority_mode = True
+        s._delivery_abandoned = True
+        s._frames_to_deliver = lambda *args, **kwargs: 100
+
+        act = s.decide(_inq(470, _me("S03"), _opp("S01")))
+
+        self.assertFalse(s._delivery_abandoned)
+        self.assertTrue(s._delivery_committed)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S04"}], act)
+
     def test_delivers_when_verified_at_terminal(self) -> None:
         s = _line_strategy(gate="S04")
         me = _me("S05", verified=True, currentNodeId="S05")
@@ -1025,6 +1037,28 @@ class RoutePlanTests(unittest.TestCase):
         }
 
         self.assertEqual(9, s._frames_to_deliver("S13", _me("S13"), nodes, 100))
+
+    def test_frames_to_deliver_counts_current_edge_progress(self) -> None:
+        s = _line_strategy(gate="S04")
+        nodes = {
+            n: {"nodeId": n, "hasObstacle": False, "resourceStock": {}}
+            for n in ("S01", "S02", "S03", "S04", "S05")
+        }
+
+        parked = s._frames_to_deliver("S02", _me("S02"), nodes, 400)
+        moving = s._frames_to_deliver(
+            "S02",
+            _me(
+                "S02", state="MOVING", routeEdgeId="E02", nextNodeId="S03",
+                edgeProgressPermille=500,
+            ),
+            nodes,
+            400,
+        )
+        at_next = s._frames_to_deliver("S03", _me("S03"), nodes, 400)
+
+        self.assertLess(moving, parked)
+        self.assertGreater(moving, at_next)
 
     def test_active_weather_remain_round_uses_original_base_round(self) -> None:
         s = Strategy(1001)
