@@ -1200,9 +1200,6 @@ class Strategy:
             and self._can_rush_protect(me, phase)
             and self._needs_process(node, nodes_by_id)
             and node not in self.processed
-            and not self._opponent_can_score_task_after_yield(
-                opp, node, tasks, nodes_by_id, round_no, phase, weather
-            )
         ):
             return [M.rush_protect()]
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
@@ -1500,83 +1497,6 @@ class Strategy:
             weather=weather, avoid=self._my_active_guards(nodes_by_id)
         )
         return opp_eta != float("inf") and opp_eta < our_eta
-
-    def _opponent_can_score_task_after_yield(
-        self, opp, yielded_process_node, tasks, nodes_by_id, round_no,
-        phase, weather=None
-    ) -> bool:
-        """Whether yielding the current process race still lets the opponent score.
-
-        Opening RUSH_PROTECT consumes the main action.  At an unprocessed shared
-        node that hands the exclusive process lock to the opponent, so include
-        that process time before estimating their quickest still-claimable task.
-        Use an available RUSH_SPEED optimistically: if even that route misses the
-        deadline, protecting freshness is safe.
-        """
-        if opp is None or opp.get("retired") or opp.get("delivered"):
-            return False
-
-        actor = dict(opp)
-        delay = 0
-        if (
-            yielded_process_node
-            and actor.get("currentNodeId") == yielded_process_node
-            and not actor.get("routeEdgeId")
-        ):
-            delay += self._process_frames(
-                yielded_process_node, nodes_by_id, round_no, weather,
-                round_no, actor
-            )
-
-        if (
-            phase == "RUSH"
-            and int(actor.get("rushTacticUsedCount", 0) or 0) == 0
-            and int(actor.get("goodFruit", 0) or 0) >= 2
-            and not self._active_horse(actor)
-        ):
-            buffs = list(actor.get("buffs") or [])
-            buffs.append({"type": RUSH_SPEED, "remainingRound": HORSE_DURATION[RUSH_SPEED]})
-            actor["buffs"] = buffs
-            delay += 1  # RUSH_SPEED itself occupies one main-action round
-
-        start_round = round_no + delay
-        avoid = self._my_active_guards(nodes_by_id)
-        for task in tasks:
-            if (
-                not task.get("active")
-                or task.get("completed")
-                or task.get("failed")
-                or int(task.get("score", 0) or 0) <= 0
-                or not self._opponent_can_claim_task(task, actor)
-            ):
-                continue
-            if task.get("taskTemplateId") == "T06" and self._held_horse(actor) is None:
-                continue
-            target = task.get("nodeId")
-            if not target:
-                continue
-            eta = self._eta_to_node(
-                actor, target, nodes_by_id, round_no=start_round,
-                weather=weather, avoid=avoid
-            )
-            if eta == float("inf"):
-                continue
-            task_start = start_round + eta
-            task_frames = self._task_process_frames(
-                task, nodes_by_id, actor, task_start, round_no
-            )
-            # A process issued on round N with K frames completes during round
-            # N + K - 1; N + K is merely the first round where the actor is idle
-            # again.  Task expiry and the match deadline compare against the
-            # completion event round, not that following idle round.
-            completion_round = task_start + max(1, task_frames) - 1
-            expire = int(task.get("expireRound", 0) or 0)
-            if (
-                completion_round < TOTAL_ROUNDS
-                and (not expire or completion_round < expire)
-            ):
-                return True
-        return False
 
     def _neighbor_op_fits_remaining(
         self, node, me, tasks, nodes_by_id, round_no, weather=None

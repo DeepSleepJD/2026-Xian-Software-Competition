@@ -1294,65 +1294,6 @@ class DeliveryAbandonTests(unittest.TestCase):
 
         self.assertEqual([{"action": "RUSH_PROTECT"}], act)
 
-    def test_abandoned_unprocessed_node_keeps_contesting_while_opponent_can_score(self) -> None:
-        s = self._abandoned_branch_strategy()
-        nodes = self._branch_nodes()
-        nodes[0]["processRound"] = 4
-        tasks = [{
-            "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
-            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
-            "active": True, "completed": False, "failed": False,
-            "ownerPlayerId": 0, "expireRound": 600,
-        }]
-
-        act = s.decide(_inq(
-            500, _me("S01", rushTacticUsedCount=0, goodFruit=20),
-            _opp("S01", rushTacticUsedCount=0, goodFruit=20),
-            nodes=nodes, tasks=tasks, phase="RUSH"
-        ))
-
-        self.assertEqual([{"action": "PROCESS", "targetNodeId": "S01"}], act)
-
-    def test_opponent_task_finishing_round_before_expiry_is_still_feasible(self) -> None:
-        s = self._abandoned_branch_strategy()
-        nodes = self._branch_nodes()
-        nodes[0]["processRound"] = 4
-        task = {
-            "taskId": "T_BOUNDARY", "nodeId": "A", "taskTemplateId": "T02",
-            "processType": "STATION_PROCESS", "processRound": 4, "score": 30,
-            "active": True, "completed": False, "failed": False,
-            "ownerPlayerId": 0, "expireRound": 540,
-        }
-        s._eta_to_node = lambda *args, **kwargs: 24
-
-        can_score = s._opponent_can_score_task_after_yield(
-            _opp("S01", rushTacticUsedCount=0, goodFruit=20),
-            "S01", [task], {n["nodeId"]: n for n in nodes}, 507, "RUSH"
-        )
-
-        # PROCESS S01: 507-510, RUSH_SPEED: 511, travel: 512-535,
-        # task: 536-539.  expireRound=540 therefore still permits the score.
-        self.assertTrue(can_score)
-
-    def test_abandoned_unprocessed_node_protects_when_opponent_cannot_finish_task(self) -> None:
-        s = self._abandoned_branch_strategy()
-        nodes = self._branch_nodes()
-        nodes[0]["processRound"] = 4
-        tasks = [{
-            "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
-            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
-            "active": True, "completed": False, "failed": False,
-            "ownerPlayerId": 0, "expireRound": 600,
-        }]
-
-        act = s.decide(_inq(
-            590, _me("S01", rushTacticUsedCount=0, goodFruit=20),
-            _opp("S01", rushTacticUsedCount=0, goodFruit=20),
-            nodes=nodes, tasks=tasks, phase="RUSH"
-        ))
-
-        self.assertEqual([{"action": "RUSH_PROTECT"}], act)
-
     def test_abandoned_late_node_keeps_chasing_neighbor_task_when_it_fits(self) -> None:
         s = self._abandoned_branch_strategy()
         tasks = [{
