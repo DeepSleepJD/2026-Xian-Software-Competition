@@ -49,7 +49,7 @@ RACE_SAFETY = 8              # lead margin that must REMAIN after paying an op's
                              # are simulated -- so this only covers guard-setup jitter)
 FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before arrival
 TASK_BASE_TARGET = 130       # enough to fill delivery/task milestones; then deliver
-ABANDONED_TASK_CAP = 80      # without delivery, task score is capped at 80
+ABANDONED_TASK_CAP = 90      # after delivery is abandoned, stop chasing tasks here
 TASK_FRAME_SCORE_COST = 0.12 # rough score lost per extra task-detour frame
 ICE_BOX = "ICE_BOX"
 RUSH_PROTECT = "RUSH_PROTECT"
@@ -1180,14 +1180,19 @@ class Strategy:
             return self._abandoned_score_cap_action(
                 me, opp, node, phase, round_no, nodes_by_id, weather
             )
-        task = self._claimable_task_here(node, tasks, me, round_no)
-        if task is not None:
-            return self._claim_task_action(task)
-        ice = self._ice_claim_frames_here(node, me, nodes_by_id, round_no)
-        if ice is not None and round_no + ice + self._frames_to_deliver(
-            node, me, nodes_by_id, round_no, weather
-        ) + DELIVER_MARGIN < TOTAL_ROUNDS:
-            return [M.claim_resource(node, ICE_BOX)]
+        if self._delivery_abandoned:
+            local = self._abandoned_local_op(node, me, tasks, nodes_by_id, round_no)
+            if local is not None:
+                return local
+        else:
+            task = self._claimable_task_here(node, tasks, me, round_no)
+            if task is not None:
+                return self._claim_task_action(task)
+            ice = self._ice_claim_frames_here(node, me, nodes_by_id, round_no)
+            if ice is not None and round_no + ice + self._frames_to_deliver(
+                node, me, nodes_by_id, round_no, weather
+            ) + DELIVER_MARGIN < TOTAL_ROUNDS:
+                return [M.claim_resource(node, ICE_BOX)]
         if node == self.gate_node and not me.get("verified") and phase != "RUSH":
             return [M.wait()]
         if (
@@ -1210,9 +1215,14 @@ class Strategy:
             )
         ):
             return [M.rush_protect()]
-        dest = self._best_task_waypoint(
-            node, me, tasks, nodes_by_id, round_no, weather, opp=opp
-        )
+        if self._delivery_abandoned:
+            dest = self._best_abandoned_waypoint(
+                node, me, opp, tasks, nodes_by_id, round_no, weather
+            )
+        else:
+            dest = self._best_task_waypoint(
+                node, me, tasks, nodes_by_id, round_no, weather, opp=opp
+            )
         return self._advance_to(
             dest or self.gate_node, me, node, state, phase, nodes_by_id, tasks,
             round_no, weather
@@ -1237,6 +1247,31 @@ class Strategy:
         task_id = task["taskId"]
         self._task_attempts[task_id] = self._task_attempts.get(task_id, 0) + 1
         return [M.claim_task(task_id)]
+
+    def _abandoned_local_op(self, node, me, tasks, nodes_by_id, round_no) -> Optional[list]:
+        """In abandoned-delivery mode, treat local task points and ice-box
+        freshness as peers. Pick the cheapest useful local action; task actions
+        disappear entirely once the abandoned task cap is reached."""
+        choices: list[tuple[int, int, list]] = []
+        if self._held_resource(me, ICE_BOX) and self._freshness(me) < 100:
+            choices.append((1, 0, [M.use_resource(ICE_BOX)]))
+
+        ice = self._ice_claim_frames_here(node, me, nodes_by_id, round_no)
+        if ice is not None:
+            choices.append((ice, 1, [M.claim_resource(node, ICE_BOX)]))
+
+        task = self._claimable_task_here(node, tasks, me, round_no)
+        if task is not None:
+            choices.append((
+                self._task_op_frames(task, me, round_no, nodes_by_id),
+                1,
+                self._claim_task_action(task),
+            ))
+
+        if not choices:
+            return None
+        choices.sort(key=lambda item: (item[0], item[1]))
+        return choices[0][2]
 
     def _claimable_task_here(self, node, tasks, me, round_no) -> Optional[dict[str, Any]]:
         if self._delivery_abandoned and self._task_base_score(me) >= ABANDONED_TASK_CAP:
@@ -1344,6 +1379,81 @@ class Strategy:
                 best_net = net
         return best_node
 
+    def _best_abandoned_waypoint(
+        self, node, me, opp, tasks, nodes_by_id, round_no, weather=None
+    ) -> Optional[str]:
+        avoid = self._guard_blocked | self.route_avoid
+        if self._first_guard_node:
+            avoid = avoid | {self._first_guard_node}
+
+        best: Optional[tuple[float, int, str]] = None
+
+        if self._task_base_score(me) < ABANDONED_TASK_CAP:
+            for task in tasks:
+                if not self._task_claimable(task, me, round_no):
+                    continue
+                target = task.get("nodeId")
+                if not target or target == node:
+                    continue
+                eta = self._eta_to_node(
+                    me, target, nodes_by_id, round_no=round_no,
+                    weather=weather, avoid=avoid
+                )
+                if eta == float("inf"):
+                    continue
+                if self._opponent_can_beat_us_to_task(
+                    task, opp, eta, nodes_by_id, round_no, weather
+                ):
+                    continue
+                task_frames = self._task_process_frames(
+                    task, nodes_by_id, me, round_no + eta, round_no
+                )
+                finish_round = round_no + eta + task_frames
+                expire = int(task.get("expireRound", 0) or 0)
+                if finish_round >= TOTAL_ROUNDS or (expire and finish_round >= expire):
+                    continue
+                best = self._prefer_abandoned_candidate(
+                    best, eta + task_frames, 1, target
+                )
+
+        for target, info in nodes_by_id.items():
+            if target == node:
+                continue
+            stock = (info or {}).get("resourceStock") or {}
+            if int(stock.get(ICE_BOX, 0) or 0) <= 0:
+                continue
+            eta = self._eta_to_node(
+                me, target, nodes_by_id, round_no=round_no,
+                weather=weather, avoid=avoid
+            )
+            if eta == float("inf"):
+                continue
+            if self._opponent_can_beat_us_to_ice(
+                target, opp, eta, nodes_by_id, round_no, weather
+            ):
+                continue
+            claim_frames = self._resource_claim_frames(
+                target, ICE_BOX, nodes_by_id, round_no + eta, me, round_no
+            )
+            finish_round = round_no + eta + claim_frames
+            if finish_round >= TOTAL_ROUNDS:
+                continue
+            best = self._prefer_abandoned_candidate(
+                best, eta + claim_frames, 1, target
+            )
+
+        return None if best is None else best[2]
+
+    @staticmethod
+    def _prefer_abandoned_candidate(
+        best: Optional[tuple[float, int, str]], total_frames: float,
+        priority: int, target: str
+    ) -> tuple[float, int, str]:
+        candidate = (total_frames, priority, target)
+        if best is None or candidate < best:
+            return candidate
+        return best
+
     def _task_value(self, task, me) -> float:
         score = float(task.get("score", 0) or 0)
         if self._delivery_abandoned:
@@ -1379,6 +1489,17 @@ class Strategy:
             return False
         protected = task.get("protectionPlayerId", 0)
         return protected in (0, None, opp_id)
+
+    def _opponent_can_beat_us_to_ice(
+        self, target, opp, our_eta, nodes_by_id, round_no, weather=None
+    ) -> bool:
+        if opp is None or opp.get("retired") or opp.get("delivered"):
+            return False
+        opp_eta = self._eta_to_node(
+            opp, target, nodes_by_id, round_no=round_no,
+            weather=weather, avoid=self._my_active_guards(nodes_by_id)
+        )
+        return opp_eta != float("inf") and opp_eta < our_eta
 
     def _opponent_can_score_task_after_yield(
         self, opp, yielded_process_node, tasks, nodes_by_id, round_no,

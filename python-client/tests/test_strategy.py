@@ -1369,7 +1369,7 @@ class DeliveryAbandonTests(unittest.TestCase):
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "A"}], act)
 
-    def test_abandoned_task_score_cap_uses_rush_protect_instead_of_more_tasks(self) -> None:
+    def test_abandoned_task_score_below_cap_still_chases_tasks(self) -> None:
         s = self._abandoned_branch_strategy()
         tasks = [{
             "taskId": "T_HERE", "nodeId": "S01", "taskTemplateId": "T02",
@@ -1383,13 +1383,29 @@ class DeliveryAbandonTests(unittest.TestCase):
             _opp("G"), nodes=self._branch_nodes(), tasks=tasks, phase="RUSH"
         ))
 
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_HERE"}], act)
+
+    def test_abandoned_task_score_cap_uses_rush_protect_instead_of_more_tasks(self) -> None:
+        s = self._abandoned_branch_strategy()
+        tasks = [{
+            "taskId": "T_HERE", "nodeId": "S01", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 590,
+        }]
+
+        act = s.decide(_inq(
+            500, _me("S01", taskScore=90, rushTacticUsedCount=0),
+            _opp("G"), nodes=self._branch_nodes(), tasks=tasks, phase="RUSH"
+        ))
+
         self.assertEqual([{"action": "RUSH_PROTECT"}], act)
 
     def test_abandoned_score_cap_uses_held_ice_box_after_protect(self) -> None:
         s = self._abandoned_branch_strategy()
 
         act = s.decide(_inq(
-            501, _me("S01", taskScore=80, rushTacticUsedCount=1,
+            501, _me("S01", taskScore=90, rushTacticUsedCount=1,
                      resources={"ICE_BOX": 1}, freshness=70),
             _opp("G"), nodes=self._branch_nodes(), phase="RUSH"
         ))
@@ -1400,7 +1416,7 @@ class DeliveryAbandonTests(unittest.TestCase):
         s = self._abandoned_branch_strategy()
 
         act = s.decide(_inq(
-            500, _me("S01", taskScore=80, rushTacticUsedCount=0,
+            500, _me("S01", taskScore=90, rushTacticUsedCount=0,
                      resources={"ICE_BOX": 1}, freshness=70),
             _opp("G"), nodes=self._branch_nodes(), phase="RUSH"
         ))
@@ -1411,13 +1427,30 @@ class DeliveryAbandonTests(unittest.TestCase):
         s = self._abandoned_branch_strategy()
 
         act = s.decide(_inq(
-            501, _me("S01", taskScore=80, rushTacticUsedCount=1),
+            501, _me("S01", taskScore=90, rushTacticUsedCount=1),
             _opp("A"), nodes=self._branch_nodes(
                 a_stock={"ICE_BOX": 1}, b_stock={"ICE_BOX": 1}
             ), phase="RUSH"
         ))
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], act)
+
+    def test_abandoned_mode_treats_ice_like_task_waypoint(self) -> None:
+        s = self._abandoned_branch_strategy()
+        tasks = [{
+            "taskId": "T_B", "nodeId": "B", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 590,
+        }]
+
+        act = s.decide(_inq(
+            500, _me("S01", taskScore=30, rushTacticUsedCount=1),
+            _opp("G"), nodes=self._branch_nodes(a_stock={"ICE_BOX": 1}),
+            tasks=tasks, phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "A"}], act)
 
 
 class RushTacticTests(unittest.TestCase):
