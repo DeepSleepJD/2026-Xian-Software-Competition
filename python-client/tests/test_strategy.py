@@ -1294,6 +1294,44 @@ class DeliveryAbandonTests(unittest.TestCase):
 
         self.assertEqual([{"action": "RUSH_PROTECT"}], act)
 
+    def test_abandoned_unprocessed_node_keeps_contesting_while_opponent_can_score(self) -> None:
+        s = self._abandoned_branch_strategy()
+        nodes = self._branch_nodes()
+        nodes[0]["processRound"] = 4
+        tasks = [{
+            "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 600,
+        }]
+
+        act = s.decide(_inq(
+            500, _me("S01", rushTacticUsedCount=0, goodFruit=20),
+            _opp("S01", rushTacticUsedCount=0, goodFruit=20),
+            nodes=nodes, tasks=tasks, phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "PROCESS", "targetNodeId": "S01"}], act)
+
+    def test_abandoned_unprocessed_node_protects_when_opponent_cannot_finish_task(self) -> None:
+        s = self._abandoned_branch_strategy()
+        nodes = self._branch_nodes()
+        nodes[0]["processRound"] = 4
+        tasks = [{
+            "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 600,
+        }]
+
+        act = s.decide(_inq(
+            590, _me("S01", rushTacticUsedCount=0, goodFruit=20),
+            _opp("S01", rushTacticUsedCount=0, goodFruit=20),
+            nodes=nodes, tasks=tasks, phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "RUSH_PROTECT"}], act)
+
     def test_abandoned_late_node_keeps_chasing_neighbor_task_when_it_fits(self) -> None:
         s = self._abandoned_branch_strategy()
         tasks = [{
