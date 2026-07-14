@@ -116,6 +116,7 @@ class Strategy:
         self._seen_weaken_orders: set[str] = set()
         self._reinforce_debt: dict[str, int] = {}
         self._scout_sent: set[str] = set()
+        self._abandoned_scout_enroute_sent: Optional[tuple[str, str]] = None
         self._guard_blocked: set[str] = set()   # enemy guards blocking us
         self.route_avoid: set[str] = set()       # nodes to route around (variants/testing)
         self._resource_claim_rounds: dict[tuple[str, str], int] = {}
@@ -1106,14 +1107,20 @@ class Strategy:
         self, node, me, opp, tasks, nodes_by_id, round_no=0, weather=None
     ) -> list:
         if not self._delivery_abandoned or not self._task_priority_mode:
+            self._abandoned_scout_enroute_sent = None
             return []
         if me.get("delivered") or me.get("retired"):
+            self._abandoned_scout_enroute_sent = None
             return []
 
         if not me.get("routeEdgeId") or not me.get("nextNodeId"):
+            self._abandoned_scout_enroute_sent = None
             return []
         target = me.get("nextNodeId")
         if not target or target == node:
+            return []
+        route_key = (me.get("routeEdgeId"), target)
+        if self._abandoned_scout_enroute_sent == route_key:
             return []
         if self._has_own_scout(target, nodes_by_id):
             return []
@@ -1132,6 +1139,7 @@ class Strategy:
         delay = self._squad_delay(node, target, me, nodes_by_id, round_no, weather)
         if not (delay <= eta <= delay + SCOUT_MARKER_LIFETIME):
             return []
+        self._abandoned_scout_enroute_sent = route_key
         self._scout_sent.add(target)
         return [M.squad_scout(target)]
 
