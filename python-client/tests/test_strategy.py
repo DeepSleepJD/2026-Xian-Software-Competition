@@ -1422,6 +1422,45 @@ class DeliveryAbandonTests(unittest.TestCase):
 
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_HERE"}], act)
 
+    def test_abandoned_local_op_prefers_ice_over_equal_frame_task(self) -> None:
+        s = self._abandoned_branch_strategy()
+        nodes = self._branch_nodes()
+        nodes[0]["resourceStock"] = {"ICE_BOX": 1}
+        tasks = [{
+            "taskId": "T_HERE", "nodeId": "S01", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 2, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 590,
+        }]
+
+        act = s.decide(_inq(
+            500, _me("S01", taskScore=10, rushTacticUsedCount=0),
+            _opp("G"), nodes=nodes, tasks=tasks, phase="RUSH"
+        ))
+
+        self.assertEqual(
+            [{"action": "CLAIM_RESOURCE", "targetNodeId": "S01",
+              "resourceType": "ICE_BOX"}],
+            act,
+        )
+
+    def test_abandoned_mode_scouts_selected_task_neighbor(self) -> None:
+        s = self._abandoned_branch_strategy()
+        tasks = [{
+            "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 5, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 590,
+        }]
+
+        act = s.decide(_inq(
+            500, _me("S01", taskScore=10, squadAvailable=1),
+            _opp("G"), nodes=self._branch_nodes(), tasks=tasks, phase="RUSH"
+        ))
+
+        self.assertEqual({"action": "MOVE", "targetNodeId": "A"}, act[0])
+        self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "A"}, act)
+
     def test_abandoned_task_score_cap_uses_rush_protect_instead_of_more_tasks(self) -> None:
         s = self._abandoned_branch_strategy()
         tasks = [{

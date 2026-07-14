@@ -839,6 +839,11 @@ class Strategy:
         reinforce = self._guard_reinforce_action(me, nodes_by_id)
         if reinforce:
             return reinforce
+        abandoned_scout = self._abandoned_scout_action(
+            node, me, opp, tasks, nodes_by_id, round_no, weather
+        )
+        if abandoned_scout:
+            return abandoned_scout
         obstacles = {nid for nid, n in nodes_by_id.items() if n.get("hasObstacle")}
         if squad_available >= 2:
             task_obstacle = self._post_freeze_task_obstacle(
@@ -1097,6 +1102,65 @@ class Strategy:
         self._scout_sent.add(target)
         return [M.squad_scout(target)]
 
+    def _abandoned_scout_action(
+        self, node, me, opp, tasks, nodes_by_id, round_no=0, weather=None
+    ) -> list:
+        if not self._delivery_abandoned or not self._task_priority_mode:
+            return []
+        if me.get("delivered") or me.get("retired"):
+            return []
+
+        target = me.get("nextNodeId")
+        if not target and not me.get("routeEdgeId"):
+            target = self._best_abandoned_waypoint(
+                node, me, opp, tasks, nodes_by_id, round_no, weather
+            )
+        if not target or target == node:
+            return []
+        if target in self._scout_sent or self._has_own_scout(target, nodes_by_id):
+            return []
+
+        saving = self._abandoned_scout_saving(
+            target, me, tasks, nodes_by_id, round_no
+        )
+        if saving <= 0:
+            return []
+        eta = self._eta_to_node(
+            me, target, nodes_by_id, round_no=round_no, weather=weather,
+            avoid=self._guard_blocked | self.route_avoid
+        )
+        if eta == float("inf"):
+            return []
+        delay = self._squad_delay(node, target, me, nodes_by_id, round_no, weather)
+        if not (delay <= eta <= delay + SCOUT_MARKER_LIFETIME):
+            return []
+        self._scout_sent.add(target)
+        return [M.squad_scout(target)]
+
+    def _abandoned_scout_saving(
+        self, target, me, tasks, nodes_by_id, round_no
+    ) -> int:
+        best = self._scout_saving_for_frames(
+            self._node_process_round(target, nodes_by_id)
+        )
+        if self._task_base_score(me) < ABANDONED_TASK_CAP:
+            for task in tasks:
+                if task.get("nodeId") != target:
+                    continue
+                if not self._task_claimable(task, me, round_no):
+                    continue
+                frames = self._task_process_frames(
+                    task, nodes_by_id, me, round_no, round_no
+                )
+                best = max(best, self._scout_saving_for_frames(frames))
+        stock = (nodes_by_id.get(target, {}) or {}).get("resourceStock") or {}
+        if int(stock.get(ICE_BOX, 0) or 0) > 0:
+            frames = self._resource_claim_frames(
+                target, ICE_BOX, nodes_by_id, round_no, me, round_no
+            )
+            best = max(best, self._scout_saving_for_frames(frames))
+        return best
+
     def _has_own_scout(self, node, nodes_by_id) -> bool:
         for marker in nodes_by_id.get(node, {}).get("scouted") or []:
             if marker.get("teamId") == self._my_team and int(marker.get("remainingTriggers", 1) or 0) > 0:
@@ -1279,7 +1343,7 @@ class Strategy:
 
         ice = self._ice_claim_frames_here(node, me, nodes_by_id, round_no)
         if ice is not None:
-            choices.append((ice, 1, [M.claim_resource(node, ICE_BOX)]))
+            choices.append((ice, 0, [M.claim_resource(node, ICE_BOX)]))
 
         task = self._claimable_task_here(node, tasks, me, round_no)
         if task is not None:
