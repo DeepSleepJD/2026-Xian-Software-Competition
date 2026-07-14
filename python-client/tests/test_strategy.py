@@ -1265,7 +1265,7 @@ class DeliveryAbandonTests(unittest.TestCase):
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], act)
 
-    def test_abandoned_late_node_uses_rush_protect_when_no_neighbor_op_fits(self) -> None:
+    def test_abandoned_late_node_moves_when_no_neighbor_op_fits_below_cap(self) -> None:
         s = self._abandoned_branch_strategy()
         tasks = [{
             "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
@@ -1275,24 +1275,24 @@ class DeliveryAbandonTests(unittest.TestCase):
         }]
 
         act = s.decide(_inq(
-            590, _me("S01", rushTacticUsedCount=0), _opp("G"),
+            590, _me("S01", taskScore=10, rushTacticUsedCount=0), _opp("G"),
             nodes=self._branch_nodes(b_stock={"ICE_BOX": 1}), tasks=tasks,
             phase="RUSH"
         ))
 
-        self.assertEqual([{"action": "RUSH_PROTECT"}], act)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "G"}], act)
 
-    def test_abandoned_unprocessed_node_uses_rush_protect_before_process(self) -> None:
+    def test_abandoned_unprocessed_node_processes_before_cap(self) -> None:
         s = self._abandoned_branch_strategy()
         nodes = self._branch_nodes()
         nodes[0]["processRound"] = 4
 
         act = s.decide(_inq(
-            500, _me("S01", rushTacticUsedCount=0), _opp("G"),
+            500, _me("S01", taskScore=10, rushTacticUsedCount=0), _opp("G"),
             nodes=nodes, phase="RUSH"
         ))
 
-        self.assertEqual([{"action": "RUSH_PROTECT"}], act)
+        self.assertEqual([{"action": "PROCESS", "targetNodeId": "S01"}], act)
 
     def test_abandoned_late_node_keeps_chasing_neighbor_task_when_it_fits(self) -> None:
         s = self._abandoned_branch_strategy()
@@ -1320,7 +1320,7 @@ class DeliveryAbandonTests(unittest.TestCase):
         }]
 
         act = s.decide(_inq(
-            500, _me("S01", taskScore=80, rushTacticUsedCount=0),
+            500, _me("S01", taskScore=79, rushTacticUsedCount=0),
             _opp("G"), nodes=self._branch_nodes(), tasks=tasks, phase="RUSH"
         ))
 
@@ -1336,7 +1336,7 @@ class DeliveryAbandonTests(unittest.TestCase):
         }]
 
         act = s.decide(_inq(
-            500, _me("S01", taskScore=90, rushTacticUsedCount=0),
+            500, _me("S01", taskScore=80, rushTacticUsedCount=0),
             _opp("G"), nodes=self._branch_nodes(), tasks=tasks, phase="RUSH"
         ))
 
@@ -1346,7 +1346,7 @@ class DeliveryAbandonTests(unittest.TestCase):
         s = self._abandoned_branch_strategy()
 
         act = s.decide(_inq(
-            501, _me("S01", taskScore=90, rushTacticUsedCount=1,
+            501, _me("S01", taskScore=80, rushTacticUsedCount=1,
                      resources={"ICE_BOX": 1}, freshness=70),
             _opp("G"), nodes=self._branch_nodes(), phase="RUSH"
         ))
@@ -1357,7 +1357,7 @@ class DeliveryAbandonTests(unittest.TestCase):
         s = self._abandoned_branch_strategy()
 
         act = s.decide(_inq(
-            500, _me("S01", taskScore=90, rushTacticUsedCount=0,
+            500, _me("S01", taskScore=80, rushTacticUsedCount=0,
                      resources={"ICE_BOX": 1}, freshness=70),
             _opp("G"), nodes=self._branch_nodes(), phase="RUSH"
         ))
@@ -1368,7 +1368,7 @@ class DeliveryAbandonTests(unittest.TestCase):
         s = self._abandoned_branch_strategy()
 
         act = s.decide(_inq(
-            501, _me("S01", taskScore=90, rushTacticUsedCount=1),
+            501, _me("S01", taskScore=80, rushTacticUsedCount=1),
             _opp("A"), nodes=self._branch_nodes(
                 a_stock={"ICE_BOX": 1}, b_stock={"ICE_BOX": 1}
             ), phase="RUSH"

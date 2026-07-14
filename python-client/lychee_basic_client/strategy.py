@@ -49,7 +49,7 @@ RACE_SAFETY = 8              # lead margin that must REMAIN after paying an op's
                              # are simulated -- so this only covers guard-setup jitter)
 FREEZE_SAFETY = 2            # extra edge-frame margin so the guard is up before arrival
 TASK_BASE_TARGET = 130       # enough to fill delivery/task milestones; then deliver
-ABANDONED_TASK_CAP = 90      # after delivery is abandoned, stop chasing tasks here
+ABANDONED_TASK_CAP = 80      # after delivery is abandoned, stop chasing tasks here
 TASK_FRAME_SCORE_COST = 0.12 # rough score lost per extra task-detour frame
 ICE_BOX = "ICE_BOX"
 RUSH_PROTECT = "RUSH_PROTECT"
@@ -1195,23 +1195,8 @@ class Strategy:
                 return [M.claim_resource(node, ICE_BOX)]
         if node == self.gate_node and not me.get("verified") and phase != "RUSH":
             return [M.wait()]
-        if (
-            self._delivery_abandoned
-            and self._can_rush_protect(me, phase)
-            and self._needs_process(node, nodes_by_id)
-            and node not in self.processed
-        ):
-            return [M.rush_protect()]
         if self._needs_process(node, nodes_by_id) and node not in self.processed:
             return [M.process(node)]
-        if (
-            self._delivery_abandoned
-            and self._can_rush_protect(me, phase)
-            and not self._neighbor_op_fits_remaining(
-                node, me, tasks, nodes_by_id, round_no, weather
-            )
-        ):
-            return [M.rush_protect()]
         if self._delivery_abandoned:
             dest = self._best_abandoned_waypoint(
                 node, me, opp, tasks, nodes_by_id, round_no, weather
