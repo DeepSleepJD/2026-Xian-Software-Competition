@@ -1135,13 +1135,13 @@ class DeliveryAbandonTests(unittest.TestCase):
             {"nodeId": "G", "hasObstacle": False, "resourceStock": {}},
         ]
 
-    def test_eta_200_abandons_at_round_425_not_424(self) -> None:
-        # DELIVERY_ABANDON_MARGIN=25: ETA 200 abandons at 600+25-200 = round 425
+    def test_eta_200_abandons_at_round_410_not_409(self) -> None:
+        # DELIVERY_ABANDON_MARGIN=10: ETA 200 abandons at 600+10-200 = round 410
         s = Strategy(1001)
         s._frames_to_deliver = lambda *args, **kwargs: 200
 
-        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 424, {}))
-        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 425, {}))
+        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 409, {}))
+        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 410, {}))
 
     def test_switches_to_task_priority_when_delivery_eta_misses_deadline(self) -> None:
         s = Strategy(1001)
