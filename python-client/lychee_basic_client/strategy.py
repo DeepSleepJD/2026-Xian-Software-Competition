@@ -29,7 +29,7 @@ from .contest import active_contest, pick_card
 from .graph import BASE_MOVE_PER_FRAME, Graph, ROUTE_COST_COEF
 
 TOTAL_ROUNDS = 600
-DELIVER_MARGIN = 10          # safety frames before the delivery deadline (covers the
+DELIVER_MARGIN = 5           # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
 DELIVERY_ABANDON_MARGIN = 50 # only stop forcing delivery once the ETA is this far
@@ -220,14 +220,20 @@ class Strategy:
             return self._ordered_actions([M.rush_speed()], squad, card)
 
         # Highest-priority local ambush: whenever we are already standing on a
-        # node the opponent is about to enter, arm it; if they are parked one hop
-        # away, hold our action until they commit or choose another direction.
+        # node the opponent is about to enter, arm it. If they are still behind a
+        # neighboring route node, the route-neighbor watch below decides whether
+        # to wait, take a safe local op, or keep moving.
         if not me.get("verified"):
             local_ambush = self._local_ambush_action(
                 me, opp, node, state, round_no, nodes_by_id, weather
             )
             if local_ambush:
                 return self._ordered_actions(local_ambush, squad, card)
+            watch = self._route_neighbor_watch_action(
+                me, opp, node, state, phase, round_no, tasks, nodes_by_id, weather
+            )
+            if watch:
+                return self._ordered_actions(watch, squad, card)
 
         # Endgame gate ambush: the gate is the one true cut-vertex before the
         # terminal (palace stations have branch bypasses), so while parked on it
@@ -504,8 +510,7 @@ class Strategy:
 
     def _local_ambush_action(self, me, opp, node, state, round_no, nodes_by_id, weather=None) -> list:
         """Global interception rule: if we reached a node before the opponent and
-        they are coming in with enough setup time, SET_GUARD. If they are waiting
-        on an adjacent node, wait them out and let the next frame decide."""
+        they are coming in with enough setup time, SET_GUARD."""
         if state in BUSY_STATES or not node:
             return []
         if me.get("routeEdgeId") or me.get("nextNodeId"):
@@ -527,8 +532,6 @@ class Strategy:
             self._guarded_round[node] = round_no
             return [M.set_guard(node, extra_good_fruit=self._local_guard_fruit(node, me))]
 
-        if self._opponent_waiting_adjacent_to(node, opp):
-            return [M.wait()]
         return []
 
     def _guard_active(self, node, nodes_by_id) -> bool:
@@ -544,17 +547,120 @@ class Strategy:
             return min(GATE_GUARD_EXTRA_FRUIT, self._guard_fruit(me))
         return self._guard_fruit(me)
 
-    def _opponent_waiting_adjacent_to(self, node, opp) -> bool:
-        if opp is None or opp.get("routeEdgeId") or opp.get("nextNodeId"):
-            return False
-        if opp.get("state") not in ("IDLE", "WAITING"):
-            return False
+    def _route_neighbor_watch_action(
+        self, me, opp, node, state, phase, round_no, tasks, nodes_by_id,
+        weather=None
+    ) -> list:
+        """Hold a route node while the opponent is still behind it.
+
+        A behind neighbor is defined by delivery ETA, not by hard-coded route
+        order: from that neighbor, finishing delivery is at least one guard
+        setup window slower than from our current node.
+        """
+        if state in BUSY_STATES or not node or node == self.terminal_node:
+            return []
+        if me.get("routeEdgeId") or me.get("nextNodeId") or me.get("verified"):
+            return []
+        if node == self._first_guard_node and self._we_hold(node, nodes_by_id):
+            return []
+        if opp is None or opp.get("delivered") or opp.get("retired"):
+            return []
+
+        my_delivery = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
+        if my_delivery == float("inf"):
+            return []
+        if round_no + my_delivery + DELIVER_MARGIN >= TOTAL_ROUNDS:
+            return []
+
+        behind = self._behind_neighbors(node, me, nodes_by_id, round_no, weather)
+        if not behind:
+            return []
+
         opp_node = opp.get("currentNodeId")
-        return bool(
-            opp_node
-            and self._edge_info(opp_node, node) is not None
-            and self._ahead_of(node, opp)
+        opp_next = opp.get("nextNodeId")
+        opp_is_moving = bool(opp.get("routeEdgeId") or opp_next)
+        relevant = False
+        bypassing = False
+        if opp_is_moving and opp_next in behind:
+            relevant = True
+        elif opp_node in behind:
+            relevant = True
+            bypassing = opp_is_moving and opp_next != node
+        if not relevant:
+            return []
+
+        lead = self._delivery_progress_lead(me, opp, node, my_delivery, round_no, nodes_by_id, weather)
+        act = self._safe_op_here_with_lead(
+            node, me, opp, round_no, tasks, nodes_by_id, my_delivery, lead, weather
         )
+        if act:
+            return act
+        if bypassing:
+            return self._advance_to(
+                self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+                round_no, weather
+            )
+        return [M.wait()]
+
+    def _behind_neighbors(self, node, me, nodes_by_id, round_no=0, weather=None) -> set[str]:
+        current_eta = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)
+        if current_eta == float("inf"):
+            return set()
+        threshold = GUARD_SETUP_FRAMES + FREEZE_SAFETY
+        behind: set[str] = set()
+        for nxt, _rt, _dd in self.graph.adj.get(node, []):
+            if nxt == self.terminal_node:
+                continue
+            eta = self._frames_to_deliver(nxt, me, nodes_by_id, round_no, weather)
+            if eta != float("inf") and eta - current_eta > threshold:
+                behind.add(nxt)
+        return behind
+
+    def _delivery_progress_lead(
+        self, me, opp, node, my_delivery, round_no, nodes_by_id, weather=None
+    ) -> float:
+        opp_delivery = self._opponent_frames_to_deliver(
+            opp, nodes_by_id, round_no, weather
+        )
+        if opp_delivery == float("inf"):
+            return float("inf")
+        return opp_delivery - my_delivery
+
+    def _safe_op_here_with_lead(
+        self, node, me, opp, round_no, tasks, nodes_by_id, my_delivery, lead,
+        weather=None
+    ) -> Optional[list]:
+        task = self._claimable_task_here(node, tasks, me, round_no)
+        if task is not None:
+            frames = self._task_op_frames(task, me, round_no, nodes_by_id)
+            if self._op_fits_delivery_and_lead(round_no, frames, my_delivery, lead) \
+                    and self._spare_for_op(node, me, opp, frames, round_no, nodes_by_id, weather):
+                return self._claim_task_action(task)
+
+        ice = self._ice_claim_frames_here(node, me, nodes_by_id, round_no)
+        if ice is not None and self._op_fits_delivery_and_lead(round_no, ice, my_delivery, lead) \
+                and self._spare_for_op(node, me, opp, ice, round_no, nodes_by_id, weather):
+            return [M.claim_resource(node, ICE_BOX)]
+
+        horse = self._claimable_horse_for_wait(node, me, nodes_by_id)
+        if horse is not None:
+            frames = self._resource_claim_frames(
+                node, horse, nodes_by_id, round_no, me, round_no
+            )
+            if self._op_fits_delivery_and_lead(round_no, frames, my_delivery, lead) \
+                    and self._spare_for_op(node, me, opp, frames, round_no, nodes_by_id, weather):
+                return [M.claim_resource(node, horse)]
+        return None
+
+    @staticmethod
+    def _op_fits_delivery_and_lead(round_no, op_frames, my_delivery, lead) -> bool:
+        if round_no + op_frames + my_delivery + DELIVER_MARGIN >= TOTAL_ROUNDS:
+            return False
+        return lead > op_frames + GUARD_SETUP_FRAMES + FREEZE_SAFETY
+
+    def _claimable_horse_for_wait(self, node, me, nodes_by_id) -> Optional[str]:
+        active, _left, held = self._initial_horse_state(me)
+        return self._claimable_horse(node, nodes_by_id, tuple(), active, held)
 
     # ---- guard reinforcement ----
     def _account_enemy_weakens(self, events, nodes_by_id) -> None:
@@ -981,15 +1087,6 @@ class Strategy:
             if w["type"] == "MOUNTAIN_FOG" and w["region"] in (None, "ALL", "MOUNTAIN"):
                 return True
         return False
-
-    def _ahead_of(self, node, opp) -> bool:
-        """True if we're closer to the gate (in frames) than the opponent."""
-        if opp is None:
-            return True
-        opp_node = opp.get("currentNodeId")
-        if not opp_node:
-            return True
-        return self.graph.path_frames(node, self.gate_node) < self.graph.path_frames(opp_node, self.gate_node)
 
     # ---- navigation ----
     def _advance_to(

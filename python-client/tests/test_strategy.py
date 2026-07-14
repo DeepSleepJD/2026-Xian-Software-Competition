@@ -164,9 +164,8 @@ class BlockadeTests(unittest.TestCase):
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S03"}], act)
 
     def test_local_wait_overrides_farm_when_opponent_parks_next_door(self) -> None:
-        # The freeze is placed, but the global local-ambush rule still wins:
-        # when the opponent waits one hop behind us, we wait for their departure
-        # instead of taking a local task.
+        # The freeze is placed, but an unsafe local task must not consume the
+        # guard window while the opponent waits one hop behind us.
         s = _line_strategy(gate="S04")
         s._first_guard_node = "S02"
         nodes = [
@@ -186,6 +185,51 @@ class BlockadeTests(unittest.TestCase):
         act = s.decide(_inq(70, _me("S03"), _opp("S02"), nodes=nodes, tasks=tasks))
 
         self.assertEqual([{"action": "WAIT"}], act)
+
+    def test_watches_when_opponent_moves_to_behind_neighbor(self) -> None:
+        s = _line_strategy(gate="S04")
+        nodes = [
+            {"nodeId": n, "hasObstacle": False, "resourceStock": {}}
+            for n in ("S01", "S02", "S03", "S04", "S05")
+        ]
+        opp = _opp("S01", state="MOVING", routeEdgeId="E01",
+                   nextNodeId="S02", edgeProgressPermille=0)
+
+        act = s.decide(_inq(70, _me("S03"), opp, nodes=nodes))
+
+        self.assertEqual([{"action": "WAIT"}], act)
+
+    def test_watches_and_claims_safe_task_when_opponent_moves_to_behind_neighbor(self) -> None:
+        s = _line_strategy(gate="S04")
+        nodes = [
+            {"nodeId": n, "hasObstacle": False, "resourceStock": {}}
+            for n in ("S01", "S02", "S03", "S04", "S05")
+        ]
+        task = {
+            "taskId": "T_S03", "nodeId": "S03", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 30,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 200,
+        }
+        opp = _opp("S01", state="MOVING", routeEdgeId="E01",
+                   nextNodeId="S02", edgeProgressPermille=0)
+
+        act = s.decide(_inq(70, _me("S03"), opp, nodes=nodes, tasks=[task]))
+
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S03"}], act)
+
+    def test_moves_on_when_behind_neighbor_opponent_bypasses_without_safe_op(self) -> None:
+        s = _line_strategy(gate="S04")
+        nodes = [
+            {"nodeId": n, "hasObstacle": False, "resourceStock": {}}
+            for n in ("S01", "S02", "S03", "S04", "S05")
+        ]
+        opp = _opp("S02", state="MOVING", routeEdgeId="E10",
+                   nextNodeId="S01", edgeProgressPermille=0)
+
+        act = s.decide(_inq(70, _me("S03"), opp, nodes=nodes))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S04"}], act)
 
     def test_local_ambush_reguards_after_freeze_when_opponent_commits_to_us(self) -> None:
         # The old fire-and-forget plan would keep walking here; the always-on
@@ -298,7 +342,7 @@ class BlockadeTests(unittest.TestCase):
         s = _line_strategy(gate="S04")
         # Once the latest safe departure arrives, we leave even if an adjacent
         # opponent could be baited into a local ambush.
-        act = s.decide(_inq(540, _me("S02"), _opp("S01")))
+        act = s.decide(_inq(545, _me("S02"), _opp("S01")))
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
     def test_task_mode_must_deliver_before_claiming_local_task(self) -> None:
