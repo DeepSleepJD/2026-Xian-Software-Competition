@@ -589,6 +589,11 @@ class Strategy:
             bypassing = opp_is_moving and opp_next != node
         if not relevant:
             return []
+        if self._opponent_forced_passing_from_behind(opp, behind):
+            return self._advance_to(
+                self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+                round_no, weather
+            )
 
         lead = self._delivery_progress_lead(me, opp, node, my_delivery, round_no, nodes_by_id, weather)
         act = self._safe_op_here_with_lead(
@@ -602,6 +607,15 @@ class Strategy:
                 round_no, weather
             )
         return [M.wait()]
+
+    @staticmethod
+    def _opponent_forced_passing_from_behind(opp, behind: set[str]) -> bool:
+        if opp.get("currentNodeId") not in behind:
+            return False
+        if opp.get("state") == "FORCED_PASSING":
+            return True
+        proc = opp.get("currentProcess") or {}
+        return proc.get("action") == "FORCED_PASS" or proc.get("processType") == "FORCED_PASS"
 
     def _behind_neighbors(self, node, me, nodes_by_id, round_no=0, weather=None) -> set[str]:
         current_eta = self._frames_to_deliver(node, me, nodes_by_id, round_no, weather)

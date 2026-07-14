@@ -231,6 +231,19 @@ class BlockadeTests(unittest.TestCase):
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S04"}], act)
 
+    def test_moves_on_when_behind_neighbor_force_passes_after_contest_loss(self) -> None:
+        s = _line_strategy(gate="S04")
+        nodes = [
+            {"nodeId": n, "hasObstacle": False, "resourceStock": {}}
+            for n in ("S01", "S02", "S03", "S04", "S05")
+        ]
+        opp = _opp("S02", state="FORCED_PASSING", routeEdgeId="P1",
+                   nextNodeId="S03", edgeProgressPermille=0)
+
+        act = s.decide(_inq(70, _me("S03"), opp, nodes=nodes))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S04"}], act)
+
     def test_local_ambush_reguards_after_freeze_when_opponent_commits_to_us(self) -> None:
         # The old fire-and-forget plan would keep walking here; the always-on
         # local ambush must arm our current node if the opponent commits into it.
