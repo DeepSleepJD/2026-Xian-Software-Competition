@@ -1444,7 +1444,7 @@ class DeliveryAbandonTests(unittest.TestCase):
             act,
         )
 
-    def test_abandoned_mode_scouts_selected_task_neighbor(self) -> None:
+    def test_abandoned_mode_does_not_scout_selected_neighbor_before_moving(self) -> None:
         s = self._abandoned_branch_strategy()
         tasks = [{
             "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
@@ -1459,6 +1459,42 @@ class DeliveryAbandonTests(unittest.TestCase):
         ))
 
         self.assertEqual({"action": "MOVE", "targetNodeId": "A"}, act[0])
+        self.assertNotIn({"action": "SQUAD_SCOUT", "targetNodeId": "A"}, act)
+
+    def test_abandoned_mode_scouts_next_node_while_moving_to_it(self) -> None:
+        s = self._abandoned_branch_strategy()
+        tasks = [{
+            "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 5, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 590,
+        }]
+
+        act = s.decide(_inq(
+            501, _me("S01", state="MOVING", routeEdgeId="E01",
+                     nextNodeId="A", taskScore=10, squadAvailable=1),
+            _opp("G"), nodes=self._branch_nodes(), tasks=tasks, phase="RUSH"
+        ))
+
+        self.assertEqual({"action": "MOVE", "targetNodeId": "A"}, act[0])
+        self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "A"}, act)
+
+    def test_abandoned_mode_rescouts_next_node_after_prior_dispatch_expired(self) -> None:
+        s = self._abandoned_branch_strategy()
+        s._scout_sent.add("A")
+        tasks = [{
+            "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 5, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 590,
+        }]
+
+        act = s.decide(_inq(
+            501, _me("S01", state="MOVING", routeEdgeId="E01",
+                     nextNodeId="A", taskScore=10, squadAvailable=1),
+            _opp("G"), nodes=self._branch_nodes(), tasks=tasks, phase="RUSH"
+        ))
+
         self.assertIn({"action": "SQUAD_SCOUT", "targetNodeId": "A"}, act)
 
     def test_abandoned_task_score_cap_uses_rush_protect_instead_of_more_tasks(self) -> None:

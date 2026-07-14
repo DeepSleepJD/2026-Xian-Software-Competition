@@ -1110,14 +1110,12 @@ class Strategy:
         if me.get("delivered") or me.get("retired"):
             return []
 
+        if not me.get("routeEdgeId") or not me.get("nextNodeId"):
+            return []
         target = me.get("nextNodeId")
-        if not target and not me.get("routeEdgeId"):
-            target = self._best_abandoned_waypoint(
-                node, me, opp, tasks, nodes_by_id, round_no, weather
-            )
         if not target or target == node:
             return []
-        if target in self._scout_sent or self._has_own_scout(target, nodes_by_id):
+        if self._has_own_scout(target, nodes_by_id):
             return []
 
         saving = self._abandoned_scout_saving(
