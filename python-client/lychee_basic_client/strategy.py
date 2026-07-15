@@ -125,6 +125,7 @@ class Strategy:
         self._task_priority_mode = False
         self._delivery_abandoned = False
         self._delivery_committed = False
+        self._opp_used_rush_speed = False
         self.task_base = 0
         self._counted_tasks: set[str] = set()
         self._task_attempts: dict[str, int] = {}
@@ -175,14 +176,16 @@ class Strategy:
         contests = inquire_data.get("contests", [])
         weather = inquire_data.get("weather", {})
         nodes_by_id = {n["nodeId"]: n for n in inquire_data.get("nodes", [])}
+        events = inquire_data.get("events") or []
 
         if node != self._last_node:
             self.processed.clear()
             self._last_node = node
-        self._account_process(inquire_data.get("events") or [])
+        self._account_process(events)
         self._my_team = me.get("teamId")
         self._guard_blocked = self._enemy_guards(nodes_by_id)
-        self._account_enemy_weakens(inquire_data.get("events") or [], nodes_by_id)
+        self._account_enemy_weakens(events, nodes_by_id)
+        self._account_opp_rush_speed(opp, events or inquire_data.get("messages") or [])
         self._update_start_flags(me, opp)
         self._account_tasks(tasks)
         self._latest_tasks = tasks
@@ -1270,6 +1273,12 @@ class Strategy:
         delivery buffer, then complete delivery."""
         if state in BUSY_STATES:
             return []
+        if (
+            self._delivery_abandoned
+            and self._opp_used_rush_speed
+            and self._rush_speed_action(me, state, phase)
+        ):
+            return [M.rush_speed()]
         if me.get("routeEdgeId") and me.get("nextNodeId"):
             return self._advance_to(
                 self.gate_node, me, node, state, phase, nodes_by_id, tasks,
@@ -1691,6 +1700,23 @@ class Strategy:
             ):
                 self._counted_tasks.add(task_id)
                 self.task_base += int(task.get("score", 0) or 0)
+
+    def _account_opp_rush_speed(self, opp, events) -> None:
+        if opp is None:
+            return
+        if self._active_buff(opp, RUSH_SPEED):
+            self._opp_used_rush_speed = True
+            return
+        opp_id = opp.get("playerId") or opp.get("id")
+        for event in events:
+            payload = event.get("payload") or {}
+            if event.get("type") != "RUSH_TACTIC_USE":
+                continue
+            if payload.get("playerId") != opp_id:
+                continue
+            if payload.get("rushTactic") == RUSH_SPEED:
+                self._opp_used_rush_speed = True
+                return
 
     # ---- delivery-time safety ----
     def _rush_speed_action(self, me, state, phase) -> bool:

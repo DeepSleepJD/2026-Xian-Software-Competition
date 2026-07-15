@@ -1664,6 +1664,44 @@ class DeliveryAbandonTests(unittest.TestCase):
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "S03"}], act)
 
+    def test_abandoned_mode_mirrors_opponent_rush_speed_once_recorded(self) -> None:
+        s = self._abandoned_branch_strategy()
+        first = _inq(
+            500, _me("S01", taskScore=10, rushTacticUsedCount=0),
+            _opp("G"), nodes=self._branch_nodes(), phase="RUSH"
+        )
+        first["events"] = [{
+            "type": "RUSH_TACTIC_USE",
+            "payload": {"playerId": 2002, "rushTactic": "RUSH_SPEED"},
+        }]
+        s.decide(first)
+
+        act = s.decide(_inq(
+            501, _me("S01", state="MOVING", routeEdgeId="E01",
+                     nextNodeId="A", taskScore=10, rushTacticUsedCount=0,
+                     goodFruit=20, buffs=[]),
+            _opp("G"), nodes=self._branch_nodes(), phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "RUSH_SPEED"}], act)
+
+    def test_abandoned_mode_does_not_mirror_opponent_rush_protect(self) -> None:
+        s = self._abandoned_branch_strategy()
+        inquire = _inq(
+            501, _me("S01", state="MOVING", routeEdgeId="E01",
+                     nextNodeId="A", taskScore=10, rushTacticUsedCount=0,
+                     goodFruit=20, buffs=[]),
+            _opp("G"), nodes=self._branch_nodes(), phase="RUSH"
+        )
+        inquire["events"] = [{
+            "type": "RUSH_TACTIC_USE",
+            "payload": {"playerId": 2002, "rushTactic": "RUSH_PROTECT"},
+        }]
+
+        act = s.decide(inquire)
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "A"}], act)
+
 
 class RushTacticTests(unittest.TestCase):
     def test_uses_rush_speed_as_soon_as_rush_phase_allows_it(self) -> None:
