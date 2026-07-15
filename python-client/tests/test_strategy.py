@@ -459,7 +459,7 @@ class BlockadeTests(unittest.TestCase):
 
     def test_unsecured_deny_abandons_after_delivery_decision_round(self) -> None:
         s = _line_strategy(gate="S04")
-        # Once projected delivery is past 590, abandon delivery even if an
+        # Once projected delivery is past 595, abandon delivery even if an
         # unsecured blockade could still matter.
         act = s.decide(_inq(560, _me("S02"), _opp("S01")))
         self.assertTrue(s._delivery_abandoned)
@@ -522,7 +522,7 @@ class BlockadeTests(unittest.TestCase):
             "active": True, "completed": False, "failed": False,
             "ownerPlayerId": 0, "expireRound": 600,
         }]
-        later = s.decide(_inq(566, _me("S03"), _opp("S01"), tasks=tasks))
+        later = s.decide(_inq(571, _me("S03"), _opp("S01"), tasks=tasks))
 
         self.assertFalse(s._delivery_committed)
         self.assertTrue(s._delivery_abandoned)
@@ -1322,12 +1322,12 @@ class DeliveryAbandonTests(unittest.TestCase):
         ]
 
     def test_eta_200_abandons_after_sprint_window(self) -> None:
-        # DELIVERY_ABANDON_ROUND=590: ETA 200 abandons once round + ETA > 590.
+        # DELIVERY_ABANDON_ROUND=595: ETA 200 abandons once round + ETA > 595.
         s = Strategy(1001)
         s._frames_to_deliver = lambda *args, **kwargs: 200
 
-        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 390, {}))
-        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 391, {}))
+        self.assertFalse(s._should_abandon_delivery("S01", _me("S01"), 395, {}))
+        self.assertTrue(s._should_abandon_delivery("S01", _me("S01"), 396, {}))
 
     def test_switches_to_task_priority_when_delivery_eta_misses_deadline(self) -> None:
         s = Strategy(1001)
@@ -1369,7 +1369,7 @@ class DeliveryAbandonTests(unittest.TestCase):
             rushTacticUsedCount=0, buffs=[]
         )
 
-        act = s.decide(_inq(471, me, _opp("G"), nodes=self._branch_nodes(), phase="RUSH"))
+        act = s.decide(_inq(476, me, _opp("G"), nodes=self._branch_nodes(), phase="RUSH"))
 
         self.assertTrue(s._delivery_abandoned)
         self.assertEqual([{"action": "MOVE", "targetNodeId": "A"}], act)
