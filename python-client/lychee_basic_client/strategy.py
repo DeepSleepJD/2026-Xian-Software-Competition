@@ -33,7 +33,7 @@ DELIVER_MARGIN = 30          # safety frames before the delivery deadline (cover
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
 DELIVERY_SPRINT_START_ROUND = 580 # projected delivery round: <580 keep playing
-DELIVERY_ABANDON_ROUND = 595      # 580..595 hard-commit, >595 abandon for tasks
+DELIVERY_ABANDON_ROUND = 600      # 580..600 hard-commit, >595 abandon for tasks
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
 DELIVER_FRAMES = 2           # move-into-terminal + DELIVER
 SCOUT_PROCESS_MIN_FRAMES = 2
