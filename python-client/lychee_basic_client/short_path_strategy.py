@@ -16,7 +16,7 @@ class ShortPathStrategy:
     class thin lets the branch stay isolated without duplicating routing logic.
     """
 
-    MAX_PATH_NODES = 4
+    MAX_PATH_NODES = 5
 
     def __init__(self, opening_path: list[str]) -> None:
         self.opening_path = opening_path
