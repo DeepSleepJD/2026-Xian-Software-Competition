@@ -1391,7 +1391,7 @@ class DeliveryAbandonTests(unittest.TestCase):
 
         self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], act)
 
-    def test_abandoned_late_node_moves_when_no_neighbor_op_fits_below_cap(self) -> None:
+    def test_abandoned_late_node_moves_to_nearest_neighbor_when_no_op_fits(self) -> None:
         s = self._abandoned_branch_strategy()
         tasks = [{
             "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
@@ -1406,7 +1406,23 @@ class DeliveryAbandonTests(unittest.TestCase):
             phase="RUSH"
         ))
 
-        self.assertEqual([{"action": "MOVE", "targetNodeId": "G"}], act)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "A"}], act)
+
+    def test_abandoned_mode_falls_back_to_neutral_neighbor_when_profit_is_lost(self) -> None:
+        s = self._abandoned_branch_strategy()
+        tasks = [{
+            "taskId": "T_A", "nodeId": "A", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 60,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 590,
+        }]
+
+        act = s.decide(_inq(
+            500, _me("S01", taskScore=10, rushTacticUsedCount=0), _opp("A"),
+            nodes=self._branch_nodes(), tasks=tasks, phase="RUSH"
+        ))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], act)
 
     def test_abandoned_unprocessed_node_processes_before_cap(self) -> None:
         s = self._abandoned_branch_strategy()

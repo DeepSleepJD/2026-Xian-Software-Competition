@@ -1497,6 +1497,7 @@ class Strategy:
             avoid = avoid | {self._first_guard_node}
 
         best: Optional[tuple[float, float, str]] = None
+        fallback: Optional[tuple[float, str]] = None
         seen: set[str] = set()
         for target, _route_type, _distance in self.graph.adj.get(node, []):
             if target in seen or target in avoid:
@@ -1512,6 +1513,9 @@ class Strategy:
                 target, opp, eta, nodes_by_id, round_no, weather
             ):
                 continue
+            fallback_candidate = (eta, target)
+            if fallback is None or fallback_candidate < fallback:
+                fallback = fallback_candidate
             value = self._abandoned_neighbor_value(
                 target, eta, me, opp, tasks, nodes_by_id, round_no, weather
             )
@@ -1521,7 +1525,9 @@ class Strategy:
             if best is None or candidate < best:
                 best = candidate
 
-        return None if best is None else best[2]
+        if best is not None:
+            return best[2]
+        return None if fallback is None else fallback[1]
 
     def _abandoned_neighbor_value(
         self, target, eta, me, opp, tasks, nodes_by_id, round_no, weather=None
