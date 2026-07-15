@@ -46,6 +46,161 @@ class ChokeSetupTests(unittest.TestCase):
         self.assertIn("S03", s.chokes)
 
 
+class ShortPathStrategyTests(unittest.TestCase):
+    def _start(self, edges):
+        return {
+            "map": {
+                "edges": edges,
+                "gameplay": {
+                    "roles": {
+                        "startNodeId": "S01",
+                        "gateNodeId": "S14",
+                        "terminalNodeIds": ["S15"],
+                    },
+                    "processNodes": [],
+                },
+            }
+        }
+
+    def _short_strategy(self, edges) -> Strategy:
+        s = Strategy(1001)
+        s.ingest_start(self._start(edges))
+        return s
+
+    def _nodes(self, *ids):
+        return [{"nodeId": nid, "hasObstacle": False, "resourceStock": {}} for nid in ids]
+
+    def test_short_path_branch_moves_directly_to_gate(self) -> None:
+        s = self._short_strategy([
+            {"fromNodeId": "S01", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S14", "toNodeId": "S15", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+
+        act = s.decide(_inq(1, _me("S01"), _opp("S01"), nodes=self._nodes("S01", "S14", "S15")))
+
+        self.assertIsNotNone(s._short_path_strategy)
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S14"}], act)
+
+    def test_long_path_does_not_enable_short_path_branch(self) -> None:
+        s = self._short_strategy([
+            {"fromNodeId": "S01", "toNodeId": "A", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "A", "toNodeId": "B", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "B", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S14", "toNodeId": "S15", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+
+        self.assertIsNone(s._short_path_strategy)
+
+    def test_short_path_claims_local_task_before_process(self) -> None:
+        s = self._short_strategy([
+            {"fromNodeId": "S01", "toNodeId": "X", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "X", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S14", "toNodeId": "S15", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        nodes = self._nodes("S01", "X", "S14", "S15")
+        nodes[1]["processRound"] = 4
+        nodes[1]["processType"] = "TRANSFER"
+        tasks = [{
+            "taskId": "T_X", "nodeId": "X", "taskTemplateId": "T02",
+            "processType": "STATION_PROCESS", "processRound": 3, "score": 30,
+            "active": True, "completed": False, "failed": False,
+            "ownerPlayerId": 0, "expireRound": 200,
+        }]
+
+        act = s.decide(_inq(20, _me("X"), _opp("S01"), nodes=nodes, tasks=tasks))
+
+        self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_X"}], act)
+
+    def test_short_path_force_passes_next_hop_enemy_guard(self) -> None:
+        s = self._short_strategy([
+            {"fromNodeId": "S01", "toNodeId": "A", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "A", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "B", "routeType": "ROAD",
+             "distance": 12, "bidirectional": True},
+            {"fromNodeId": "B", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 12, "bidirectional": True},
+            {"fromNodeId": "S14", "toNodeId": "S15", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        nodes = self._nodes("S01", "A", "B", "S14", "S15")
+        nodes[1]["guard"] = {"active": True, "ownerTeamId": "BLUE", "defense": 3}
+
+        act = s.decide(_inq(1, _me("S01"), _opp("S01"), nodes=nodes))
+
+        self.assertEqual([{"action": "FORCED_PASS", "targetNodeId": "A"}], act)
+
+    def test_short_path_detours_when_guard_appears_while_moving(self) -> None:
+        s = self._short_strategy([
+            {"fromNodeId": "S01", "toNodeId": "A", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "A", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "B", "routeType": "ROAD",
+             "distance": 12, "bidirectional": True},
+            {"fromNodeId": "B", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 12, "bidirectional": True},
+            {"fromNodeId": "S14", "toNodeId": "S15", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        nodes = self._nodes("S01", "A", "B", "S14", "S15")
+        nodes[1]["guard"] = {"active": True, "ownerTeamId": "BLUE", "defense": 3}
+        me = _me("S01", state="MOVING", routeEdgeId="E01", nextNodeId="A")
+
+        act = s.decide(_inq(2, me, _opp("S01"), nodes=nodes))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], act)
+
+    def test_short_path_moving_detour_uses_nearest_adjacent_not_replan(self) -> None:
+        s = self._short_strategy([
+            {"fromNodeId": "S01", "toNodeId": "A", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "A", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "B", "routeType": "ROAD",
+             "distance": 11, "bidirectional": True},
+            {"fromNodeId": "S01", "toNodeId": "C", "routeType": "ROAD",
+             "distance": 30, "bidirectional": True},
+            {"fromNodeId": "C", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S14", "toNodeId": "S15", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        nodes = self._nodes("S01", "A", "B", "C", "S14", "S15")
+        nodes[1]["guard"] = {"active": True, "ownerTeamId": "BLUE", "defense": 3}
+        me = _me("S01", state="MOVING", routeEdgeId="E01", nextNodeId="A")
+
+        act = s.decide(_inq(2, me, _opp("S01"), nodes=nodes))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "B"}], act)
+
+    def test_short_path_force_passes_enemy_guard_when_no_detour_exists(self) -> None:
+        s = self._short_strategy([
+            {"fromNodeId": "S01", "toNodeId": "A", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "A", "toNodeId": "S14", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+            {"fromNodeId": "S14", "toNodeId": "S15", "routeType": "ROAD",
+             "distance": 10, "bidirectional": True},
+        ])
+        nodes = self._nodes("S01", "A", "S14", "S15")
+        nodes[1]["guard"] = {"active": True, "ownerTeamId": "BLUE", "defense": 3}
+
+        act = s.decide(_inq(1, _me("S01"), _opp("S01"), nodes=nodes))
+
+        self.assertEqual([{"action": "FORCED_PASS", "targetNodeId": "A"}], act)
+
+
 class BlockadeTests(unittest.TestCase):
     def test_races_to_the_choke_first(self) -> None:
         s = _line_strategy(gate="S04")  # chokes S02(near gate first?)/S03

@@ -27,13 +27,14 @@ from typing import Any, Optional
 from . import messages as M
 from .contest import active_contest, pick_card
 from .graph import BASE_MOVE_PER_FRAME, Graph, ROUTE_COST_COEF
+from .short_path_strategy import ShortPathStrategy
 
 TOTAL_ROUNDS = 600
 DELIVER_MARGIN = 30          # safety frames before the delivery deadline (covers the
                              # obstacle clear-waits our frame estimate doesn't model, so
                              # camping on a choke never drags us past our own delivery)
 DELIVERY_SPRINT_START_ROUND = 580 # projected delivery round: <580 keep playing
-DELIVERY_ABANDON_ROUND = 600      # 580..600 hard-commit, >595 abandon for tasks
+DELIVERY_ABANDON_ROUND = 595      # 580..595 hard-commit, >595 abandon for tasks
 VERIFY_FRAMES = 6            # ~frames to VERIFY_GATE at the gate in RUSH
 DELIVER_FRAMES = 2           # move-into-terminal + DELIVER
 SCOUT_PROCESS_MIN_FRAMES = 2
@@ -131,6 +132,7 @@ class Strategy:
         self._task_attempts: dict[str, int] = {}
         self._opening_route_path: list[str] = []
         self._latest_tasks: list[dict[str, Any]] = []
+        self._short_path_strategy: Optional[ShortPathStrategy] = None
 
     # ---- setup ----
     def ingest_start(self, start_data: dict[str, Any]) -> None:
@@ -153,6 +155,9 @@ class Strategy:
                 )
         # chokes the opponent must cross, nearest the gate first (strongest to hold)
         self.chokes = self.graph.choke_points(self.start_node, self.gate_node)
+        self._short_path_strategy = ShortPathStrategy.from_path(
+            self.graph.shortest_path(self.start_node, self.terminal_node)
+        )
 
     # ---- per-frame ----
     def decide(self, inquire_data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -189,7 +194,8 @@ class Strategy:
         self._update_start_flags(me, opp)
         self._account_tasks(tasks)
         self._latest_tasks = tasks
-        self._maybe_choose_opening_route(me, node, round_no, tasks, nodes_by_id, weather)
+        if self._short_path_strategy is None:
+            self._maybe_choose_opening_route(me, node, round_no, tasks, nodes_by_id, weather)
 
         # Fire-and-forget: the freeze guard is ACTIVE -> the blockade did its job.
         # Never re-guard; farm forward tasks/resources and finish our own run.
@@ -209,6 +215,13 @@ class Strategy:
         # squad pre-clears obstacles ahead (separate quota) so the main car never
         # has to chain FORCED_PASS (two in a row are rejected: FORCED_PASS_REPEAT).
         squad = self._squad_action(node, me, opp, tasks, nodes_by_id, round_no, weather)
+
+        if self._short_path_strategy is not None:
+            main = self._short_path_strategy.decide(
+                self, me, opp, node, state, phase, round_no, tasks, nodes_by_id,
+                weather
+            )
+            return self._ordered_actions(main, squad, card)
 
         # A hard delivery deadline beats ambushes and any remaining task farm.
         # Once it fires, latch the delivery run so a later ETA improvement cannot
