@@ -302,6 +302,36 @@ class BlockadeTests(unittest.TestCase):
 
         self.assertEqual([{"action": "CLAIM_TASK", "taskId": "T_S03"}], act)
 
+    def test_processes_when_behind_neighbor_opponent_enters_too_late_to_guard(self) -> None:
+        s = _line_strategy(gate="S04")
+        nodes = [
+            {"nodeId": "S01", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S02", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S03", "hasObstacle": False, "resourceStock": {},
+             "processRound": 7, "processType": "BOARD"},
+            {"nodeId": "S04", "hasObstacle": False, "resourceStock": {}},
+            {"nodeId": "S05", "hasObstacle": False, "resourceStock": {}},
+        ]
+        opp = _opp("S02", state="MOVING", routeEdgeId="E02",
+                   nextNodeId="S03", edgeProgressPermille=950)
+
+        act = s.decide(_inq(70, _me("S03"), opp, nodes=nodes))
+
+        self.assertEqual([{"action": "PROCESS", "targetNodeId": "S03"}], act)
+
+    def test_advances_when_behind_neighbor_opponent_enters_too_late_without_process(self) -> None:
+        s = _line_strategy(gate="S04")
+        nodes = [
+            {"nodeId": n, "hasObstacle": False, "resourceStock": {}}
+            for n in ("S01", "S02", "S03", "S04", "S05")
+        ]
+        opp = _opp("S02", state="MOVING", routeEdgeId="E02",
+                   nextNodeId="S03", edgeProgressPermille=950)
+
+        act = s.decide(_inq(70, _me("S03"), opp, nodes=nodes))
+
+        self.assertEqual([{"action": "MOVE", "targetNodeId": "S04"}], act)
+
     def test_moves_on_when_behind_neighbor_opponent_bypasses_without_safe_op(self) -> None:
         s = _line_strategy(gate="S04")
         nodes = [

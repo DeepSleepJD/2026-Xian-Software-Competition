@@ -621,14 +621,24 @@ class Strategy:
         opp_is_moving = bool(opp.get("routeEdgeId") or opp_next)
         relevant = False
         bypassing = False
+        entering_current_from_behind = False
         if opp_is_moving and opp_next in behind:
             relevant = True
         elif opp_node in behind:
             relevant = True
             bypassing = opp_is_moving and opp_next != node
+            entering_current_from_behind = opp_is_moving and opp_next == node
         if not relevant:
             return []
         if opp_node in behind and opp.get("state") == "FORCED_PASSING":
+            return self._advance_to(
+                self.gate_node, me, node, state, phase, nodes_by_id, tasks,
+                round_no, weather
+            )
+        if entering_current_from_behind and not self._freeze_window_open(opp, node, round_no, weather):
+            process = self._process_here_if_needed(node, nodes_by_id)
+            if process:
+                return process
             return self._advance_to(
                 self.gate_node, me, node, state, phase, nodes_by_id, tasks,
                 round_no, weather
